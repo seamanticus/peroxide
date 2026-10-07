@@ -2,7 +2,7 @@
 //
 // Proton sometimes answers authentication requests with API error 9001,
 // asking for a CAPTCHA to be completed before the request can be replayed.
-// hydroxide doesn't bypass, solve or weaken that challenge: it points the
+// peroxide doesn't bypass, solve or weaken that challenge: it points the
 // user's own browser at the Proton-operated verification page, waits for the
 // user to complete it there, and then replays the authentication request with
 // the human verification headers Proton expects.
@@ -19,7 +19,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/emersion/hydroxide/protonmail"
+	"github.com/sail3r/peroxide/protonmail"
 )
 
 // Mode selects how the user is asked to complete a challenge.
@@ -165,7 +165,7 @@ func Authenticate(ctx context.Context, c Client, username, password string, opts
 		// The user confirmed without the challenge running locally: replay the
 		// bare token and let the API decide. It usually says no.
 		fmt.Fprintf(opts.Output, "warning: no challenge result was captured, only the bare challenge token can be replayed.\n"+
-			"This happens when the challenge didn't load in hydroxide's page and the fallback button was used.\n")
+			"This happens when the challenge didn't load in peroxide's page and the fallback button was used.\n")
 	}
 
 	auth, err = c.AuthWithVerification(username, password, nil, hv)

@@ -13,8 +13,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/nacl/secretbox"
 
-	"github.com/emersion/hydroxide/config"
-	"github.com/emersion/hydroxide/protonmail"
+	"github.com/sail3r/peroxide/config"
+	"github.com/sail3r/peroxide/protonmail"
 )
 
 func authFilePath() (string, error) {
@@ -133,7 +133,7 @@ func authenticate(c *protonmail.Client, cachedAuth *CachedAuth, username string)
 		if apiErr, ok := err.(*protonmail.APIError); ok && apiErr.IsHumanVerificationRequired() {
 			// Human verification can't be completed from a background
 			// session: it needs a browser and a human.
-			return nil, fmt.Errorf("cannot re-authenticate: Proton requires human verification, please run `hydroxide auth %v` again", username)
+			return nil, fmt.Errorf("cannot re-authenticate: Proton requires human verification, please run `peroxide auth %v` again", username)
 		} else if err != nil {
 			return nil, fmt.Errorf("cannot re-authenticate: %v", err)
 		}

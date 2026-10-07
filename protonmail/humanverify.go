@@ -25,7 +25,7 @@ const CaptchaMethod = "captcha"
 
 // HumanVerificationURL is the Proton-operated page on which challenges are
 // solved. The challenge itself is served, rendered and validated by Proton:
-// hydroxide only points the user's browser at it.
+// peroxide only points the user's browser at it.
 var HumanVerificationURL = "https://verify.proton.me/"
 
 // CaptchaEndpoint is the API host serving the CAPTCHA challenge itself.
@@ -56,7 +56,7 @@ var ErrNoHumanVerification = errors.New("protonmail: not a human verification er
 // HumanVerification describes a challenge the API wants a human to complete.
 //
 // Token is a one-shot challenge identifier. It is not a credential, but it is
-// never logged nor persisted by hydroxide.
+// never logged nor persisted by peroxide.
 type HumanVerification struct {
 	Methods []string `json:"HumanVerificationMethods"`
 	Token   string   `json:"HumanVerificationToken"`

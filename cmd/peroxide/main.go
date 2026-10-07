@@ -23,16 +23,15 @@ import (
 	"github.com/emersion/go-smtp"
 	"golang.org/x/term"
 
-	"github.com/emersion/hydroxide/auth"
-	"github.com/emersion/hydroxide/captcha"
-	"github.com/emersion/hydroxide/carddav"
-	"github.com/emersion/hydroxide/config"
-	"github.com/emersion/hydroxide/events"
-	"github.com/emersion/hydroxide/exports"
-	imapbackend "github.com/emersion/hydroxide/imap"
-	"github.com/emersion/hydroxide/imports"
-	"github.com/emersion/hydroxide/protonmail"
-	smtpbackend "github.com/emersion/hydroxide/smtp"
+	"github.com/sail3r/peroxide/auth"
+	"github.com/sail3r/peroxide/captcha"
+	"github.com/sail3r/peroxide/config"
+	"github.com/sail3r/peroxide/events"
+	"github.com/sail3r/peroxide/exports"
+	imapbackend "github.com/sail3r/peroxide/imap"
+	"github.com/sail3r/peroxide/imports"
+	"github.com/sail3r/peroxide/protonmail"
+	smtpbackend "github.com/sail3r/peroxide/smtp"
 )
 
 const (
@@ -83,7 +82,7 @@ func askPass(prompt string) ([]byte, error) {
 }
 
 func askBridgePass() (string, error) {
-	if v := os.Getenv("HYDROXIDE_BRIDGE_PASS"); v != "" {
+	if v := os.Getenv("PEROXIDE_BRIDGE_PASS"); v != "" {
 		return v, nil
 	}
 	b, err := askPass("Bridge password")
@@ -144,55 +143,6 @@ func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, even
 	return s.ListenAndServe()
 }
 
-func listenAndServeCardDAV(addr string, authManager *auth.Manager, eventsManager *events.Manager, tlsConfig *tls.Config) error {
-	handlers := make(map[string]http.Handler)
-
-	s := &http.Server{
-		Addr:      addr,
-		TLSConfig: tlsConfig,
-		Handler: http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-			resp.Header().Set("WWW-Authenticate", "Basic")
-
-			username, password, ok := req.BasicAuth()
-			if !ok {
-				resp.WriteHeader(http.StatusUnauthorized)
-				io.WriteString(resp, "Credentials are required")
-				return
-			}
-
-			c, privateKeys, err := authManager.Auth(username, password)
-			if err != nil {
-				if err == auth.ErrUnauthorized {
-					resp.WriteHeader(http.StatusUnauthorized)
-				} else {
-					resp.WriteHeader(http.StatusInternalServerError)
-				}
-				io.WriteString(resp, err.Error())
-				return
-			}
-
-			h, ok := handlers[username]
-			if !ok {
-				ch := make(chan *protonmail.Event)
-				eventsManager.Register(c, username, ch, nil)
-				h = carddav.NewHandler(c, privateKeys, ch)
-
-				handlers[username] = h
-			}
-
-			h.ServeHTTP(resp, req)
-		}),
-	}
-
-	if s.TLSConfig != nil {
-		log.Println("CardDAV server listening with TLS on", s.Addr)
-		return s.ListenAndServeTLS("", "")
-	}
-
-	log.Println("CardDAV server listening on", s.Addr)
-	return s.ListenAndServe()
-}
-
 func isMbox(br *bufio.Reader) (bool, error) {
 	prefix := []byte("From ")
 	b, err := br.Peek(len(prefix))
@@ -202,18 +152,17 @@ func isMbox(br *bufio.Reader) (bool, error) {
 	return bytes.Equal(b, prefix), nil
 }
 
-const usage = `usage: hydroxide [options...] <command>
+const usage = `usage: peroxide [options...] <command>
 Commands:
-	auth [options...] <username>	Login to ProtonMail via hydroxide
-	carddav			Run hydroxide as a CardDAV server
+	auth [options...] <username>	Login to ProtonMail via peroxide
 	export-secret-keys <username> Export secret keys
-	imap			Run hydroxide as an IMAP server
+	imap			Run peroxide as an IMAP server
 	import-messages <username> [file]	Import messages
 	export-messages [options...] <username>	Export messages
 	sendmail <username> -- <args...>	sendmail(1) interface
 	serve			Run all servers
-	smtp			Run hydroxide as an SMTP server
-	status			View hydroxide status
+	smtp			Run peroxide as an SMTP server
+	status			View peroxide status
 
 Global options:
 	-debug
@@ -223,23 +172,17 @@ Global options:
 	-app-version <version>
 		ProtonMail application version
 	-smtp-host example.com
-		Allowed SMTP email hostname on which hydroxide listens, defaults to 127.0.0.1
+		Allowed SMTP email hostname on which peroxide listens, defaults to 127.0.0.1
 	-imap-host example.com
-		Allowed IMAP email hostname on which hydroxide listens, defaults to 127.0.0.1
-	-carddav-host example.com
-		Allowed SMTP email hostname on which hydroxide listens, defaults to 127.0.0.1
+		Allowed IMAP email hostname on which peroxide listens, defaults to 127.0.0.1
 	-smtp-port example.com
-		SMTP port on which hydroxide listens, defaults to 1025
+		SMTP port on which peroxide listens, defaults to 1025
 	-imap-port example.com
-		IMAP port on which hydroxide listens, defaults to 1143
-	-carddav-port example.com
-		CardDAV port on which hydroxide listens, defaults to 8080
+		IMAP port on which peroxide listens, defaults to 1143
 	-disable-imap
-		Disable IMAP for hydroxide serve
+		Disable IMAP for peroxide serve
 	-disable-smtp
-		Disable SMTP for hydroxide serve
-	-disable-carddav
-		Disable CardDAV for hydroxide serve
+		Disable SMTP for peroxide serve
 	-tls-cert /path/to/cert.pem
 		Path to the certificate to use for incoming connections (Optional)
 	-tls-key /path/to/key.pem
@@ -262,7 +205,7 @@ Options for "auth":
 		/core/v4/captcha and the widget's assets under /captcha/v1/assets/
 
 Environment variables:
-	HYDROXIDE_BRIDGE_PASS	Don't prompt for the bridge password, use this variable instead
+	PEROXIDE_BRIDGE_PASS	Don't prompt for the bridge password, use this variable instead
 `
 
 func main() {
@@ -270,17 +213,13 @@ func main() {
 	flag.StringVar(&apiEndpoint, "api-endpoint", defaultAPIEndpoint, "ProtonMail API endpoint")
 	flag.StringVar(&appVersion, "app-version", defaultAppVersion, "ProtonMail app version")
 
-	smtpHost := flag.String("smtp-host", "127.0.0.1", "Allowed SMTP email hostname on which hydroxide listens, defaults to 127.0.0.1")
-	smtpPort := flag.String("smtp-port", "1025", "SMTP port on which hydroxide listens, defaults to 1025")
-	disableSMTP := flag.Bool("disable-smtp", false, "Disable SMTP for hydroxide serve")
+	smtpHost := flag.String("smtp-host", "127.0.0.1", "Allowed SMTP email hostname on which peroxide listens, defaults to 127.0.0.1")
+	smtpPort := flag.String("smtp-port", "1025", "SMTP port on which peroxide listens, defaults to 1025")
+	disableSMTP := flag.Bool("disable-smtp", false, "Disable SMTP for peroxide serve")
 
-	imapHost := flag.String("imap-host", "127.0.0.1", "Allowed IMAP email hostname on which hydroxide listens, defaults to 127.0.0.1")
-	imapPort := flag.String("imap-port", "1143", "IMAP port on which hydroxide listens, defaults to 1143")
-	disableIMAP := flag.Bool("disable-imap", false, "Disable IMAP for hydroxide serve")
-
-	carddavHost := flag.String("carddav-host", "127.0.0.1", "Allowed CardDAV email hostname on which hydroxide listens, defaults to 127.0.0.1")
-	carddavPort := flag.String("carddav-port", "8080", "CardDAV port on which hydroxide listens, defaults to 8080")
-	disableCardDAV := flag.Bool("disable-carddav", false, "Disable CardDAV for hydroxide serve")
+	imapHost := flag.String("imap-host", "127.0.0.1", "Allowed IMAP email hostname on which peroxide listens, defaults to 127.0.0.1")
+	imapPort := flag.String("imap-port", "1143", "IMAP port on which peroxide listens, defaults to 1143")
+	disableIMAP := flag.Bool("disable-imap", false, "Disable IMAP for peroxide serve")
 
 	tlsCert := flag.String("tls-cert", "", "Path to the certificate to use for incoming connections")
 	tlsCertKey := flag.String("tls-key", "", "Path to the certificate key to use for incoming connections")
@@ -318,7 +257,7 @@ func main() {
 		protonmail.CaptchaEndpoint = *captchaEndpoint
 		username := authCmd.Arg(0)
 		if username == "" {
-			log.Fatal("usage: hydroxide auth [options...] <username>")
+			log.Fatal("usage: peroxide auth [options...] <username>")
 		}
 
 		mode, err := captcha.ParseMode(captchaMode)
@@ -440,7 +379,7 @@ func main() {
 		exportSecretKeysCmd.Parse(flag.Args()[1:])
 		username := exportSecretKeysCmd.Arg(0)
 		if username == "" {
-			log.Fatal("usage: hydroxide export-secret-keys <username>")
+			log.Fatal("usage: peroxide export-secret-keys <username>")
 		}
 
 		bridgePassword, err := askBridgePass()
@@ -472,7 +411,7 @@ func main() {
 		username := importMessagesCmd.Arg(0)
 		archivePath := importMessagesCmd.Arg(1)
 		if username == "" {
-			log.Fatal("usage: hydroxide import-messages <username> [file]")
+			log.Fatal("usage: peroxide import-messages <username> [file]")
 		}
 
 		f := os.Stdin
@@ -523,7 +462,7 @@ func main() {
 		exportMessagesCmd.Parse(flag.Args()[1:])
 		username := exportMessagesCmd.Arg(0)
 		if (convID == "" && msgID == "") || username == "" {
-			log.Fatal("usage: hydroxide export-messages [-conversation-id <id>] [-message-id <id>] <username>")
+			log.Fatal("usage: peroxide export-messages [-conversation-id <id>] [-message-id <id>] <username>")
 		}
 
 		bridgePassword, err := askBridgePass()
@@ -561,20 +500,14 @@ func main() {
 		authManager := auth.NewManager(newClient)
 		eventsManager := events.NewManager()
 		log.Fatal(listenAndServeIMAP(addr, debug, authManager, eventsManager, tlsConfig))
-	case "carddav":
-		addr := *carddavHost + ":" + *carddavPort
-		authManager := auth.NewManager(newClient)
-		eventsManager := events.NewManager()
-		log.Fatal(listenAndServeCardDAV(addr, authManager, eventsManager, tlsConfig))
 	case "serve":
 		smtpAddr := *smtpHost + ":" + *smtpPort
 		imapAddr := *imapHost + ":" + *imapPort
-		carddavAddr := *carddavHost + ":" + *carddavPort
 
 		authManager := auth.NewManager(newClient)
 		eventsManager := events.NewManager()
 
-		done := make(chan error, 3)
+		done := make(chan error, 2)
 		if !*disableSMTP {
 			go func() {
 				done <- listenAndServeSMTP(smtpAddr, debug, authManager, tlsConfig)
@@ -585,16 +518,11 @@ func main() {
 				done <- listenAndServeIMAP(imapAddr, debug, authManager, eventsManager, tlsConfig)
 			}()
 		}
-		if !*disableCardDAV {
-			go func() {
-				done <- listenAndServeCardDAV(carddavAddr, authManager, eventsManager, tlsConfig)
-			}()
-		}
 		log.Fatal(<-done)
 	case "sendmail":
 		username := flag.Arg(1)
 		if username == "" || flag.Arg(2) != "--" {
-			log.Fatal("usage: hydroxide sendmail <username> -- <args...>")
+			log.Fatal("usage: peroxide sendmail <username> -- <args...>")
 		}
 
 		// TODO: other sendmail flags

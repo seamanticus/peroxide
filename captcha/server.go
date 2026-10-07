@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/emersion/hydroxide/protonmail"
+	"github.com/sail3r/peroxide/protonmail"
 )
 
 // stateLen is the length in bytes of the random, single-use session
@@ -364,7 +364,7 @@ const consoleSnippet = `window.top.addEventListener('message', function (e) { ` 
 	`var d = window.top.document, t = d.createElement('textarea'); t.value = e.data.token; ` +
 	`t.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:5rem;z-index:99999;font-size:16px'; ` +
 	`d.body.appendChild(t); t.focus(); t.select(); ` +
-	`console.error('HYDROXIDE TOKEN', e.data.token); });`
+	`console.error('PEROXIDE TOKEN', e.data.token); });`
 
 // originOf returns the scheme://host of a URL, used to check the origin of the
 // messages the challenge posts back.
@@ -390,7 +390,7 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>{{.Title}} — hydroxide</title>
+<title>{{.Title}} — peroxide</title>
 <style>
 body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
 a.button, button { display: inline-block; font: inherit; padding: .6rem 1rem; border: 1px solid #555; border-radius: .3rem; background: #f6f6f6; color: inherit; text-decoration: none; cursor: pointer; }
@@ -417,12 +417,12 @@ summary { cursor: pointer; }
 <h1>{{.Title}}</h1>
 {{if .Error}}
 <p class="error">{{.Error}}</p>
-<p class="note">Go back to your terminal and start <code>hydroxide auth</code> again.</p>
+<p class="note">Go back to your terminal and start <code>peroxide auth</code> again.</p>
 {{else if .Done}}
 <p>Thanks. You can close this tab and go back to your terminal.</p>
 {{else}}
 <p>Proton asked for human verification before this login can continue. The
-challenge is served and scored by Proton — hydroxide only carries its result
+challenge is served and scored by Proton — peroxide only carries its result
 back to the login request.</p>
 
 <p class="note">Proton only lets its own web apps embed the challenge, so it

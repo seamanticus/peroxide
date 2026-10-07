@@ -1,26 +1,11 @@
-# hydroxide
-
-[![Casual Maintenance Intended](https://casuallymaintained.tech/badge.svg)](https://casuallymaintained.tech/)
+# peroxide
 
 A third-party, open-source ProtonMail bridge. For power users only, designed to
-run on a server.
+run locally.
 
-> ### ⚠️ Heads up!
->
-> Upstream has [migrated to Codeberg](https://codeberg.org/emersion/hydroxide).
-
-> ### About this fork
->
-> Proton now answers many logins with a CAPTCHA challenge, which upstream
-> hydroxide can't complete — `hydroxide auth` just fails. This fork adds an
-> interactive flow for it, described under [Human verification](#human-verification).
->
-> It also fixes TLS ALPN negotiation for the IMAP and SMTP servers (they shared
-> the HTTP server's config, so clients offering `imap`/`smtp` were dropped during
-> the handshake) and stops `-debug` from printing passwords, SRP proofs, session
-> tokens and private keys to the log.
-
-hydroxide supports CardDAV, IMAP and SMTP.
+**Project scope**: peroxide is being reduced to a very simple and lightweight
+bridge to ProtonMail that only supports SMTP and IMAP — nothing more. Keeping
+the surface area small is the only way this bridge stays up to date.
 
 Rationale:
 
@@ -28,46 +13,39 @@ Rationale:
 * Standard-compliant (we don't care about Microsoft Outlook)
 * Fully open-source
 
-Feel free to join the IRC channel: #emersion on Libera Chat.
-
 ## How does it work?
 
-hydroxide is a server that translates standard protocols (SMTP, IMAP, CardDAV)
+peroxide is a server that translates standard protocols (SMTP and IMAP)
 into ProtonMail API requests. It allows you to use your preferred e-mail clients
 and `git-send-email` with ProtonMail.
 
     +-----------------+             +-------------+  ProtonMail  +--------------+
     |                 | IMAP, SMTP  |             |     API      |              |
-    |  E-mail client  <------------->  hydroxide  <-------------->  ProtonMail  |
+    |  E-mail client  <------------->  peroxide  <-------------->  ProtonMail  |
     |                 |             |             |              |              |
     +-----------------+             +-------------+              +--------------+
 
 ## Setup
 
-### Go
-
-hydroxide is implemented in Go. Head to [Go website](https://golang.org) for
-setup information.
-
 ### Installing
 
-Start by installing hydroxide:
+Start by installing peroxide:
 
 ```shell
-git clone https://github.com/Kin69/hydroxide-captcha-fix.git
-cd hydroxide-captcha-fix
-go build ./cmd/hydroxide
+git clone https://github.com/sail3r/peroxide.git
+cd peroxide
+go build ./cmd/peroxide
 ```
 
-Then you'll need to login to ProtonMail via hydroxide, so that hydroxide can
+Then you'll need to login to ProtonMail via peroxide, so that peroxide can
 retrieve e-mails from ProtonMail. You can do so with this command:
 
 ```shell
-hydroxide auth <username>
+peroxide auth <username>
 ```
 
 Once you're logged in, a "bridge password" will be printed. Don't close your
-terminal yet, as this password is not stored anywhere by hydroxide and will be
+terminal yet, as this password is not stored anywhere by peroxide and will be
 needed when configuring your e-mail client.
 
 Your ProtonMail credentials are stored on disk encrypted with this bridge
@@ -75,12 +53,12 @@ password (a 32-byte random password generated when logging in).
 
 ### Human verification
 
-Proton often answers `hydroxide auth` with a CAPTCHA challenge (API error 9001)
-before it will accept a login. hydroxide does not solve, bypass or weaken that
-challenge — it is served, rendered and scored by Proton throughout. hydroxide
+Proton often answers `peroxide auth` with a CAPTCHA challenge (API error 9001)
+before it will accept a login. peroxide does not solve, bypass or weaken that
+challenge — it is served, rendered and scored by Proton throughout. peroxide
 only points you at it and carries its result back to the login request.
 
-When a challenge comes up, `hydroxide auth` starts a single-use helper server on
+When a challenge comes up, `peroxide auth` starts a single-use helper server on
 `127.0.0.1:8765`, opens your browser on it, and waits. The page walks you
 through four steps:
 
@@ -91,7 +69,7 @@ through four steps:
    Press <kbd>Enter</kbd> — it prints `undefined`, which is correct. Now solve
    the CAPTCHA; a text box appears at the top of the tab with the result already
    selected. Copy it.
-4. Paste that result back into the hydroxide page and press "Continue".
+4. Paste that result back into the peroxide page and press "Continue".
 
 The console step is needed because Proton only lets its own web apps embed the
 challenge, so it can't be shown inline and its result has to be moved by hand.
@@ -99,25 +77,9 @@ challenge, so it can't be shown inline and its result has to be moved by hand.
 Once you confirm, authentication is replayed with the challenge result and the
 login continues as usual. The helper server shuts down immediately afterwards.
 
-#### Headless servers
-
-There's no browser on a server, so forward the helper's port over SSH and use
-`manual` mode, which prints the URL instead of trying to launch anything:
-
-```shell
-ssh -L 8765:127.0.0.1:8765 you@your-server
-hydroxide auth -captcha-mode manual <username>
-```
-
-Then open the printed URL on your local machine.
-
-Don't bind the helper to a public address to avoid the tunnel. Anyone who can
-reach it can complete the verification on your behalf, and hydroxide will warn
-you loudly if you do.
-
 #### Options
 
-These apply to `hydroxide auth` only:
+These apply to `peroxide auth` only:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -130,28 +92,24 @@ These apply to `hydroxide auth` only:
 `-captcha-endpoint` is worth knowing about: the host must serve both
 `/core/v4/captcha` and the widget's assets under `/captcha/v1/assets/`. Several
 Proton hosts serve the first but not the second, and the challenge then loads as
-an empty box. hydroxide checks this before sending you to it and tells you if
+an empty box. peroxide checks this before sending you to it and tells you if
 the host looks wrong.
 
-Verification can only be completed interactively, so a long-running `hydroxide
-imap`/`smtp`/`carddav` process that hits a challenge while refreshing its
-session can't resolve it on its own. It will tell you to run `hydroxide auth`
+Verification can only be completed interactively, so a long-running `peroxide
+imap`/`smtp` process that hits a challenge while refreshing its session can't
+resolve it on its own. It will tell you to run `peroxide auth`
 again.
 
 ## Usage
 
-hydroxide can be used in multiple modes.
+peroxide can be served locally with:
 
-> Don't start hydroxide multiple times, instead you can use `hydroxide serve`.
-> This requires ports 1025 (smtp), 1143 (imap), and 8080 (carddav).
-
-### SMTP
-
-To run hydroxide as an SMTP server:
-
-```shell
-hydroxide smtp
 ```
+peroxide serve
+```
+
+> Don't start peroxide multiple times.
+> This requires ports 1025 (smtp) and 1143 (imap) available.
 
 Once the bridge is started, you can configure your e-mail client with the
 following settings:
@@ -160,44 +118,15 @@ following settings:
 * Port: 1025
 * Security: none
 * Username: your ProtonMail username
-* Password: the bridge password (not your ProtonMail password)
-
-### CardDAV
-
-You must setup an HTTPS reverse proxy to forward requests to `hydroxide`.
-
-```shell
-hydroxide carddav
-```
-
-Tested on GNOME (Evolution) and Android (DAVDroid).
-
-### IMAP
-
-⚠️  **Warning**: IMAP support is work-in-progress. Here be dragons.
-
-For now, it only supports unencrypted local connections.
-
-```shell
-hydroxide imap
-```
-
-## Contributing
-
-Upstream is [casually maintained]: pull requests are welcome, but the maintainer
-is busy with lots of other things and will be slow to respond. Also see
-[CONTRIBUTING.md].
-
-For the changes specific to this fork, open an issue or a pull request here.
-
-## Support
-
-If this fork saved you some time, you can buy me a coffee:
-[ko-fi.com/kin69_](https://ko-fi.com/kin69_)
+* Password: the bridge password (NOT your ProtonMail password)
 
 ## License
 
 MIT
 
-[casually maintained]: https://casuallymaintained.tech/
-[CONTRIBUTING.md]: https://github.com/emersion/.github/blob/main/CONTRIBUTING.md
+## Disclosure
+
+This project started as a fork of
+[hydroxide](https://codeberg.org/emersion/hydroxide) — thanks to emersion and
+all upstream contributors. peroxide diverges from it: the long-term goal is a
+minimal SMTP/IMAP-only bridge.

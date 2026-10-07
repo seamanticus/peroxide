@@ -10,8 +10,8 @@ import (
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
 
-	"github.com/emersion/hydroxide/imap/database"
-	"github.com/emersion/hydroxide/protonmail"
+	"github.com/sail3r/peroxide/imap/database"
+	"github.com/sail3r/peroxide/protonmail"
 )
 
 const delimiter = "/"

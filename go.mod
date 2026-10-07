@@ -1,4 +1,4 @@
-module github.com/emersion/hydroxide
+module github.com/sail3r/peroxide
 
 go 1.24.0
 
@@ -10,8 +10,6 @@ require (
 	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 	github.com/emersion/go-smtp v0.24.0
-	github.com/emersion/go-vcard v0.0.0-20241024213814-c9703dde27ff
-	github.com/emersion/go-webdav v0.7.0
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/crypto v0.48.0
 	golang.org/x/term v0.40.0

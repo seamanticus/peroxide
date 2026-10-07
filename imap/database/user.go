@@ -6,8 +6,8 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/emersion/hydroxide/config"
-	"github.com/emersion/hydroxide/protonmail"
+	"github.com/sail3r/peroxide/config"
+	"github.com/sail3r/peroxide/protonmail"
 )
 
 var ErrNotFound = errors.New("message not found in local database")
