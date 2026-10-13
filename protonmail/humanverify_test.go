@@ -308,11 +308,89 @@ func TestDebugDoesNotLogSecrets(t *testing.T) {
 			t.Errorf("debug logs disclose %q:\n%v", secret, logs.String())
 		}
 	}
-	if !strings.Contains(logs.String(), redactedValue) {
+	if !strings.Contains(logs.String(), RedactedValue) {
 		t.Errorf("debug logs don't mention any redaction:\n%v", logs.String())
 	}
 	// Non-sensitive fields are still logged, otherwise debugging is useless.
 	if !strings.Contains(logs.String(), "some-uid") {
 		t.Errorf("debug logs dropped non-sensitive fields:\n%v", logs.String())
+	}
+}
+
+// TestDebugRawLogsUndecodedFields checks that raw debug logs show fields the
+// client doesn't decode, such as an event's More, but still no secrets.
+func TestDebugRawLogsUndecodedFields(t *testing.T) {
+	const accessToken = "super-secret-access-token"
+
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"Code":1000,"EventID":"ev1","More":1,"Order":6700620015701,` +
+			`"AccessToken":"` + accessToken + `","Subject":"a<b>&c"}`))
+	}))
+	defer srv.Close()
+	c.Debug = true
+	c.DebugRaw = true
+
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	}()
+
+	event, err := c.GetEvent("ev0")
+	if err != nil {
+		t.Fatalf("GetEvent() = %v", err)
+	}
+	if event.ID != "ev1" {
+		t.Errorf("GetEvent().ID = %q, want %q", event.ID, "ev1")
+	}
+
+	if strings.Contains(logs.String(), accessToken) {
+		t.Errorf("debug logs disclose the access token:\n%v", logs.String())
+	}
+	for _, want := range []string{`"More":1`, `"Order":6700620015701`, `"Subject":"a<b>&c"`, RedactedValue, "200 OK"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("debug logs don't contain %v:\n%v", want, logs.String())
+		}
+	}
+}
+
+// A body that isn't JSON can't be searched for secrets, so it is withheld.
+func TestDebugRawWithholdsNonJSON(t *testing.T) {
+	const secret = "AccessToken=super-secret"
+
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte("<html>" + secret + "</html>"))
+	}))
+	defer srv.Close()
+	c.Debug = true
+	c.DebugRaw = true
+
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	}()
+
+	if _, err := c.GetEvent("ev0"); err == nil {
+		t.Error("GetEvent() = nil error, want a decoding error")
+	}
+	if strings.Contains(logs.String(), secret) {
+		t.Errorf("debug logs disclose the body:\n%v", logs.String())
+	}
+	for _, want := range []string{"502 Bad Gateway", "not JSON"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("debug logs don't contain %v:\n%v", want, logs.String())
+		}
 	}
 }

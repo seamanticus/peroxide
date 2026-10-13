@@ -70,6 +70,9 @@ type Client struct {
 	RootURL    string
 	AppVersion string
 	Debug      bool
+	// DebugRaw makes debug logs show API responses as received rather than
+	// as decoded, so fields this client doesn't know about are visible.
+	DebugRaw bool
 
 	HTTPClient *http.Client
 	ReAuth     func() error
@@ -174,13 +177,37 @@ func (c *Client) doJSON(req *http.Request, respData interface{}) error {
 	}
 	defer resp.Body.Close()
 
-	if err := json.NewDecoder(resp.Body).Decode(respData); err != nil {
-		return err
+	var body io.Reader = resp.Body
+	var raw []byte
+	if c.Debug && c.DebugRaw {
+		// Read the whole body so it can be logged even if it fails to decode.
+		if raw, err = io.ReadAll(resp.Body); err != nil {
+			return fmt.Errorf("cannot read response to %v %v: %w", req.Method, req.URL.Path, err)
+		}
+		body = bytes.NewReader(raw)
 	}
 
+	decodeErr := json.NewDecoder(body).Decode(respData)
+
 	if c.Debug {
-		log.Printf("<< %v %v", req.Method, req.URL.Path)
-		log.Printf("%s", redactValueOf(respData))
+		if c.DebugRaw {
+			log.Printf("<< %v %v %v", req.Method, req.URL.Path, resp.Status)
+			if json.Valid(raw) {
+				log.Printf("%s", redactJSON(raw))
+			} else {
+				// It can't be searched for secrets: describe it instead.
+				log.Printf("(%v bytes of %q withheld: not JSON)", len(raw), resp.Header.Get("Content-Type"))
+			}
+		} else {
+			log.Printf("<< %v %v", req.Method, req.URL.Path)
+			if decodeErr == nil {
+				log.Printf("%s", redactValueOf(respData))
+			}
+		}
+	}
+
+	if decodeErr != nil {
+		return decodeErr
 	}
 
 	if maybeError, ok := respData.(maybeError); ok {
