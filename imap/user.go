@@ -197,8 +197,7 @@ func (u *user) initMailboxes() error {
 
 	for _, count := range counts {
 		if mbox, ok := u.mailboxes[count.LabelID]; ok {
-			mbox.total = count.Total
-			mbox.unread = count.Unread
+			mbox.setAPICounts(count.Total, count.Unread)
 		}
 	}
 
@@ -419,17 +418,31 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 				}
 			}
 
-			u.Lock()
-			for _, count := range event.MessageCounts {
-				if mbox, ok := u.mailboxes[count.LabelID]; ok {
-					mbox.total = count.Total
-					mbox.unread = count.Unread
+			counts := event.MessageCounts
+			if len(counts) == 0 && len(event.Messages) > 0 {
+				// Proton's events carry no message counts: fetch them, as they are
+				// all there is for mailboxes not synchronized yet.
+				u.Lock()
+				c := u.c // Cleared by Logout, which may race with this event.
+				u.Unlock()
+				if c != nil {
+					var err error
+					if counts, err = c.CountMessages(""); err != nil {
+						log.Printf("cannot refresh message counts after event: %v", err)
+					}
 				}
 			}
-			u.Unlock()
+			for _, count := range counts {
+				if mbox := u.getMailboxByLabel(count.LabelID); mbox != nil {
+					mbox.setAPICounts(count.Total, count.Unread)
+				}
+			}
 		}
 
 		for _, update := range eventUpdates {
+			// go-imap creates Done's channel lazily without synchronization, and
+			// both the server and the goroutine below call it: create it first.
+			update.Done()
 			updates <- update
 		}
 		go func() {

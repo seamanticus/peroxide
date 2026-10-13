@@ -3,6 +3,7 @@ package database
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	bolt "go.etcd.io/bbolt"
 
@@ -15,6 +16,7 @@ var ErrNotFound = errors.New("message not found in local database")
 var (
 	mailboxesBucket = []byte("mailboxes")
 	messagesBucket  = []byte("messages")
+	countsBucket    = []byte("counts")
 )
 
 func userMessage(b *bolt.Bucket, apiID string) (*protonmail.Message, error) {
@@ -29,13 +31,84 @@ func userMessage(b *bolt.Bucket, apiID string) (*protonmail.Message, error) {
 	return msg, err
 }
 
+// messageUnread reports whether the stored message apiID is unread. A message
+// missing from the local database counts as read.
+func messageUnread(b *bolt.Bucket, apiID string) (bool, error) {
+	if b == nil {
+		return false, nil
+	}
+	msg, err := userMessage(b, apiID)
+	if err == ErrNotFound {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("message %v: %w", apiID, err)
+	}
+	return msg.Unread == 1, nil
+}
+
+// countedMailboxes returns the IDs of the mailboxes whose counts are kept.
+func countedMailboxes(tx *bolt.Tx) ([]string, error) {
+	counts := tx.Bucket(countsBucket)
+	if counts == nil {
+		return nil, nil
+	}
+	var labelIDs []string
+	err := counts.ForEach(func(k, _ []byte) error {
+		labelIDs = append(labelIDs, string(k))
+		return nil
+	})
+	return labelIDs, err
+}
+
+// adjustUnread updates the unread counts of every mailbox holding apiID after
+// the stored message went from wasUnread to unread. Every counted mailbox is
+// checked, as one may still hold a message whose labels no longer list it.
+func adjustUnread(tx *bolt.Tx, apiID string, wasUnread, unread bool) error {
+	if wasUnread == unread {
+		return nil
+	}
+	mailboxes := tx.Bucket(mailboxesBucket)
+	if mailboxes == nil {
+		return nil
+	}
+	labelIDs, err := countedMailboxes(tx)
+	if err != nil {
+		return err
+	}
+	for _, labelID := range labelIDs {
+		b := mailboxes.Bucket([]byte(labelID))
+		if b == nil || !mailboxContains(b, apiID) {
+			continue
+		}
+		if err := adjustCounts(tx, labelID, 0, unreadCount(unread)-unreadCount(wasUnread)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func userCreateMessage(b *bolt.Bucket, msg *protonmail.Message) error {
+	wasUnread, err := messageUnread(b, msg.ID)
+	if err != nil {
+		return err
+	}
+
 	k := []byte(msg.ID)
 	v, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
-	return b.Put(k, v)
+	if err := b.Put(k, v); err != nil {
+		return err
+	}
+	return adjustUnread(b.Tx(), msg.ID, wasUnread, msg.Unread == 1)
+}
+
+func userDeleteMessage(b *bolt.Bucket, msg *protonmail.Message) error {
+	if err := b.Delete([]byte(msg.ID)); err != nil {
+		return err
+	}
+	return adjustUnread(b.Tx(), msg.ID, msg.Unread == 1, false)
 }
 
 func userSync(tx *bolt.Tx, messages []*protonmail.Message) error {
@@ -90,7 +163,23 @@ func (u *User) Message(apiID string) (*protonmail.Message, error) {
 
 func (u *User) ResetMessages() error {
 	return u.db.Update(func(tx *bolt.Tx) error {
-		return tx.DeleteBucket(messagesBucket)
+		if err := tx.DeleteBucket(messagesBucket); err != nil {
+			return err
+		}
+
+		// Entries left without their message count as read.
+		labelIDs, err := countedMailboxes(tx)
+		if err != nil {
+			return err
+		}
+		for _, labelID := range labelIDs {
+			c, _ := getCounts(tx, labelID)
+			c.unread = 0
+			if err := putCounts(tx, labelID, c); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
@@ -116,7 +205,7 @@ func (u *User) CreateMessage(msg *protonmail.Message) (seqNums map[string]uint32
 				return err
 			}
 
-			seqNum, err := mailboxCreateMessage(mbox, msg.ID)
+			seqNum, err := mailboxCreateMessage(mbox, labelID, msg.ID)
 			if err != nil {
 				return err
 			}
@@ -154,7 +243,7 @@ func (u *User) UpdateMessage(apiID string, update *protonmail.EventMessageUpdate
 				return err
 			}
 
-			seqNum, err := mailboxCreateMessage(mbox, apiID)
+			seqNum, err := mailboxCreateMessage(mbox, labelID, apiID)
 			if err != nil {
 				return err
 			}
@@ -166,7 +255,7 @@ func (u *User) UpdateMessage(apiID string, update *protonmail.EventMessageUpdate
 				continue
 			}
 
-			seqNum, err := mailboxDeleteMessage(mbox, apiID)
+			seqNum, err := mailboxDeleteMessage(mbox, labelID, apiID)
 			if err != nil {
 				return err
 			}
@@ -194,7 +283,7 @@ func (u *User) DeleteMessage(apiID string) (seqNums map[string]uint32, err error
 			return err
 		}
 
-		if err := messages.Delete([]byte(apiID)); err != nil {
+		if err := userDeleteMessage(messages, msg); err != nil {
 			return err
 		}
 
@@ -208,7 +297,7 @@ func (u *User) DeleteMessage(apiID string) (seqNums map[string]uint32, err error
 				continue
 			}
 
-			seqNum, err := mailboxDeleteMessage(mbox, msg.ID)
+			seqNum, err := mailboxDeleteMessage(mbox, labelID, msg.ID)
 			if err != nil {
 				return err
 			}
@@ -233,6 +322,18 @@ func Open(filename string) (*User, error) {
 	db, err := bolt.Open(p, 0700, nil)
 	if err != nil {
 		return nil, err
+	}
+
+	// Counts left by a previous run may have been made stale by an older
+	// peroxide; mailboxes rebuild theirs when synchronized.
+	err = db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(countsBucket) == nil {
+			return nil
+		}
+		return tx.DeleteBucket(countsBucket)
+	})
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("cannot drop message counts: %w", err), db.Close())
 	}
 
 	return &User{db}, nil
