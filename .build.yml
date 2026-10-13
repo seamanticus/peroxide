@@ -2,7 +2,7 @@ image: archlinux
 packages:
   - go
 sources:
-  - https://github.com/sail3r/peroxide.git
+  - https://github.com/seamanticus/peroxide.git
 tasks:
   - build: |
       cd peroxide

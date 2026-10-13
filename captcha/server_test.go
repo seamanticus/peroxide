@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sail3r/peroxide/protonmail"
+	"github.com/seamanticus/peroxide/protonmail"
 )
 
 func testChallenge() *protonmail.HumanVerification {

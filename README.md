@@ -32,7 +32,7 @@ and `git-send-email` with ProtonMail.
 Start by installing peroxide:
 
 ```shell
-git clone https://github.com/sail3r/peroxide.git
+git clone https://github.com/seamanticus/peroxide.git
 cd peroxide
 go build ./cmd/peroxide
 ```

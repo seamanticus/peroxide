@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sail3r/peroxide/protonmail"
+	"github.com/seamanticus/peroxide/protonmail"
 )
 
 const pollInterval = 30 * time.Second

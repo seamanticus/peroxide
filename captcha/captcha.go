@@ -19,7 +19,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/sail3r/peroxide/protonmail"
+	"github.com/seamanticus/peroxide/protonmail"
 )
 
 // Mode selects how the user is asked to complete a challenge.

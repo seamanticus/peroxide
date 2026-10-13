@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sail3r/peroxide/protonmail"
+	"github.com/seamanticus/peroxide/protonmail"
 )
 
 // stateLen is the length in bytes of the random, single-use session

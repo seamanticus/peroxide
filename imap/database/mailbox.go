@@ -7,7 +7,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/sail3r/peroxide/protonmail"
+	"github.com/seamanticus/peroxide/protonmail"
 )
 
 func serializeUID(uid uint32) []byte {

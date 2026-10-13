@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sail3r/peroxide/protonmail"
+	"github.com/seamanticus/peroxide/protonmail"
 )
 
 const testToken = "signed-challenge-token"

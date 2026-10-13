@@ -23,15 +23,15 @@ import (
 	"github.com/emersion/go-smtp"
 	"golang.org/x/term"
 
-	"github.com/sail3r/peroxide/auth"
-	"github.com/sail3r/peroxide/captcha"
-	"github.com/sail3r/peroxide/config"
-	"github.com/sail3r/peroxide/events"
-	"github.com/sail3r/peroxide/exports"
-	imapbackend "github.com/sail3r/peroxide/imap"
-	"github.com/sail3r/peroxide/imports"
-	"github.com/sail3r/peroxide/protonmail"
-	smtpbackend "github.com/sail3r/peroxide/smtp"
+	"github.com/seamanticus/peroxide/auth"
+	"github.com/seamanticus/peroxide/captcha"
+	"github.com/seamanticus/peroxide/config"
+	"github.com/seamanticus/peroxide/events"
+	"github.com/seamanticus/peroxide/exports"
+	imapbackend "github.com/seamanticus/peroxide/imap"
+	"github.com/seamanticus/peroxide/imports"
+	"github.com/seamanticus/peroxide/protonmail"
+	smtpbackend "github.com/seamanticus/peroxide/smtp"
 )
 
 const (

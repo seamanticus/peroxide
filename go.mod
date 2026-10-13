@@ -1,4 +1,4 @@
-module github.com/sail3r/peroxide
+module github.com/seamanticus/peroxide
 
 go 1.24.0
 
