@@ -121,7 +121,7 @@ func (hv *HumanVerification) String() string {
 	if hv == nil {
 		return "<nil>"
 	}
-	return fmt.Sprintf("HumanVerification{Methods: %v, Token: %v}", hv.Methods, redactedValue)
+	return fmt.Sprintf("HumanVerification{Methods: %v, Token: %v}", hv.Methods, RedactedValue)
 }
 
 // setRequestHeaders marks a request as being replayed after the user completed

@@ -41,6 +41,7 @@ const (
 
 var (
 	debug       bool
+	debugRaw    bool
 	apiEndpoint string
 	appVersion  string
 )
@@ -58,6 +59,7 @@ func newClient() *protonmail.Client {
 		RootURL:    apiEndpoint,
 		AppVersion: appVersion,
 		Debug:      debug,
+		DebugRaw:   debugRaw,
 		HTTPClient: &http.Client{Jar: jar},
 	}
 }
@@ -112,7 +114,7 @@ func listenAndServeSMTP(addr string, debug bool, authManager *auth.Manager, tlsC
 	s.AllowInsecureAuth = tlsConfig == nil
 	s.TLSConfig = tlsConfigFor(tlsConfig, "smtp")
 	if debug {
-		s.Debug = os.Stdout
+		return serveSMTPDebug(s, os.Stdout)
 	}
 
 	if s.TLSConfig != nil {
@@ -131,7 +133,7 @@ func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, even
 	s.AllowInsecureAuth = tlsConfig == nil
 	s.TLSConfig = tlsConfigFor(tlsConfig, "imap")
 	if debug {
-		s.Debug = os.Stdout
+		s.Enable(imapDebugExtension{w: os.Stdout})
 	}
 
 	if s.TLSConfig != nil {
@@ -167,6 +169,8 @@ Commands:
 Global options:
 	-debug
 		Enable debug logs
+	-debug-raw
+		Like -debug, but log API responses as received instead of as decoded
 	-api-endpoint <url>
 		ProtonMail API endpoint
 	-app-version <version>
@@ -210,6 +214,7 @@ Environment variables:
 
 func main() {
 	flag.BoolVar(&debug, "debug", false, "Enable debug logs")
+	flag.BoolVar(&debugRaw, "debug-raw", false, "Like -debug, but log API responses as received instead of as decoded")
 	flag.StringVar(&apiEndpoint, "api-endpoint", defaultAPIEndpoint, "ProtonMail API endpoint")
 	flag.StringVar(&appVersion, "app-version", defaultAppVersion, "ProtonMail app version")
 
@@ -236,6 +241,9 @@ func main() {
 	}
 
 	flag.Parse()
+	if debugRaw {
+		debug = true
+	}
 
 	tlsConfig, err := config.TLS(*tlsCert, *tlsCertKey, *tlsClientCA)
 	if err != nil {

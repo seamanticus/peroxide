@@ -1,11 +1,13 @@
 package protonmail
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
 
-const redactedValue = "[redacted]"
+// RedactedValue replaces credentials in debug logs.
+const RedactedValue = "<API key removed for security>"
 
 // redactedJSONFields lists the JSON object keys whose values must never end up
 // in debug logs: credentials, SRP material, session tokens, key material and
@@ -27,28 +29,41 @@ var redactedJSONFields = map[string]bool{
 	"mailboxpassword":        true,
 	"twofactorcode":          true,
 	"cookie":                 true,
+	// Cleartext session keys, sent when mailing recipients outside Proton.
+	"key": true,
 }
 
 // redactJSON returns b with the values of sensitive fields replaced. If b isn't
 // valid JSON it is replaced entirely, as we can't tell what it holds.
 func redactJSON(b []byte) []byte {
-	var v interface{}
-	if err := json.Unmarshal(b, &v); err != nil {
-		return []byte(`"` + redactedValue + `"`)
+	// A decoder alone would accept, and drop, data after the first value.
+	if !json.Valid(b) {
+		return []byte(`"` + RedactedValue + `"`)
 	}
 
-	out, err := json.Marshal(redactValue(v))
-	if err != nil {
-		return []byte(`"` + redactedValue + `"`)
+	dec := json.NewDecoder(bytes.NewReader(b))
+	// Keep numbers as sent, float64 would mangle large ones.
+	dec.UseNumber()
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		return []byte(`"` + RedactedValue + `"`)
 	}
-	return out
+
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	// Logs aren't HTML: keep RedactedValue and message contents readable.
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(redactValue(v)); err != nil {
+		return []byte(`"` + RedactedValue + `"`)
+	}
+	return bytes.TrimSuffix(out.Bytes(), []byte("\n"))
 }
 
 // redactValueOf marshals v to JSON and redacts its sensitive fields.
 func redactValueOf(v interface{}) []byte {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return []byte(`"` + redactedValue + `"`)
+		return []byte(`"` + RedactedValue + `"`)
 	}
 	return redactJSON(b)
 }
@@ -59,7 +74,7 @@ func redactValue(v interface{}) interface{} {
 		for k, sub := range v {
 			if redactedJSONFields[strings.ToLower(k)] {
 				if sub != nil {
-					v[k] = redactedValue
+					v[k] = RedactedValue
 				}
 				continue
 			}
