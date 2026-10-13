@@ -2,6 +2,7 @@ package imap
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -24,11 +25,16 @@ type mailbox struct {
 	u  *user
 	db *database.Mailbox
 
+	// Message counts reported by the API, the only ones known until the
+	// mailbox is synchronized. They have their own lock, as init holds the
+	// one below for as long as synchronizing takes.
+	apiCountsLock       sync.Mutex
+	apiTotal, apiUnread int
+
 	sync.Mutex // protects everything below
 
-	initialized   bool
-	total, unread int
-	deleted       map[string]struct{}
+	initialized bool
+	deleted     map[string]struct{}
 }
 
 func newMailbox(name string, label string, attrs []string, u *user) (*mailbox, error) {
@@ -59,6 +65,20 @@ func (mbox *mailbox) Info() (*imap.MailboxInfo, error) {
 	}, nil
 }
 
+func (mbox *mailbox) setAPICounts(total, unread int) {
+	mbox.apiCountsLock.Lock()
+	defer mbox.apiCountsLock.Unlock()
+
+	mbox.apiTotal, mbox.apiUnread = total, unread
+}
+
+func (mbox *mailbox) apiCounts() (total, unread int) {
+	mbox.apiCountsLock.Lock()
+	defer mbox.apiCountsLock.Unlock()
+
+	return mbox.apiTotal, mbox.apiUnread
+}
+
 func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
 	mbox.u.Lock()
 	flags := []string{imap.SeenFlag, imap.DeletedFlag}
@@ -77,10 +97,23 @@ func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error
 	mbox.Lock()
 	defer mbox.Unlock()
 
+	// The local DB, kept up to date by events, is exact once synchronized;
+	// until then only the API's counts are known.
+	var total, unread int
+	if mbox.initialized {
+		var err error
+		total, unread, err = mbox.db.Count()
+		if err != nil {
+			return nil, fmt.Errorf("cannot count messages in mailbox %v: %w", mbox.name, err)
+		}
+	} else {
+		total, unread = mbox.apiCounts()
+	}
+
 	for _, name := range items {
 		switch name {
 		case imap.StatusMessages:
-			status.Messages = uint32(mbox.total)
+			status.Messages = uint32(total)
 		case imap.StatusUidNext:
 			uidNext, err := mbox.db.UidNext()
 			if err != nil {
@@ -92,7 +125,7 @@ func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error
 		case imap.StatusRecent:
 			status.Recent = 0
 		case imap.StatusUnseen:
-			status.Unseen = uint32(mbox.unread)
+			status.Unseen = uint32(unread)
 		}
 	}
 
@@ -278,7 +311,11 @@ func (mbox *mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fe
 				}
 				stop = uidNext - 1
 			} else {
-				stop = uint32(mbox.total)
+				total, _, err := mbox.db.Count()
+				if err != nil {
+					return fmt.Errorf("cannot count messages in mailbox %v: %w", mbox.name, err)
+				}
+				stop = uint32(total)
 			}
 		}
 
