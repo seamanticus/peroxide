@@ -523,11 +523,17 @@ func (mbox *mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, op imap.
 		var err error
 		switch flag {
 		case imap.SeenFlag:
+			var failed map[string]error
+			unread := 0
 			switch op {
 			case imap.SetFlags, imap.AddFlags:
-				err = mbox.u.c.MarkMessagesRead(apiIDs)
+				failed, err = mbox.u.c.MarkMessagesRead(apiIDs)
 			case imap.RemoveFlags:
-				err = mbox.u.c.MarkMessagesUnread(apiIDs)
+				failed, err = mbox.u.c.MarkMessagesUnread(apiIDs)
+				unread = 1
+			}
+			if err == nil {
+				err = mbox.u.applyAction(apiIDs, failed, unreadUpdate(unread))
 			}
 		case imap.DeletedFlag:
 			// TODO: send updates
@@ -551,11 +557,16 @@ func (mbox *mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, op imap.
 				break
 			}
 
+			var failed map[string]error
+			add := op != imap.RemoveFlags
 			switch op {
 			case imap.SetFlags, imap.AddFlags:
-				err = mbox.u.c.LabelMessages(label, apiIDs)
+				failed, err = mbox.u.c.LabelMessages(label, apiIDs)
 			case imap.RemoveFlags:
-				err = mbox.u.c.UnlabelMessages(label, apiIDs)
+				failed, err = mbox.u.c.UnlabelMessages(label, apiIDs)
+			}
+			if err == nil {
+				err = mbox.u.applyAction(apiIDs, failed, labelUpdate(label, add))
 			}
 		}
 		if err != nil {
@@ -563,7 +574,7 @@ func (mbox *mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, op imap.
 		}
 	}
 
-	return mbox.Poll()
+	return nil
 }
 
 func (mbox *mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string) error {
@@ -581,10 +592,11 @@ func (mbox *mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string
 		return imapbackend.ErrNoSuchMailbox
 	}
 
-	if err := mbox.u.c.LabelMessages(dest.label, apiIDs); err != nil {
+	failed, err := mbox.u.c.LabelMessages(dest.label, apiIDs)
+	if err != nil {
 		return err
 	}
-	return mbox.Poll()
+	return mbox.u.applyAction(apiIDs, failed, labelUpdate(dest.label, true))
 }
 
 func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) error {
@@ -602,13 +614,19 @@ func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string
 		return imapbackend.ErrNoSuchMailbox
 	}
 
-	if err := mbox.u.c.LabelMessages(dest.label, apiIDs); err != nil {
+	failed, err := mbox.u.c.LabelMessages(dest.label, apiIDs)
+	if err != nil {
 		return err
 	}
-	if err := mbox.u.c.UnlabelMessages(mbox.label, apiIDs); err != nil {
+	if err := mbox.u.applyAction(apiIDs, failed, labelUpdate(dest.label, true)); err != nil {
 		return err
 	}
-	return mbox.Poll()
+
+	failed, err = mbox.u.c.UnlabelMessages(mbox.label, apiIDs)
+	if err != nil {
+		return err
+	}
+	return mbox.u.applyAction(apiIDs, failed, labelUpdate(mbox.label, false))
 }
 
 func (mbox *mailbox) Expunge() error {
@@ -629,11 +647,21 @@ func (mbox *mailbox) Expunge() error {
 	}
 	mbox.Unlock()
 
-	if err := mbox.u.c.DeleteMessages(apiIDs); err != nil {
+	failed, err := mbox.u.c.DeleteMessages(apiIDs)
+	if err != nil {
 		return err
 	}
 
-	return mbox.Poll()
+	// Deleted messages are gone: don't delete them again on the next EXPUNGE.
+	mbox.Lock()
+	for _, apiID := range apiIDs {
+		if err, ok := failed[apiID]; !ok || nothingToDo(err) {
+			delete(mbox.deleted, apiID)
+		}
+	}
+	mbox.Unlock()
+
+	return mbox.u.applyDeleteAction(apiIDs, failed)
 }
 
 func (mbox *mailbox) Poll() error {
