@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
@@ -160,6 +161,25 @@ func ListUsernames() ([]string, error) {
 		l = append(l, username)
 	}
 	return l, nil
+}
+
+func DeleteUsername(username string) error {
+	auths, err := readCachedAuths()
+	if err != nil {
+		return err
+	}
+
+	if _, ok := auths[username]; !ok {
+		return fmt.Errorf("no stored credentials for %v", username)
+	}
+
+	delete(auths, username)
+
+	if err = saveAuths(auths); err != nil {
+		return err
+	}
+	log.Printf("Deleted credentials for %v", username)
+	return nil
 }
 
 func GeneratePassword() (secretKey *[32]byte, password string, err error) {
