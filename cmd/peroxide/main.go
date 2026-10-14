@@ -13,6 +13,7 @@ import (
 	"net/http/cookiejar"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -91,6 +92,18 @@ func askBridgePass() (string, error) {
 	return string(b), err
 }
 
+// promptConfirm asks a yes/no question on stderr and reports whether the
+// answer is y or Y. Everything else, including EOF, means no.
+func promptConfirm(prompt string) bool {
+	fmt.Fprintf(os.Stderr, "%v", prompt)
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		return false
+	}
+	answer := strings.TrimSpace(scanner.Text())
+	return answer == "y" || answer == "Y"
+}
+
 // tlsConfigFor returns a copy of the TLS configuration advertising the ALPN
 // protocol of a given service (RFC 8314).
 //
@@ -156,60 +169,93 @@ func isMbox(br *bufio.Reader) (bool, error) {
 
 const usage = `usage: peroxide [options...] <command>
 Commands:
-	auth [options...] <username>	Login to ProtonMail via peroxide
-	export-secret-keys <username> Export secret keys
-	imap			Run peroxide as an IMAP server
-	import-messages <username> [file]	Import messages
+
+	auth [options...] <username>			Login to ProtonMail via peroxide
+
+	export-secret-keys 	<username> 			Export secret keys
+
+	import-messages <username> [file]		Import messages
+
 	export-messages [options...] <username>	Export messages
-	sendmail <username> -- <args...>	sendmail(1) interface
-	serve			Run all servers
-	smtp			Run peroxide as an SMTP server
-	status			View peroxide status
+
+	sendmail <username> -- <args...>		sendmail(1) interface
+
+	serve									Run all servers
+
+	smtp									Run peroxide as an SMTP server
+
+	imap						   			Run peroxide as an IMAP server
+
+	status									View peroxide status
 
 Global options:
+
 	-debug
-		Enable debug logs
+		Enable debug logs with decoded responses 
+		*UNSAFE* parses API keys in plain text
+
 	-debug-raw
-		Like -debug, but log API responses as received instead of as decoded
+		Like -debug but with full API responses, instead of decoded.
+		*SAFE* all credentials are scrubbed, the best tool for troubleshooting
+	
 	-api-endpoint <url>
 		ProtonMail API endpoint
+	
 	-app-version <version>
 		ProtonMail application version
+	
 	-smtp-host example.com
 		Allowed SMTP email hostname on which peroxide listens, defaults to 127.0.0.1
+	
 	-imap-host example.com
 		Allowed IMAP email hostname on which peroxide listens, defaults to 127.0.0.1
+	
 	-smtp-port example.com
 		SMTP port on which peroxide listens, defaults to 1025
+
 	-imap-port example.com
 		IMAP port on which peroxide listens, defaults to 1143
+	
 	-disable-imap
 		Disable IMAP for peroxide serve
+	
 	-disable-smtp
 		Disable SMTP for peroxide serve
+	
 	-tls-cert /path/to/cert.pem
 		Path to the certificate to use for incoming connections (Optional)
+	
 	-tls-key /path/to/key.pem
 		Path to the certificate key to use for incoming connections (Optional)
+	
 	-tls-client-ca /path/to/ca.pem
 		If set, clients must provide a certificate signed by the given CA (Optional)
 
-Options for "auth":
+Options for "auth" command:
+	
+	-remove
+		Delete the stored credentials for the username instead of logging in
+	
 	-captcha-mode browser|manual|disabled
 		How to complete Proton's human verification challenge when it is
 		requested, defaults to browser
+	
 	-captcha-listen 127.0.0.1:8765
 		Address of the local, loopback-only CAPTCHA helper server
+	
 	-captcha-timeout 10m
 		Maximum time to wait for the challenge to be completed
+	
 	-no-open-browser
 		Print the CAPTCHA URL instead of trying to launch a browser
+	
 	-captcha-endpoint https://mail-api.proton.me
 		API host serving the CAPTCHA challenge. It must serve both
 		/core/v4/captcha and the widget's assets under /captcha/v1/assets/
 
 Environment variables:
 	PEROXIDE_BRIDGE_PASS	Don't prompt for the bridge password, use this variable instead
+
 `
 
 func main() {
@@ -255,17 +301,43 @@ func main() {
 	case "auth":
 		var captchaMode, captchaListen string
 		var captchaTimeout time.Duration
-		var noOpenBrowser bool
+		var noOpenBrowser, remove bool
 		authCmd.StringVar(&captchaMode, "captcha-mode", string(captcha.ModeBrowser), "CAPTCHA behavior: browser, manual or disabled")
 		authCmd.StringVar(&captchaListen, "captcha-listen", captcha.DefaultListenAddr, "Local CAPTCHA callback address")
 		authCmd.DurationVar(&captchaTimeout, "captcha-timeout", captcha.DefaultTimeout, "Maximum time to wait for the CAPTCHA to be completed")
 		authCmd.BoolVar(&noOpenBrowser, "no-open-browser", false, "Print the CAPTCHA URL without trying to launch a browser")
 		captchaEndpoint := authCmd.String("captcha-endpoint", protonmail.CaptchaEndpoint, "API host serving the CAPTCHA challenge")
+		authCmd.BoolVar(&remove, "remove", false, "Delete the stored credentials for the username instead of logging in")
 		authCmd.Parse(flag.Args()[1:])
 		protonmail.CaptchaEndpoint = *captchaEndpoint
 		username := authCmd.Arg(0)
 		if username == "" {
 			log.Fatal("usage: peroxide auth [options...] <username>")
+		}
+
+		if remove {
+			if err := auth.DeleteUsername(username); err != nil {
+				log.Fatal(err)
+			}
+			break
+		}
+
+		storedUsernames, err := auth.ListUsernames()
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, u := range storedUsernames {
+			if u != username {
+				continue
+			}
+
+			if !promptConfirm(fmt.Sprintf("Credentials for %v already exist, delete them to create new ones? [y/N] ", username)) {
+				os.Exit(0)
+			}
+			if err := auth.DeleteUsername(username); err != nil {
+				log.Fatal(err)
+			}
+			break
 		}
 
 		mode, err := captcha.ParseMode(captchaMode)
