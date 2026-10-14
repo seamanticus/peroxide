@@ -60,7 +60,7 @@ func newTestMailbox(t *testing.T, msgs []*protonmail.Message) (*mailbox, *databa
 	return &mailbox{
 		name:        imap.InboxName,
 		label:       protonmail.LabelInbox,
-		u:           &user{db: db},
+		u:           &user{db: db, u: &protonmail.User{Name: "jon"}},
 		db:          mboxDB,
 		deleted:     make(map[string]struct{}),
 		initialized: true,
@@ -282,4 +282,47 @@ func TestEventRefreshesAPICounts(t *testing.T) {
 	for update := range updates {
 		close(update.Done())
 	}
+}
+
+// Commands waiting for an event, such as STORE, must not also wait for the
+// counts fetched after it.
+func TestEventSentBeforeCountsFetched(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"Code":1000,"Counts":[{"LabelID":"0","Total":3,"Unread":1}]}`))
+	}))
+	defer srv.Close()
+
+	mbox, _ := newTestMailbox(t, nil)
+	mbox.initialized = false
+	u := mbox.u
+	u.c = &protonmail.Client{RootURL: srv.URL}
+	u.u = &protonmail.User{Name: "jon"}
+	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: mbox}
+	// Buffered, so the signal isn't dropped while this test isn't waiting.
+	u.eventSent = make(chan struct{}, 1)
+
+	events := make(chan *protonmail.Event, 1)
+	events <- &protonmail.Event{Messages: []*protonmail.EventMessage{{
+		ID:      "c",
+		Action:  protonmail.EventCreate,
+		Created: inboxMessage("c", 1),
+	}}}
+	close(events)
+	updates := make(chan imapbackend.Update, 10)
+	done := make(chan struct{})
+	go func() {
+		u.receiveEvents(updates, events)
+		close(done)
+	}()
+
+	// The request for counts is still pending.
+	close((<-updates).Done())
+	<-u.eventSent
+
+	close(release)
+	<-done
+	checkStatus(t, mbox, 3, 1)
 }

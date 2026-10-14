@@ -306,6 +306,7 @@ func (u *user) poll() {
 func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *protonmail.Event) {
 	for event := range events {
 		var eventUpdates []imapbackend.Update
+		var fetchCounts bool
 
 		if event.Refresh&protonmail.EventRefreshMail != 0 {
 			log.Println("Reinitializing the whole IMAP database")
@@ -348,95 +349,25 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 					}
 				case protonmail.EventUpdate, protonmail.EventUpdateFlags:
 					log.Println("Received update event for message", eventMessage.ID)
-					createdSeqNums, deletedSeqNums, err := u.db.UpdateMessage(eventMessage.ID, eventMessage.Updated)
+					ups, err := u.applyUpdate(eventMessage.ID, eventMessage.Updated)
+					eventUpdates = append(eventUpdates, ups...)
 					if err != nil {
-						log.Printf("cannot handle update event for message %s: cannot update message in local DB: %v", eventMessage.ID, err)
-						break
-					}
-
-					for labelID, seqNum := range createdSeqNums {
-						if mbox := u.getMailboxByLabel(labelID); mbox != nil {
-							update := new(imapbackend.MailboxUpdate)
-							update.Update = imapbackend.NewUpdate(u.u.Name, mbox.name)
-							update.MailboxStatus = imap.NewMailboxStatus(mbox.name, []imap.StatusItem{imap.StatusMessages})
-							update.MailboxStatus.Messages = seqNum
-							eventUpdates = append(eventUpdates, update)
-						}
-					}
-					for labelID, seqNum := range deletedSeqNums {
-						if mbox := u.getMailboxByLabel(labelID); mbox != nil {
-							update := new(imapbackend.ExpungeUpdate)
-							update.Update = imapbackend.NewUpdate(u.u.Name, mbox.name)
-							update.SeqNum = seqNum
-							eventUpdates = append(eventUpdates, update)
-						}
-					}
-
-					// Send message updates
-					msg, err := u.db.Message(eventMessage.ID)
-					if err != nil {
-						log.Printf("cannot handle update event for message %s: cannot get updated message from local DB: %v", eventMessage.ID, err)
-						break
-					}
-					for _, labelID := range msg.LabelIDs {
-						if _, created := createdSeqNums[labelID]; created {
-							// This message has been added to the label's mailbox
-							// No need to send a message update
-							continue
-						}
-
-						if mbox := u.getMailboxByLabel(labelID); mbox != nil {
-							seqNum, _, err := mbox.db.FromApiID(eventMessage.ID)
-							if err != nil {
-								log.Printf("cannot handle update event for message %s: cannot get message sequence number in %s: %v", eventMessage.ID, mbox.name, err)
-								continue
-							}
-
-							update := new(imapbackend.MessageUpdate)
-							update.Update = imapbackend.NewUpdate(u.u.Name, mbox.name)
-							update.Message = imap.NewMessage(seqNum, []imap.FetchItem{imap.FetchFlags})
-							update.Message.Flags = mbox.fetchFlags(msg)
-							eventUpdates = append(eventUpdates, update)
-						}
+						log.Printf("cannot handle update event for message %s: %v", eventMessage.ID, err)
 					}
 				case protonmail.EventDelete:
 					log.Println("Received delete event for message", eventMessage.ID)
-					seqNums, err := u.db.DeleteMessage(eventMessage.ID)
+					ups, err := u.applyDelete(eventMessage.ID)
+					eventUpdates = append(eventUpdates, ups...)
 					if err != nil {
-						log.Printf("cannot handle delete event for message %s: cannot delete message from local DB: %v", eventMessage.ID, err)
-						break
-					}
-
-					for labelID, seqNum := range seqNums {
-						if mbox := u.getMailboxByLabel(labelID); mbox != nil {
-							update := new(imapbackend.ExpungeUpdate)
-							update.Update = imapbackend.NewUpdate(u.u.Name, mbox.name)
-							update.SeqNum = seqNum
-							eventUpdates = append(eventUpdates, update)
-						}
+						log.Printf("cannot handle delete event for message %s: %v", eventMessage.ID, err)
 					}
 				}
 			}
 
-			counts := event.MessageCounts
-			if len(counts) == 0 && len(event.Messages) > 0 {
-				// Proton's events carry no message counts: fetch them, as they are
-				// all there is for mailboxes not synchronized yet.
-				u.Lock()
-				c := u.c // Cleared by Logout, which may race with this event.
-				u.Unlock()
-				if c != nil {
-					var err error
-					if counts, err = c.CountMessages(""); err != nil {
-						log.Printf("cannot refresh message counts after event: %v", err)
-					}
-				}
-			}
-			for _, count := range counts {
-				if mbox := u.getMailboxByLabel(count.LabelID); mbox != nil {
-					mbox.setAPICounts(count.Total, count.Unread)
-				}
-			}
+			u.setAPICounts(event.MessageCounts)
+			// Proton's events carry no message counts: fetch them, as they are
+			// all there is for mailboxes not synchronized yet.
+			fetchCounts = len(event.MessageCounts) == 0 && len(event.Messages) > 0
 		}
 
 		for _, update := range eventUpdates {
@@ -455,5 +386,29 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			default:
 			}
 		}()
+
+		// Only now: commands waiting for this event, such as STORE, don't wait
+		// for this request too. Synchronized mailboxes don't need it.
+		if fetchCounts {
+			u.Lock()
+			c := u.c // Cleared by Logout, which may race with this event.
+			u.Unlock()
+			if c != nil {
+				counts, err := c.CountMessages("")
+				if err != nil {
+					log.Printf("cannot refresh message counts after event: %v", err)
+				}
+				u.setAPICounts(counts)
+			}
+		}
+	}
+}
+
+// setAPICounts sets the message counts reported by the API.
+func (u *user) setAPICounts(counts []*protonmail.MessageCount) {
+	for _, count := range counts {
+		if mbox := u.getMailboxByLabel(count.LabelID); mbox != nil {
+			mbox.setAPICounts(count.Total, count.Unread)
+		}
 	}
 }

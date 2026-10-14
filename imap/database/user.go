@@ -205,11 +205,13 @@ func (u *User) CreateMessage(msg *protonmail.Message) (seqNums map[string]uint32
 				return err
 			}
 
-			seqNum, err := mailboxCreateMessage(mbox, labelID, msg.ID)
+			seqNum, created, err := mailboxCreateMessage(mbox, labelID, msg.ID)
 			if err != nil {
 				return err
 			}
-			seqNums[labelID] = seqNum
+			if created {
+				seqNums[labelID] = seqNum
+			}
 		}
 
 		return nil
@@ -243,11 +245,13 @@ func (u *User) UpdateMessage(apiID string, update *protonmail.EventMessageUpdate
 				return err
 			}
 
-			seqNum, err := mailboxCreateMessage(mbox, labelID, apiID)
+			seqNum, created, err := mailboxCreateMessage(mbox, labelID, apiID)
 			if err != nil {
 				return err
 			}
-			createdSeqNums[labelID] = seqNum
+			if created {
+				createdSeqNums[labelID] = seqNum
+			}
 		}
 		for _, labelID := range removedLabels {
 			mbox := mailboxes.Bucket([]byte(labelID))
@@ -259,7 +263,9 @@ func (u *User) UpdateMessage(apiID string, update *protonmail.EventMessageUpdate
 			if err != nil {
 				return err
 			}
-			deletedSeqNums[labelID] = seqNum
+			if seqNum != 0 {
+				deletedSeqNums[labelID] = seqNum
+			}
 		}
 
 		update.Patch(msg)
@@ -301,7 +307,9 @@ func (u *User) DeleteMessage(apiID string) (seqNums map[string]uint32, err error
 			if err != nil {
 				return err
 			}
-			seqNums[labelID] = seqNum
+			if seqNum != 0 {
+				seqNums[labelID] = seqNum
+			}
 		}
 
 		return nil

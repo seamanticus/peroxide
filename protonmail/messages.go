@@ -308,61 +308,109 @@ func (c *Client) UpdateDraftMessage(msg *Message) (*Message, error) {
 	return respData.Message, nil
 }
 
-func (c *Client) doMessages(action string, ids []string) error {
+const (
+	codeSuccess = 1000
+	// CodeMessageDoesNotExist is the result of an action on a message that
+	// doesn't exist. Proton also gives it when the action has nothing to do,
+	// e.g. marking a read message as read.
+	CodeMessageDoesNotExist = 2501
+)
+
+// messageActionResponse is the response to an action on messages, which holds
+// one result per message.
+type messageActionResponse struct {
+	resp
+	Responses []struct {
+		ID       string
+		Response struct {
+			Code    int
+			Message string `json:"Error"`
+		}
+	}
+}
+
+// failures returns the error of each message the action failed for.
+func (r *messageActionResponse) failures() map[string]error {
+	failed := make(map[string]error)
+	for _, res := range r.Responses {
+		if res.Response.Code != codeSuccess {
+			failed[res.ID] = &APIError{Code: res.Response.Code, Message: res.Response.Message}
+		}
+	}
+	return failed
+}
+
+// doMessageAction sends req, an action on messages, and returns the error of
+// each message it failed for.
+func (c *Client) doMessageAction(req *http.Request) (failed map[string]error, err error) {
+	var respData messageActionResponse
+	if err := c.doJSON(req, &respData); err != nil {
+		return nil, err
+	}
+	return respData.failures(), nil
+}
+
+func (c *Client) doMessages(action string, ids []string) (failed map[string]error, err error) {
 	reqData := struct {
 		IDs []string
 	}{ids}
 	req, err := c.newJSONRequest(http.MethodPut, "/messages/"+action, &reqData)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	// TODO: the response contains one response per message
-	return c.doJSON(req, nil)
+	return c.doMessageAction(req)
 }
 
-func (c *Client) MarkMessagesRead(ids []string) error {
+// MarkMessagesRead marks messages as read, and returns the error of each one
+// it failed for.
+func (c *Client) MarkMessagesRead(ids []string) (failed map[string]error, err error) {
 	return c.doMessages("read", ids)
 }
 
-func (c *Client) MarkMessagesUnread(ids []string) error {
+// MarkMessagesUnread marks messages as unread, and returns the error of each
+// one it failed for.
+func (c *Client) MarkMessagesUnread(ids []string) (failed map[string]error, err error) {
 	return c.doMessages("unread", ids)
 }
 
-func (c *Client) DeleteMessages(ids []string) error {
+// DeleteMessages deletes messages, and returns the error of each one it failed
+// for.
+func (c *Client) DeleteMessages(ids []string) (failed map[string]error, err error) {
 	return c.doMessages("delete", ids)
 }
 
-func (c *Client) UndeleteMessages(ids []string) error {
+// UndeleteMessages restores deleted messages, and returns the error of each
+// one it failed for.
+func (c *Client) UndeleteMessages(ids []string) (failed map[string]error, err error) {
 	return c.doMessages("undelete", ids)
 }
 
-func (c *Client) LabelMessages(labelID string, ids []string) error {
+// LabelMessages adds a label to messages, and returns the error of each one it
+// failed for.
+func (c *Client) LabelMessages(labelID string, ids []string) (failed map[string]error, err error) {
 	reqData := struct {
 		LabelID string
 		IDs     []string
 	}{labelID, ids}
 	req, err := c.newJSONRequest(http.MethodPut, "/messages/label", &reqData)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	// TODO: the response contains one response per message
-	return c.doJSON(req, nil)
+	return c.doMessageAction(req)
 }
 
-func (c *Client) UnlabelMessages(labelID string, ids []string) error {
+// UnlabelMessages removes a label from messages, and returns the error of each
+// one it failed for.
+func (c *Client) UnlabelMessages(labelID string, ids []string) (failed map[string]error, err error) {
 	reqData := struct {
 		LabelID string
 		IDs     []string
 	}{labelID, ids}
 	req, err := c.newJSONRequest(http.MethodPut, "/messages/unlabel", &reqData)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	// TODO: the response contains one response per message
-	return c.doJSON(req, nil)
+	return c.doMessageAction(req)
 }
 
 type MessageKeyPacket struct {

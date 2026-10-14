@@ -96,7 +96,10 @@ func (update *EventMessageUpdate) DiffLabelIDs(current []string) (added, removed
 }
 
 func (update *EventMessageUpdate) Patch(msg *Message) {
-	msg.Time = update.Time
+	// Proton's updates always carry it; peroxide's own may leave it out.
+	if update.Time != 0 {
+		msg.Time = update.Time
+	}
 	if update.Unread != nil {
 		msg.Unread = *update.Unread
 	}

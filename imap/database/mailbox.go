@@ -84,13 +84,15 @@ func mailboxContains(b *bolt.Bucket, apiID string) bool {
 	return false
 }
 
-func mailboxCreateMessage(b *bolt.Bucket, labelID, apiID string) (seqNum uint32, err error) {
+// mailboxCreateMessage adds apiID to the mailbox, unless it's there already,
+// and returns its sequence number.
+func mailboxCreateMessage(b *bolt.Bucket, labelID, apiID string) (seqNum uint32, created bool, err error) {
 	want := []byte(apiID)
 	c := b.Cursor()
 	var n uint32 = 1
 	for k, v := c.First(); k != nil; k, v = c.Next() {
 		if bytes.Equal(v, want) {
-			return n, nil
+			return n, false, nil
 		}
 		n++
 	}
@@ -98,16 +100,18 @@ func mailboxCreateMessage(b *bolt.Bucket, labelID, apiID string) (seqNum uint32,
 	id, _ := b.NextSequence()
 	uid := uint32(id)
 	if err := b.Put(serializeUID(uid), want); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	unread, err := messageUnread(b.Tx().Bucket(messagesBucket), apiID)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return n, adjustCounts(b.Tx(), labelID, 1, unreadCount(unread))
+	return n, true, adjustCounts(b.Tx(), labelID, 1, unreadCount(unread))
 }
 
+// mailboxDeleteMessage removes apiID from the mailbox, and returns the sequence
+// number it had, or 0 if it wasn't there.
 func mailboxDeleteMessage(b *bolt.Bucket, labelID, apiID string) (seqNum uint32, err error) {
 	want := []byte(apiID)
 	c := b.Cursor()
@@ -153,7 +157,7 @@ func (mbox *Mailbox) Sync(messages []*protonmail.Message) error {
 		}
 
 		for _, msg := range messages {
-			if _, err := mailboxCreateMessage(b, mbox.labelID, msg.ID); err != nil {
+			if _, _, err := mailboxCreateMessage(b, mbox.labelID, msg.ID); err != nil {
 				return err
 			}
 		}
