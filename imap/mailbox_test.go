@@ -60,7 +60,7 @@ func newTestMailbox(t *testing.T, msgs []*protonmail.Message) (*mailbox, *databa
 	return &mailbox{
 		name:        imap.InboxName,
 		label:       protonmail.LabelInbox,
-		u:           &user{db: db, u: &protonmail.User{Name: "bob"}},
+		u:           &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache()},
 		db:          mboxDB,
 		deleted:     make(map[string]struct{}),
 		initialized: true,

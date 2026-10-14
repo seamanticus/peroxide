@@ -107,7 +107,7 @@ func splitMIMEType(t string) (string, string) {
 func (mbox *mailbox) fetchBodyStructure(msg *protonmail.Message, extended bool) (*imap.BodyStructure, error) {
 	if msg.NumAttachments > 0 {
 		var err error
-		msg, err = mbox.u.c.GetMessage(msg.ID)
+		msg, err = mbox.u.fullMessage(msg.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -257,7 +257,7 @@ func (mbox *mailbox) fetchBodySection(msg *protonmail.Message, section *imap.Bod
 
 		switch section.Specifier {
 		case imap.EntireSpecifier, imap.TextSpecifier:
-			msg, err := mbox.u.c.GetMessage(msg.ID)
+			msg, err := mbox.u.fullMessage(msg.ID)
 			if err != nil {
 				return nil, err
 			}
@@ -303,7 +303,7 @@ func (mbox *mailbox) fetchBodySection(msg *protonmail.Message, section *imap.Bod
 			// TODO: only fetch the message if the body is needed
 			// For now we fetch it in all cases because the MIME type is not included
 			// in the cached message, and inlineHeader needs it
-			msg, err := mbox.u.c.GetMessage(msg.ID)
+			msg, err := mbox.u.fullMessage(msg.ID)
 			if err != nil {
 				return nil, err
 			}
@@ -318,7 +318,7 @@ func (mbox *mailbox) fetchBodySection(msg *protonmail.Message, section *imap.Bod
 				return nil, errors.New("invalid attachment section path")
 			}
 
-			msg, err := mbox.u.c.GetMessage(msg.ID)
+			msg, err := mbox.u.fullMessage(msg.ID)
 			if err != nil {
 				return nil, err
 			}

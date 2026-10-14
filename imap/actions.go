@@ -72,6 +72,8 @@ func (u *user) applyUpdate(apiID string, update *protonmail.EventMessageUpdate) 
 // applyDelete deletes the stored message apiID, and returns the updates
 // telling clients about it.
 func (u *user) applyDelete(apiID string) ([]imapbackend.Update, error) {
+	u.messages.remove(apiID)
+
 	seqNums, err := u.db.DeleteMessage(apiID)
 	if err != nil {
 		return nil, fmt.Errorf("cannot delete message from local DB: %w", err)
