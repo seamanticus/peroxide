@@ -117,3 +117,15 @@ goroutine and the `Receiver` alive.
 4. Tests (events): with no reader, `Poll` returns at once; a receiver
    whose last channel was removed accepts no new channel (`Register`
    starts a new receiver). Don't count goroutines, which is flaky.
+
+## 4. Debug Raw
+
+Make an educated decision into droping `-debug` in favour of `-debug-raw`. The raw dump of debug with API keys scrubbed from the flag '-debug-raw' has proven invaluable to all previous implementations, whilst '-debug' only presents a security threat.
+
+## 5. Import / Export
+
+Perform an analysis of what schema is utilised in both procedures and verify if it is currently compliant with Proton API.
+
+## 6. Captcha solution
+
+Attempt a more elegant workaround or optimise the Captcha implementation.

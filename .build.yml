@@ -1,9 +1,0 @@
-image: archlinux
-packages:
-  - go
-sources:
-  - https://github.com/seamanticus/peroxide.git
-tasks:
-  - build: |
-      cd peroxide
-      go build -v ./...
