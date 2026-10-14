@@ -46,6 +46,7 @@ type user struct {
 
 	db             *database.User
 	eventsReceiver *events.Receiver
+	messages       *messageCache // full messages, safe for concurrent use
 
 	done      chan<- struct{}
 	eventSent chan struct{}
@@ -99,6 +100,7 @@ func newUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 		addrs:       addrs,
 		eventSent:   make(chan struct{}),
 		numClients:  1,
+		messages:    newMessageCache(),
 	}
 
 	db, err := database.Open(u.Name + ".db")
@@ -322,6 +324,7 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			if err := u.db.ResetMessages(); err != nil {
 				log.Printf("cannot reset user: %v", err)
 			}
+			u.messages.clear()
 
 			if err := u.initMailboxes(); err != nil {
 				log.Printf("cannot reinitialize mailboxes: %v", err)
@@ -349,6 +352,10 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 					}
 				case protonmail.EventUpdate, protonmail.EventUpdateFlags:
 					log.Println("Received update event for message", eventMessage.ID)
+					if eventMessage.Action == protonmail.EventUpdate {
+						// Its contents may have changed, e.g. a draft edited.
+						u.messages.remove(eventMessage.ID)
+					}
 					ups, err := u.applyUpdate(eventMessage.ID, eventMessage.Updated)
 					eventUpdates = append(eventUpdates, ups...)
 					if err != nil {
