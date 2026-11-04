@@ -153,7 +153,10 @@ func (em *EventMessage) UnmarshalJSON(b []byte) error {
 	case EventUpdate, EventUpdateFlags:
 		em.Updated = new(EventMessageUpdate)
 		return json.Unmarshal(raw.Message, em.Updated)
+	case EventDelete:
+		return nil // Carries no message.
 	}
+	// An action added by Proton since: kept for the caller to report.
 	return nil
 }
 

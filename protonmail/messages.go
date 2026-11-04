@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -534,41 +535,56 @@ func (set *MessagePackageSet) Encrypt(mimeType string, signed *openpgp.Entity) (
 	}, nil
 }
 
-func cipherFunctionString(cipherFunc packet.CipherFunction) string {
+// cipherFunctionString names cipherFunc for the API, which knows the AES
+// ciphers only.
+func cipherFunctionString(cipherFunc packet.CipherFunction) (string, error) {
 	switch cipherFunc {
 	case packet.CipherAES128:
-		return "aes128"
+		return "aes128", nil
 	case packet.CipherAES192:
-		return "aes192"
+		return "aes192", nil
 	case packet.CipherAES256:
-		return "aes256"
-	default:
-		panic("protonmail: unsupported cipher function")
+		return "aes256", nil
+	case packet.Cipher3DES, packet.CipherCAST5:
+		return "", fmt.Errorf("cipher function %v not accepted by the API", cipherFunc)
 	}
+	return "", fmt.Errorf("unknown cipher function %v", cipherFunc)
+}
+
+func packKey(key *packet.EncryptedKey) (*PackedKey, error) {
+	algorithm, err := cipherFunctionString(key.CipherFunc)
+	if err != nil {
+		return nil, err
+	}
+	return &PackedKey{
+		Algorithm: algorithm,
+		Key:       base64.StdEncoding.EncodeToString(key.Key),
+	}, nil
 }
 
 func (set *MessagePackageSet) AddCleartext(addr string) (*MessagePackage, error) {
+	if set.BodyKey == nil || set.AttachmentKeys == nil {
+		bodyKey, err := packKey(set.bodyKey)
+		if err != nil {
+			return nil, fmt.Errorf("cannot pack body key: %w", err)
+		}
+
+		attachmentKeys := make(map[string]*PackedKey, len(set.attachmentKeys))
+		for att, key := range set.attachmentKeys {
+			if attachmentKeys[att], err = packKey(key); err != nil {
+				return nil, fmt.Errorf("cannot pack key of attachment %v: %w", att, err)
+			}
+		}
+
+		set.BodyKey, set.AttachmentKeys = bodyKey, attachmentKeys
+	}
+
 	pkg := &MessagePackage{
 		Type:      MessagePackageCleartext,
 		Signature: set.signature,
 	}
 	set.Addresses[addr] = pkg
 	set.Type |= MessagePackageCleartext
-
-	if set.BodyKey == nil || set.AttachmentKeys == nil {
-		set.BodyKey = &PackedKey{
-			Algorithm: cipherFunctionString(set.bodyKey.CipherFunc),
-			Key:       base64.StdEncoding.EncodeToString(set.bodyKey.Key),
-		}
-
-		set.AttachmentKeys = make(map[string]*PackedKey, len(set.attachmentKeys))
-		for att, key := range set.attachmentKeys {
-			set.AttachmentKeys[att] = &PackedKey{
-				Algorithm: cipherFunctionString(key.CipherFunc),
-				Key:       base64.StdEncoding.EncodeToString(key.Key),
-			}
-		}
-	}
 
 	return pkg, nil
 }

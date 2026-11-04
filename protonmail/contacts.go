@@ -41,35 +41,32 @@ type ContactEmail struct {
 	Name string
 }
 
-type ContactCardType int
+// ContactCardFlags says how a card is protected; the zero value is a
+// cleartext card. The API sends it as the card's Type.
+type ContactCardFlags int
 
 const (
-	ContactCardCleartext ContactCardType = iota
-	ContactCardEncrypted
+	ContactCardEncrypted ContactCardFlags = 1 << iota
 	ContactCardSigned
-	ContactCardEncryptedAndSigned
 )
 
-func (t ContactCardType) Signed() bool {
-	switch t {
-	case ContactCardSigned, ContactCardEncryptedAndSigned:
-		return true
-	default:
-		return false
-	}
+// The API numbers card types 1, 2 and 3 (encrypted and signed).
+// proof: compile-time
+var (
+	_ = [1]struct{}{}[ContactCardEncrypted-1]
+	_ = [1]struct{}{}[ContactCardSigned-2]
+)
+
+func (f ContactCardFlags) Signed() bool {
+	return f&ContactCardSigned != 0
 }
 
-func (t ContactCardType) Encrypted() bool {
-	switch t {
-	case ContactCardEncrypted, ContactCardEncryptedAndSigned:
-		return true
-	default:
-		return false
-	}
+func (f ContactCardFlags) Encrypted() bool {
+	return f&ContactCardEncrypted != 0
 }
 
 type ContactCard struct {
-	Type      ContactCardType
+	Type      ContactCardFlags
 	Data      string
 	Signature string
 }
@@ -114,7 +111,7 @@ func NewEncryptedContactCard(r io.Reader, to []*openpgp.Entity, signer *openpgp.
 			return nil, err
 		}
 
-		card.Type = ContactCardEncryptedAndSigned
+		card.Type |= ContactCardSigned
 		card.Signature = sig.String()
 	}
 
