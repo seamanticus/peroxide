@@ -4,56 +4,63 @@ Work left for a later session, found while fixing unread counts and
 latency in October 2026. Each item says what is wrong, where, what was
 observed, and the steps a fix needs.
 
-## 1. Handle `Labels` events
+## 1. Folders and labels: names, and what `Labels` events leave open
 
-**Problem.** Folders and labels are read once, at login, by
-`user.initMailboxes` (imap/user.go). Proton's events carry a `Labels`
-list, but `protonmail.Event` doesn't decode it (`//Labels` in
-protonmail/events.go). A folder or label created, renamed or deleted in
-Proton therefore only shows up in IMAP after peroxide restarts.
+`Labels` events are handled (`user.handleLabelEvent`, imap/user.go):
+folders and labels created, renamed or deleted in Proton change
+`u.mailboxes` and `u.flags` without a restart. Clients are not told:
+they see the change on their next LIST (aerc lists only after login, so
+after it reconnects). go-imap can send an unsolicited LIST
+(`backend.MailboxInfoUpdate`), but its client, which aerc uses, drops it.
 
-**Observed** in a `-debug-raw` log (2026-10-14, 3 accounts):
+**Observed.**
 
-- Entries look like `{"ID": ..., "Action": 2, "Label": {...}}`, with
-  `Label` holding `ID, Name, Path, Type, Exclusive, Color, Display,
-  Notify, Order, LastUnseenMessageEventID`. `ParentID` was null.
-- An update (`Action` 2) for "Primary", "All Mail" and "Inbox" (`Type` 1,
-  `Exclusive` 0) followed every read/unread toggle: 17 times, each time
-  after a STORE. Only `LastUnseenMessageEventID` changed.
-- `GET /labels` returned no labels for any of the three accounts, so
-  there was no custom folder or label to test with.
+- 2026-10-14 `-debug-raw` log: entries look like
+  `{"ID": ..., "Action": 2, "Label": {...}}`. An update for "Primary",
+  "All Mail" and "Inbox" (`Type` 1, `Exclusive` 0) followed every
+  read/unread toggle, changing only `LastUnseenMessageEventID`. System
+  labels are therefore skipped, and updates act only on a changed name.
+- 2026-11-04 `-debug-raw` log (bob): `GET /labels`, with no
+  type, lists custom folders and labels alike, both `Type` 1: folder
+  `PEROXIDE_FOLDER` with `Exclusive` 1, labels `peroxide_label_1..3`
+  with `Exclusive` 0. `Path` equals `Name` for these top-level ones.
+  No `Labels` event was in that log: create, rename and delete events
+  are only checked against the 2026-10-14 shape and go-proton-api.
 
-**Steps.**
+**Left open.**
 
-1. protonmail: add `Labels []*EventLabel` to `Event`, with
-   `EventLabel{ID string; Action EventAction; Label *Label}`, and
-   `Path`, `ParentID` to `Label`. Check the actions are numbered as for
-   messages (0 delete, 1 create, 2 update).
-2. imap/user.go, `receiveEvents`: for each label event, under `u.Lock()`:
-   - create: an exclusive label (folder) becomes a mailbox
-     (`newMailbox(name, id, nil, u)` into `u.mailboxes`), any other a flag
-     (`u.flags[id] = labelNameToFlag(name)`), as `initMailboxes` does;
-   - update: act only if `Name`, `Path` or `Exclusive` changed, as updates
-     fire on every unread change; rename the mailbox or flag;
-   - delete: drop the mailbox or flag, and its bucket in the local
-     database (needs a new `database` function; `Mailbox.Reset` recreates
-     the bucket).
-3. Decide how clients learn about it. go-imap can send an unsolicited LIST
-   (`backend.MailboxInfoUpdate`); check whether aerc uses it or only
-   re-lists on its own.
-4. Decide on mailbox names. peroxide names mailboxes after `Name` alone,
-   flat (`\Noinferiors`): nested folders show flat, and two folders with
-   the same name collide in `user.getMailbox`, which picks one at random
-   (map order). Naming them after `Path` fixes both, but renames
-   mailboxes for existing users.
-5. Check the label list itself: Proton's client asks
-   `/core/v4/labels?Type=1`, `Type=3` and `Type=4` separately, peroxide
-   asks `/labels` with no type. Create a custom folder and a custom label
-   in Proton and see whether `GET /labels` lists them; if not, ask per
-   type.
-6. Tests (imap): events creating, renaming and deleting a folder and a
-   label; an update changing only `LastUnseenMessageEventID` changes
-   nothing and sends no update.
+1. Mailbox names. peroxide names a folder after `Name` alone, flat
+   (`\Noinferiors`), and a label becomes the flag
+   `labelNameToFlag(Name)`:
+   - Nested folders show flat. `Path` is one string joined with `/`
+     (go-proton-api splits it); peroxide decodes neither `Path` nor
+     `ParentID`.
+   - Two folders with the same name, at different levels or matching a
+     system mailbox ("Sent"), collide in `user.getMailbox`, which picks
+     one in map order. Two labels mapping to the same flag ("To do" and
+     "To_do") collide the same way in `user.getFlag`.
+   - proton-bridge names folders `Folders/<Path>` and labels
+     `Labels/<Path>`, labels being mailboxes there, not flags
+     (`GetMailboxName`, internal/services/imapservice/imap_updates.go).
+     That removes every collision, and aerc treats a server on 127.0.0.1
+     as Proton and mailboxes under `Labels/` as labels
+     (worker/imap/list.go), so it would gain label support.
+   - Cost: it renames every custom mailbox, breaking client settings
+     that name them (aerc `folders`, `archive`, `copy-to`). Local data is
+     keyed by label ID, so no resync. Labels as mailboxes also need COPY
+     to label and EXPUNGE to unlabel. A parent's rename sends no event
+     for its children: proton-bridge fetches each child again
+     (`onLabelUpdated`).
+2. A folder that becomes a label, or back (`Exclusive` changes in an
+   update), is logged and ignored until the next login. proton-bridge
+   never handles it either, so Proton probably never sends it. If it
+   does, handle it as a delete then a create.
+3. A folder deleted while a client has it selected gives that client
+   errors on its next command, instead of a BYE or a closed mailbox.
+4. Check live: create, rename and delete a folder and a label while
+   peroxide runs with `-debug-raw` (capture with `2>&1`: API logs go to
+   stderr, IMAP logs to stdout), and check the event shape and the logs
+   `Folder ... created/renamed/deleted`.
 
 ## 2. `STORE +FLAGS (\Deleted)` without `.SILENT` sends no FETCH
 
