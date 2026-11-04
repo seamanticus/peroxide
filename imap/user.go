@@ -232,7 +232,7 @@ func (u *user) getMailbox(name string) *mailbox {
 	defer u.Unlock()
 
 	for _, mbox := range u.mailboxes {
-		if mbox.name == name {
+		if mbox.Name() == name {
 			return mbox
 		}
 	}
@@ -316,7 +316,7 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			u.Lock()
 			for _, mbox := range u.mailboxes {
 				if err := mbox.reset(); err != nil {
-					log.Printf("cannot reset mailbox %s: %v", mbox.name, err)
+					log.Printf("cannot reset mailbox %s: %v", mbox.Name(), err)
 				}
 			}
 			u.Unlock()
@@ -330,6 +330,11 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 				log.Printf("cannot reinitialize mailboxes: %v", err)
 			}
 		} else {
+			// First, so that messages moved into a new folder find its mailbox.
+			for _, eventLabel := range event.Labels {
+				u.handleLabelEvent(eventLabel)
+			}
+
 			for _, eventMessage := range event.Messages {
 				switch eventMessage.Action {
 				case protonmail.EventCreate:
@@ -344,8 +349,8 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 					for labelID, seqNum := range seqNums {
 						if mbox := u.getMailboxByLabel(labelID); mbox != nil {
 							update := new(imapbackend.MailboxUpdate)
-							update.Update = imapbackend.NewUpdate(u.u.Name, mbox.name)
-							update.MailboxStatus = imap.NewMailboxStatus(mbox.name, []imap.StatusItem{imap.StatusMessages})
+							update.Update = imapbackend.NewUpdate(u.u.Name, mbox.Name())
+							update.MailboxStatus = imap.NewMailboxStatus(mbox.Name(), []imap.StatusItem{imap.StatusMessages})
 							update.MailboxStatus.Messages = seqNum
 							eventUpdates = append(eventUpdates, update)
 						}
@@ -408,6 +413,125 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 				u.setAPICounts(counts)
 			}
 		}
+	}
+}
+
+// isSystemLabel reports whether labelID has a mailbox or flag of its own.
+func isSystemLabel(labelID string) bool {
+	for _, data := range systemMailboxes {
+		if data.label == labelID {
+			return true
+		}
+	}
+	for _, data := range systemFlags {
+		if data.label == labelID {
+			return true
+		}
+	}
+	return false
+}
+
+// handleLabelEvent applies a folder or label created, renamed or deleted in
+// Proton, as initMailboxes would. Clients see it on their next LIST.
+func (u *user) handleLabelEvent(event *protonmail.EventLabel) {
+	// Proton updates system labels after every read or unread change, with
+	// names and Exclusive values that don't match their mailboxes and flags.
+	if isSystemLabel(event.ID) {
+		return
+	}
+
+	switch event.Action {
+	case protonmail.EventCreate:
+		if event.Label == nil {
+			log.Printf("cannot handle create event for label %v: no label", event.ID)
+			return
+		}
+		u.createLabel(event.Label)
+	case protonmail.EventUpdate, protonmail.EventUpdateFlags:
+		if event.Label == nil {
+			log.Printf("cannot handle update event for label %v: no label", event.ID)
+			return
+		}
+		u.updateLabel(event.Label)
+	case protonmail.EventDelete:
+		u.deleteLabel(event.ID)
+	default:
+		log.Printf("cannot handle event for label %v: unknown action %v", event.ID, event.Action)
+	}
+}
+
+func (u *user) createLabel(label *protonmail.Label) {
+	if label.Type == protonmail.LabelContact {
+		return
+	}
+
+	if label.Exclusive != 1 {
+		log.Printf("Label %v %q created", label.ID, label.Name)
+		u.Lock()
+		u.flags[label.ID] = labelNameToFlag(label.Name)
+		u.Unlock()
+		return
+	}
+
+	log.Printf("Folder %v %q created", label.ID, label.Name)
+	// Outside u's lock: a database write may wait for read transactions, and
+	// SearchMessages takes the lock inside one.
+	mbox, err := newMailbox(label.Name, label.ID, nil, u)
+	if err != nil {
+		log.Printf("cannot create mailbox for folder %v: %v", label.ID, err)
+		return
+	}
+	u.Lock()
+	if _, ok := u.mailboxes[label.ID]; !ok {
+		u.mailboxes[label.ID] = mbox
+	}
+	u.Unlock()
+}
+
+// updateLabel renames the folder or label. Updates also follow every read or
+// unread change in it, and then change nothing.
+func (u *user) updateLabel(label *protonmail.Label) {
+	u.Lock()
+	defer u.Unlock()
+
+	if mbox, ok := u.mailboxes[label.ID]; ok {
+		if label.Exclusive != 1 {
+			log.Printf("Folder %v became a label: ignored until the next login", label.ID)
+			return
+		}
+		if old := mbox.Name(); old != label.Name {
+			log.Printf("Folder %v renamed from %q to %q", label.ID, old, label.Name)
+			mbox.setName(label.Name)
+		}
+		return
+	}
+
+	if flag, ok := u.flags[label.ID]; ok {
+		if label.Exclusive == 1 {
+			log.Printf("Label %v became a folder: ignored until the next login", label.ID)
+			return
+		}
+		if name := labelNameToFlag(label.Name); name != flag {
+			log.Printf("Label %v renamed from %q to %q", label.ID, flag, name)
+			u.flags[label.ID] = name
+		}
+	}
+	// Anything else, such as a contact group, has no mailbox or flag.
+}
+
+func (u *user) deleteLabel(labelID string) {
+	u.Lock()
+	mbox, isFolder := u.mailboxes[labelID]
+	delete(u.mailboxes, labelID)
+	delete(u.flags, labelID)
+	u.Unlock()
+
+	if !isFolder {
+		return
+	}
+	log.Printf("Folder %v %q deleted", labelID, mbox.Name())
+	if err := mbox.delete(); err != nil {
+		log.Printf("cannot delete mailbox of folder %v: %v", labelID, err)
 	}
 }
 

@@ -295,3 +295,21 @@ func (mbox *Mailbox) Reset() error {
 		return putCounts(tx, mbox.labelID, mailboxCounts{})
 	})
 }
+
+// Delete removes the mailbox's entries and counts. The messages stay, as other
+// mailboxes may hold them.
+func (mbox *Mailbox) Delete() error {
+	return mbox.u.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(mailboxesBucket)
+		if b == nil {
+			return errors.New("cannot find mailboxes bucket")
+		}
+		if err := b.DeleteBucket([]byte(mbox.labelID)); err != nil {
+			return fmt.Errorf("cannot delete mailbox %v: %w", mbox.labelID, err)
+		}
+		if counts := tx.Bucket(countsBucket); counts != nil {
+			return counts.Delete([]byte(mbox.labelID))
+		}
+		return nil
+	})
+}

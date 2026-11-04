@@ -18,12 +18,16 @@ import (
 const delimiter = "/"
 
 type mailbox struct {
-	name  string
 	label string
 	attrs []string
 
 	u  *user
 	db *database.Mailbox
+
+	// The name changes when the folder is renamed in Proton, and go-imap reads
+	// it from other goroutines: read it with Name.
+	nameLock sync.Mutex
+	name     string
 
 	// Message counts reported by the API, the only ones known until the
 	// mailbox is synchronized. They have their own lock, as init holds the
@@ -54,14 +58,24 @@ func newMailbox(name string, label string, attrs []string, u *user) (*mailbox, e
 }
 
 func (mbox *mailbox) Name() string {
+	mbox.nameLock.Lock()
+	defer mbox.nameLock.Unlock()
+
 	return mbox.name
+}
+
+func (mbox *mailbox) setName(name string) {
+	mbox.nameLock.Lock()
+	defer mbox.nameLock.Unlock()
+
+	mbox.name = name
 }
 
 func (mbox *mailbox) Info() (*imap.MailboxInfo, error) {
 	return &imap.MailboxInfo{
 		Attributes: append([]string{imap.NoInferiorsAttr}, mbox.attrs...),
 		Delimiter:  delimiter,
-		Name:       mbox.name,
+		Name:       mbox.Name(),
 	}, nil
 }
 
@@ -89,7 +103,7 @@ func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error
 	}
 	mbox.u.Unlock()
 
-	status := imap.NewMailboxStatus(mbox.name, items)
+	status := imap.NewMailboxStatus(mbox.Name(), items)
 	status.Flags = flags
 	status.PermanentFlags = permFlags
 	status.UnseenSeqNum = 0 // TODO
@@ -104,7 +118,7 @@ func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error
 		var err error
 		total, unread, err = mbox.db.Count()
 		if err != nil {
-			return nil, fmt.Errorf("cannot count messages in mailbox %v: %w", mbox.name, err)
+			return nil, fmt.Errorf("cannot count messages in mailbox %v: %w", mbox.Name(), err)
 		}
 	} else {
 		total, unread = mbox.apiCounts()
@@ -141,7 +155,7 @@ func (mbox *mailbox) Check() error {
 }
 
 func (mbox *mailbox) sync() error {
-	log.Printf("Synchronizing mailbox %v...", mbox.name)
+	log.Printf("Synchronizing mailbox %v...", mbox.Name())
 
 	// TODO: don't do this without incrementing UIDVALIDITY
 	if err := mbox.db.Reset(); err != nil {
@@ -176,7 +190,7 @@ func (mbox *mailbox) sync() error {
 		filter.Page++
 	}
 
-	log.Printf("Synchronizing mailbox %v: done.", mbox.name)
+	log.Printf("Synchronizing mailbox %v: done.", mbox.Name())
 	return nil
 }
 
@@ -203,6 +217,16 @@ func (mbox *mailbox) reset() error {
 
 	mbox.initialized = false
 	return mbox.db.Reset()
+}
+
+// delete forgets the mailbox after its folder was deleted. Clients that still
+// have it selected get errors from then on.
+func (mbox *mailbox) delete() error {
+	mbox.Lock()
+	defer mbox.Unlock()
+
+	mbox.initialized = false
+	return mbox.db.Delete()
 }
 
 func (mbox *mailbox) fetchFlags(msg *protonmail.Message) []string {
@@ -313,7 +337,7 @@ func (mbox *mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fe
 			} else {
 				total, _, err := mbox.db.Count()
 				if err != nil {
-					return fmt.Errorf("cannot count messages in mailbox %v: %w", mbox.name, err)
+					return fmt.Errorf("cannot count messages in mailbox %v: %w", mbox.Name(), err)
 				}
 				stop = uint32(total)
 			}

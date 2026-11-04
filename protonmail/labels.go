@@ -30,7 +30,7 @@ type Label struct {
 	Color     string
 	Display   int
 	Type      LabelType
-	Exclusive int
+	Exclusive int // 1 for a folder, 0 for a label; both have Type LabelMessage
 	Notify    int
 	Order     int
 }

@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -325,4 +326,89 @@ func TestEventSentBeforeCountsFetched(t *testing.T) {
 	close(release)
 	<-done
 	checkStatus(t, mbox, 3, 1)
+}
+
+func mailboxNames(u *user) map[string]string {
+	names := make(map[string]string)
+	for labelID, mbox := range u.mailboxes {
+		names[labelID] = mbox.Name()
+	}
+	return names
+}
+
+// Folders and labels created, renamed and deleted in Proton change mailboxes
+// and flags without waiting for the next login, and without telling clients.
+func TestLabelEvents(t *testing.T) {
+	inbox, _ := newTestMailbox(t, nil)
+	u := inbox.u
+	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
+	u.flags = map[string]string{protonmail.LabelStarred: imap.FlaggedFlag}
+
+	folder := func(name string) *protonmail.Label {
+		return &protonmail.Label{ID: "f", Name: name, Type: protonmail.LabelMessage, Exclusive: 1}
+	}
+	label := func(name string) *protonmail.Label {
+		return &protonmail.Label{ID: "l", Name: name, Type: protonmail.LabelMessage}
+	}
+	inboxOnly := map[string]string{protonmail.LabelInbox: imap.InboxName}
+	withFolder := map[string]string{protonmail.LabelInbox: imap.InboxName, "f": "Work"}
+	renamed := map[string]string{protonmail.LabelInbox: imap.InboxName, "f": "Projects"}
+	starredOnly := map[string]string{protonmail.LabelStarred: imap.FlaggedFlag}
+	withLabel := map[string]string{protonmail.LabelStarred: imap.FlaggedFlag, "l": "To_do"}
+
+	steps := []struct {
+		name          string
+		event         *protonmail.EventLabel
+		wantMailboxes map[string]string
+		wantFlags     map[string]string
+	}{
+		{"create folder", &protonmail.EventLabel{ID: "f", Action: protonmail.EventCreate, Label: folder("Work")}, withFolder, starredOnly},
+		{"create label", &protonmail.EventLabel{ID: "l", Action: protonmail.EventCreate, Label: label("To do")}, withFolder, withLabel},
+		{"create contact group", &protonmail.EventLabel{ID: "c", Action: protonmail.EventCreate, Label: &protonmail.Label{ID: "c", Name: "Friends", Type: protonmail.LabelContact}}, withFolder, withLabel},
+		// Sent after every read or unread change in the folder.
+		{"update without changes", &protonmail.EventLabel{ID: "f", Action: protonmail.EventUpdate, Label: folder("Work")}, withFolder, withLabel},
+		// Seen in Proton's events: names and Exclusive don't match INBOX.
+		{"update system label", &protonmail.EventLabel{ID: protonmail.LabelInbox, Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: protonmail.LabelInbox, Name: "Inbox", Type: protonmail.LabelMessage}}, withFolder, withLabel},
+		{"update unknown label", &protonmail.EventLabel{ID: "u", Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: "u", Name: "Primary", Type: protonmail.LabelMessage}}, withFolder, withLabel},
+		{"rename folder", &protonmail.EventLabel{ID: "f", Action: protonmail.EventUpdate, Label: folder("Projects")}, renamed, withLabel},
+		{"rename label", &protonmail.EventLabel{ID: "l", Action: protonmail.EventUpdateFlags, Label: label("Later on")}, renamed, map[string]string{protonmail.LabelStarred: imap.FlaggedFlag, "l": "Later_on"}},
+		{"folder becomes label", &protonmail.EventLabel{ID: "f", Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: "f", Name: "Other", Type: protonmail.LabelMessage}}, renamed, map[string]string{protonmail.LabelStarred: imap.FlaggedFlag, "l": "Later_on"}},
+		{"delete label", &protonmail.EventLabel{ID: "l", Action: protonmail.EventDelete}, renamed, starredOnly},
+		{"delete folder", &protonmail.EventLabel{ID: "f", Action: protonmail.EventDelete}, inboxOnly, starredOnly},
+	}
+
+	var created *mailbox
+	for _, step := range steps {
+		events := make(chan *protonmail.Event, 1)
+		events <- &protonmail.Event{Labels: []*protonmail.EventLabel{step.event}}
+		close(events)
+		updates := make(chan imapbackend.Update, 10)
+		u.receiveEvents(updates, events)
+
+		if n := len(updates); n != 0 {
+			t.Errorf("%v: sent %v updates, want none", step.name, n)
+		}
+		if got := mailboxNames(u); !maps.Equal(got, step.wantMailboxes) {
+			t.Errorf("%v: mailboxes = %v, want %v", step.name, got, step.wantMailboxes)
+		}
+		if !maps.Equal(u.flags, step.wantFlags) {
+			t.Errorf("%v: flags = %v, want %v", step.name, u.flags, step.wantFlags)
+		}
+
+		if mbox, ok := u.mailboxes["f"]; ok {
+			if created == nil {
+				created = mbox
+			} else if mbox != created {
+				// A new mailbox would lose the old one's UIDs and selections.
+				t.Errorf("%v: folder's mailbox replaced", step.name)
+			}
+		}
+	}
+
+	if created == nil {
+		t.Fatal("folder never created")
+	}
+	if _, err := created.db.UidNext(); err == nil {
+		t.Error("deleted folder's mailbox still in the local database")
+	}
 }

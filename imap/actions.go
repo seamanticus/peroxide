@@ -23,8 +23,8 @@ func (u *user) applyUpdate(apiID string, update *protonmail.EventMessageUpdate) 
 	for labelID, seqNum := range createdSeqNums {
 		if mbox := u.getMailboxByLabel(labelID); mbox != nil {
 			up := new(imapbackend.MailboxUpdate)
-			up.Update = imapbackend.NewUpdate(u.u.Name, mbox.name)
-			up.MailboxStatus = imap.NewMailboxStatus(mbox.name, []imap.StatusItem{imap.StatusMessages})
+			up.Update = imapbackend.NewUpdate(u.u.Name, mbox.Name())
+			up.MailboxStatus = imap.NewMailboxStatus(mbox.Name(), []imap.StatusItem{imap.StatusMessages})
 			up.MailboxStatus.Messages = seqNum
 			updates = append(updates, up)
 		}
@@ -32,7 +32,7 @@ func (u *user) applyUpdate(apiID string, update *protonmail.EventMessageUpdate) 
 	for labelID, seqNum := range deletedSeqNums {
 		if mbox := u.getMailboxByLabel(labelID); mbox != nil {
 			up := new(imapbackend.ExpungeUpdate)
-			up.Update = imapbackend.NewUpdate(u.u.Name, mbox.name)
+			up.Update = imapbackend.NewUpdate(u.u.Name, mbox.Name())
 			up.SeqNum = seqNum
 			updates = append(updates, up)
 		}
@@ -53,12 +53,12 @@ func (u *user) applyUpdate(apiID string, update *protonmail.EventMessageUpdate) 
 		}
 		seqNum, uid, err := mbox.db.FromApiID(apiID)
 		if err != nil {
-			log.Printf("cannot get sequence number of message %v in %v: %v", apiID, mbox.name, err)
+			log.Printf("cannot get sequence number of message %v in %v: %v", apiID, mbox.Name(), err)
 			continue
 		}
 
 		up := new(imapbackend.MessageUpdate)
-		up.Update = imapbackend.NewUpdate(u.u.Name, mbox.name)
+		up.Update = imapbackend.NewUpdate(u.u.Name, mbox.Name())
 		// Clients may have asked for this with a UID command, and then only
 		// take responses bearing the UID (RFC 3501 section 6.4.8).
 		up.Message = imap.NewMessage(seqNum, []imap.FetchItem{imap.FetchFlags, imap.FetchUid})
@@ -83,7 +83,7 @@ func (u *user) applyDelete(apiID string) ([]imapbackend.Update, error) {
 	for labelID, seqNum := range seqNums {
 		if mbox := u.getMailboxByLabel(labelID); mbox != nil {
 			up := new(imapbackend.ExpungeUpdate)
-			up.Update = imapbackend.NewUpdate(u.u.Name, mbox.name)
+			up.Update = imapbackend.NewUpdate(u.u.Name, mbox.Name())
 			up.SeqNum = seqNum
 			updates = append(updates, up)
 		}

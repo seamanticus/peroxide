@@ -18,7 +18,7 @@ type Event struct {
 	Messages []*EventMessage
 	Contacts []*EventContact
 	//ContactEmails
-	//Labels
+	Labels []*EventLabel
 	//User
 	//Members
 	//Domains
@@ -161,6 +161,14 @@ type EventContact struct {
 	ID      string
 	Action  EventAction
 	Contact *Contact
+}
+
+// EventLabel is a folder or label created, updated or deleted. Label is nil
+// for EventDelete.
+type EventLabel struct {
+	ID     string
+	Action EventAction
+	Label  *Label
 }
 
 func (c *Client) GetEvent(last string) (*Event, error) {
