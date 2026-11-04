@@ -367,8 +367,10 @@ func TestLabelEvents(t *testing.T) {
 		{"create contact group", &protonmail.EventLabel{ID: "c", Action: protonmail.EventCreate, Label: &protonmail.Label{ID: "c", Name: "Friends", Type: protonmail.LabelContact}}, withFolder, withLabel},
 		// Sent after every read or unread change in the folder.
 		{"update without changes", &protonmail.EventLabel{ID: "f", Action: protonmail.EventUpdate, Label: folder("Work")}, withFolder, withLabel},
-		// Seen in Proton's events: names and Exclusive don't match INBOX.
-		{"update system label", &protonmail.EventLabel{ID: protonmail.LabelInbox, Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: protonmail.LabelInbox, Name: "Inbox", Type: protonmail.LabelMessage}}, withFolder, withLabel},
+		// Seen in Proton's events: names and Exclusive don't match INBOX or
+		// \Flagged, and the event ID differs from the label ID.
+		{"update system folder", &protonmail.EventLabel{ID: "k7rAD-", Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: protonmail.LabelInbox, Name: "Inbox", Type: protonmail.LabelMessage}}, withFolder, withLabel},
+		{"update system label", &protonmail.EventLabel{ID: "ZIZtzh", Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: protonmail.LabelStarred, Name: "Starred", Type: protonmail.LabelMessage}}, withFolder, withLabel},
 		{"update unknown label", &protonmail.EventLabel{ID: "u", Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: "u", Name: "Primary", Type: protonmail.LabelMessage}}, withFolder, withLabel},
 		{"rename folder", &protonmail.EventLabel{ID: "f", Action: protonmail.EventUpdate, Label: folder("Projects")}, renamed, withLabel},
 		{"rename label", &protonmail.EventLabel{ID: "l", Action: protonmail.EventUpdateFlags, Label: label("Later on")}, renamed, map[string]string{protonmail.LabelStarred: imap.FlaggedFlag, "l": "Later_on"}},

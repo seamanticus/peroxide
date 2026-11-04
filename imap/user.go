@@ -373,6 +373,9 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 					if err != nil {
 						log.Printf("cannot handle delete event for message %s: %v", eventMessage.ID, err)
 					}
+				default:
+					// Not a broken invariant: the action comes from the API.
+					log.Printf("cannot handle event for message %s: unknown action %v", eventMessage.ID, eventMessage.Action)
 				}
 			}
 
@@ -436,7 +439,12 @@ func isSystemLabel(labelID string) bool {
 func (u *user) handleLabelEvent(event *protonmail.EventLabel) {
 	// Proton updates system labels after every read or unread change, with
 	// names and Exclusive values that don't match their mailboxes and flags.
-	if isSystemLabel(event.ID) {
+	// Their events have IDs of their own: only Label holds the label ID.
+	labelID := event.ID
+	if event.Label != nil {
+		labelID = event.Label.ID
+	}
+	if isSystemLabel(labelID) {
 		return
 	}
 
