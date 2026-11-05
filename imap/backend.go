@@ -20,8 +20,7 @@ const appendLimit = 50 << 20
 // CreateMessageLimit makes go-imap announce APPENDLIMIT=appendLimit, the same
 // for every mailbox (RFC 7889 section 2).
 func (u *user) CreateMessageLimit() *uint32 {
-	limit := uint32(appendLimit)
-	return &limit
+	return new(uint32(appendLimit))
 }
 
 var _ imapbackend.AppendLimitUser = (*user)(nil) // proof: compile-time
