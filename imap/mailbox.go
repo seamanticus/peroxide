@@ -580,7 +580,7 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 		return err
 	}
 
-	_, err := createMessage(mbox.u.c, mbox.u.u, mbox.u.privateKeys, mbox.u.addrs, body)
+	_, err := createMessage(mbox.u.c, mbox.u.u, mbox.u.privateKeys, mbox.u.addresses(), body)
 	if err != nil {
 		return err
 	}

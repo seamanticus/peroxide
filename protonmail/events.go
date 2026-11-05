@@ -23,6 +23,7 @@ type Event struct {
 	//ContactEmails
 	Labels []*EventLabel
 	//User
+	Addresses []*EventAddress
 	//Members
 	//Domains
 	//Organization
@@ -175,6 +176,14 @@ type EventLabel struct {
 	ID     string
 	Action EventAction
 	Label  *Label
+}
+
+// EventAddress is an address of the account created, updated or deleted.
+// Address is nil for EventDelete, whose ID is the address ID.
+type EventAddress struct {
+	ID      string
+	Action  EventAction
+	Address *Address
 }
 
 func (c *Client) GetEvent(last string) (*Event, error) {

@@ -4,6 +4,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/emersion/go-imap"
@@ -412,5 +413,52 @@ func TestLabelEvents(t *testing.T) {
 	}
 	if _, err := created.db.UidNext(); err == nil {
 		t.Error("deleted folder's mailbox still in the local database")
+	}
+}
+
+func addressEmails(addrs []*protonmail.Address) []string {
+	var emails []string
+	for _, a := range addrs {
+		emails = append(emails, a.Email)
+	}
+	return emails
+}
+
+// Addresses created, changed and deleted in Proton change the address list
+// drafts take their sender from, without changing a list handed out before.
+func TestAddressEvents(t *testing.T) {
+	inbox, _ := newTestMailbox(t, nil)
+	u := inbox.u
+	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
+	u.addrs = []*protonmail.Address{{ID: "a1", Email: "bob@proton.me"}}
+
+	steps := []struct {
+		name  string
+		event *protonmail.EventAddress
+		want  []string
+	}{
+		{"create", &protonmail.EventAddress{ID: "a2", Action: protonmail.EventCreate, Address: &protonmail.Address{ID: "a2", Email: "alias@proton.me"}}, []string{"bob@proton.me", "alias@proton.me"}},
+		{"update", &protonmail.EventAddress{ID: "a2", Action: protonmail.EventUpdate, Address: &protonmail.Address{ID: "a2", Email: "alias2@proton.me"}}, []string{"bob@proton.me", "alias2@proton.me"}},
+		{"update unknown creates", &protonmail.EventAddress{ID: "a3", Action: protonmail.EventUpdateFlags, Address: &protonmail.Address{ID: "a3", Email: "new@proton.me"}}, []string{"bob@proton.me", "alias2@proton.me", "new@proton.me"}},
+		{"update without address", &protonmail.EventAddress{ID: "a1", Action: protonmail.EventUpdate}, []string{"bob@proton.me", "alias2@proton.me", "new@proton.me"}},
+		{"delete", &protonmail.EventAddress{ID: "a2", Action: protonmail.EventDelete}, []string{"bob@proton.me", "new@proton.me"}},
+		{"delete unknown", &protonmail.EventAddress{ID: "zz", Action: protonmail.EventDelete}, []string{"bob@proton.me", "new@proton.me"}},
+		{"unknown action", &protonmail.EventAddress{ID: "a1", Action: 9}, []string{"bob@proton.me", "new@proton.me"}},
+	}
+	for _, step := range steps {
+		before := u.addresses()
+		kept := slices.Clone(addressEmails(before))
+
+		events := make(chan *protonmail.Event, 1)
+		events <- &protonmail.Event{Addresses: []*protonmail.EventAddress{step.event}}
+		close(events)
+		u.receiveEvents(make(chan imapbackend.Update, 10), events)
+
+		if got := addressEmails(u.addresses()); !slices.Equal(got, step.want) {
+			t.Errorf("%v: addresses = %v, want %v", step.name, got, step.want)
+		}
+		if got := addressEmails(before); !slices.Equal(got, kept) {
+			t.Errorf("%v: list read before changed to %v, was %v", step.name, got, kept)
+		}
 	}
 }

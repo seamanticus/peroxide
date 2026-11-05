@@ -43,7 +43,6 @@ type user struct {
 	c           *protonmail.Client
 	u           *protonmail.User
 	privateKeys openpgp.EntityList
-	addrs       []*protonmail.Address
 
 	db             *database.User
 	eventsReceiver *events.Receiver
@@ -57,6 +56,9 @@ type user struct {
 	numClients int
 	mailboxes  map[string]*mailbox // indexed by label ID
 	flags      map[string]string   // indexed by label ID
+	// Replaced, never changed in place, by Addresses events: read it with
+	// addresses.
+	addrs []*protonmail.Address
 }
 
 func getUser(be *backend, username string, c *protonmail.Client, privateKeys openpgp.EntityList) (*user, error) {
@@ -353,6 +355,9 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			// First, so that messages moved into a new folder find its mailbox.
 			for _, eventLabel := range event.Labels {
 				u.handleLabelEvent(eventLabel)
+			}
+			for _, eventAddress := range event.Addresses {
+				u.handleAddressEvent(eventAddress)
 			}
 
 			for _, eventMessage := range event.Messages {
