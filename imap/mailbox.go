@@ -140,6 +140,8 @@ func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error
 			status.Recent = 0
 		case imap.StatusUnseen:
 			status.Unseen = uint32(unread)
+		case imap.StatusAppendLimit:
+			status.AppendLimit = appendLimit
 		}
 	}
 
@@ -255,7 +257,7 @@ func (mbox *mailbox) fetchFlags(msg *protonmail.Message) []string {
 	return flags
 }
 
-func (mbox *mailbox) fetchMessage(isUid bool, id uint32, items []imap.FetchItem) (*imap.Message, error) {
+func (mbox *mailbox) fetchMessage(isUid bool, id uint32, items []imap.FetchItem) (*imap.Message, *protonmail.Message, error) {
 	var apiID string
 	var err error
 	if isUid {
@@ -264,17 +266,17 @@ func (mbox *mailbox) fetchMessage(isUid bool, id uint32, items []imap.FetchItem)
 		apiID, err = mbox.db.FromSeqNum(id)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	seqNum, uid, err := mbox.db.FromApiID(apiID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	msg, err := mbox.u.db.Message(apiID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	fetched := imap.NewMessage(seqNum, items)
@@ -285,7 +287,7 @@ func (mbox *mailbox) fetchMessage(isUid bool, id uint32, items []imap.FetchItem)
 		case imap.FetchBody, imap.FetchBodyStructure:
 			bs, err := mbox.fetchBodyStructure(msg, item == imap.FetchBodyStructure)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			fetched.BodyStructure = bs
 		case imap.FetchFlags:
@@ -296,29 +298,98 @@ func (mbox *mailbox) fetchMessage(isUid bool, id uint32, items []imap.FetchItem)
 			fetched.Size = uint32(msg.Size)
 		case imap.FetchUid:
 			fetched.Uid = uid
+		case imap.FetchRFC822, imap.FetchRFC822Header, imap.FetchRFC822Text:
+			// Old names of BODY[], BODY.PEEK[HEADER] and BODY[TEXT].
+			if err := mbox.fetchSection(fetched, msg, item); err != nil {
+				return nil, nil, err
+			}
+		case imap.FetchAll, imap.FetchFast, imap.FetchFull:
+			panic("invariant: ListMessages expands FETCH macros")
 		default:
-			section, err := imap.ParseBodySectionName(item)
-			if err != nil {
-				break
+			// BODY[...] and BODY.PEEK[...], which name any section.
+			if err := mbox.fetchSection(fetched, msg, item); err != nil {
+				return nil, nil, err
 			}
-
-			l, err := mbox.fetchBodySection(msg, section)
-			if err != nil {
-				return nil, err
-			}
-			fetched.Body[section] = l
 		}
 	}
 
-	return fetched, nil
+	return fetched, msg, nil
+}
+
+// fetchSection adds the body section item names to fetched. An item that
+// names no section is an error: answering without it would drop it silently.
+func (mbox *mailbox) fetchSection(fetched *imap.Message, msg *protonmail.Message, item imap.FetchItem) error {
+	section, err := imap.ParseBodySectionName(item)
+	if err != nil {
+		return fmt.Errorf("unknown FETCH item %v: %w", item, err)
+	}
+
+	l, err := mbox.fetchBodySection(msg, section)
+	if err != nil {
+		return err
+	}
+	fetched.Body[section] = l
+	return nil
+}
+
+// expandFetchItems replaces the FETCH macros ALL, FAST and FULL in items by
+// what they stand for (RFC 3501 section 6.4.5). go-imap's parser does so too,
+// but fetchMessage must not depend on it.
+func expandFetchItems(items []imap.FetchItem) []imap.FetchItem {
+	var expanded []imap.FetchItem
+	for _, item := range items {
+		expanded = append(expanded, item.Expand()...)
+	}
+	return expanded
+}
+
+// setsSeen reports whether fetching items sets \Seen (RFC 3501 section
+// 6.4.5): a body section without .PEEK, which RFC822 and RFC822.TEXT are.
+func setsSeen(items []imap.FetchItem) bool {
+	for _, item := range items {
+		if section, err := imap.ParseBodySectionName(item); err == nil && !section.Peek {
+			return true
+		}
+	}
+	return false
 }
 
 func (mbox *mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.FetchItem, ch chan<- *imap.Message) error {
+	opened, err := mbox.listMessages(uid, seqSet, items, ch)
+	if err != nil {
+		return err
+	}
+	if len(opened) == 0 {
+		return nil
+	}
+
+	// Only once ch is closed: until then go-imap is writing the FETCH response,
+	// and the FETCH telling this client about \Seen would wait behind it.
+	failed, err := mbox.u.c.MarkMessagesRead(opened)
+	if err == nil {
+		err = mbox.u.applyAction(opened, failed, unreadUpdate(0))
+	}
+	if err != nil {
+		// The client has the messages: failing FETCH would have it fetch
+		// them again for a flag it can still set with STORE.
+		log.Printf("cannot set \\Seen on messages fetched from %v: %v", mbox.Name(), err)
+	}
+	return nil
+}
+
+// listMessages sends the messages of seqSet to ch, and closes it. It returns
+// the unread messages among them that fetching items opens, as setsSeen says.
+func (mbox *mailbox) listMessages(uid bool, seqSet *imap.SeqSet, items []imap.FetchItem, ch chan<- *imap.Message) (opened []string, err error) {
 	defer close(ch)
 
 	if err := mbox.init(); err != nil {
-		return err
+		return nil, err
 	}
+
+	// Every message is fetched with the same items, so an unknown one fails
+	// the first message found, before any is sent.
+	items = expandFetchItems(items)
+	opens := setsSeen(items)
 
 	for _, seq := range seqSet.Set {
 		start := seq.Start
@@ -331,32 +402,33 @@ func (mbox *mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fe
 			if uid {
 				uidNext, err := mbox.db.UidNext()
 				if err != nil {
-					return err
+					return nil, err
 				}
 				stop = uidNext - 1
 			} else {
 				total, _, err := mbox.db.Count()
 				if err != nil {
-					return fmt.Errorf("cannot count messages in mailbox %v: %w", mbox.Name(), err)
+					return nil, fmt.Errorf("cannot count messages in mailbox %v: %w", mbox.Name(), err)
 				}
 				stop = uint32(total)
 			}
 		}
 
 		for i := start; i <= stop; i++ {
-			msg, err := mbox.fetchMessage(uid, i, items)
+			fetched, msg, err := mbox.fetchMessage(uid, i, items)
 			if err == database.ErrNotFound {
 				continue
 			} else if err != nil {
-				return err
+				return nil, err
 			}
-			if msg != nil {
-				ch <- msg
+			ch <- fetched
+			if opens && msg.Unread == 1 {
+				opened = append(opened, msg.ID)
 			}
 		}
 	}
 
-	return nil
+	return opened, nil
 }
 
 func matchString(s, substr string) bool {
@@ -497,6 +569,9 @@ func (mbox *mailbox) SearchMessages(isUID bool, c *imap.SearchCriteria) ([]uint3
 }
 
 func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Literal) error {
+	if body.Len() > appendLimit {
+		return imapbackend.ErrTooBig
+	}
 	if mbox.label != protonmail.LabelDraft {
 		return errors.New("cannot create messages outside the Drafts mailbox")
 	}

@@ -241,8 +241,6 @@ func messageHeader(msg *protonmail.Message) message.Header {
 }
 
 func (mbox *mailbox) fetchBodySection(msg *protonmail.Message, section *imap.BodySectionName) (imap.Literal, error) {
-	// TODO: section.Peek
-
 	b := new(bytes.Buffer)
 
 	if len(section.Path) == 0 {

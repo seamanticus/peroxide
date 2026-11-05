@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -205,5 +207,134 @@ func TestExpungeForgetsDeletedMessages(t *testing.T) {
 	}
 	if got := len(api.madeRequests()); got != 1 {
 		t.Errorf("made %v requests, want 1: the second EXPUNGE has nothing to delete", got)
+	}
+}
+
+// fetchTestMessage is an INBOX message whose header needs no API request.
+func fetchTestMessage(id string, unread int) *protonmail.Message {
+	msg := inboxMessage(id, unread)
+	msg.Sender = &protonmail.MessageAddress{Address: "from@example.org"}
+	return msg
+}
+
+// fetchAll runs FETCH 1:* with items and returns what it sent.
+func fetchAll(t *testing.T, mbox *mailbox, items ...imap.FetchItem) ([]*imap.Message, error) {
+	t.Helper()
+	seqSet, err := imap.ParseSeqSet("1:*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := make(chan *imap.Message, 10)
+	err = mbox.ListMessages(false, seqSet, items, ch)
+	var msgs []*imap.Message
+	for msg := range ch {
+		msgs = append(msgs, msg)
+	}
+	return msgs, err
+}
+
+// Fetching a body section without .PEEK sets \Seen (RFC 3501 section 6.4.5),
+// in Proton too, and tells clients with a FETCH of the flags.
+// evidence: witnesses
+func TestFetchBodySetsSeen(t *testing.T) {
+	tests := []struct {
+		name     string
+		item     imap.FetchItem
+		unread   int
+		wantSeen bool
+	}{
+		{"BODY", "BODY[HEADER]", 1, true},
+		{"BODY.PEEK", "BODY.PEEK[HEADER]", 1, false},
+		{"RFC822.HEADER", imap.FetchRFC822Header, 1, false},
+		{"already read", "BODY[HEADER]", 0, false},
+		{"no section", imap.FetchFlags, 1, false},
+	}
+	for _, tt := range tests {
+		api := &fakeAPI{t: t}
+		mbox, sent := newActionTestMailbox(t, api, []*protonmail.Message{fetchTestMessage("a", tt.unread)})
+
+		msgs, err := fetchAll(t, mbox, tt.item)
+		if err != nil {
+			t.Fatalf("%v: ListMessages() = %v", tt.name, err)
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("%v: sent %v messages, want 1", tt.name, len(msgs))
+		}
+
+		var wantRequests []string
+		wantUnseen := uint32(tt.unread)
+		if tt.wantSeen {
+			wantRequests = []string{"PUT /messages/read"}
+			wantUnseen = 0
+		}
+		if got := api.madeRequests(); !slices.Equal(got, wantRequests) {
+			t.Errorf("%v: made requests %v, want %v", tt.name, got, wantRequests)
+		}
+		checkStatus(t, mbox, 1, wantUnseen)
+
+		updates := sent()
+		if !tt.wantSeen {
+			if len(updates) != 0 {
+				t.Errorf("%v: sent %v updates, want none", tt.name, len(updates))
+			}
+			continue
+		}
+		if len(updates) != 1 {
+			t.Fatalf("%v: sent %v updates, want 1", tt.name, len(updates))
+		}
+		if up, ok := updates[0].(*imapbackend.MessageUpdate); !ok || !slices.Contains(up.Message.Flags, imap.SeenFlag) {
+			t.Errorf("%v: sent %#v, want a FETCH with \\Seen", tt.name, updates[0])
+		}
+	}
+}
+
+// An item that is neither a known name nor a body section fails FETCH before
+// any message is sent, rather than being left out of the answer.
+func TestFetchUnknownItem(t *testing.T) {
+	for _, item := range []imap.FetchItem{"X-UNKNOWN", "BODY[", "BINARY[1]"} {
+		api := &fakeAPI{t: t}
+		mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{fetchTestMessage("a", 1), fetchTestMessage("b", 1)})
+
+		msgs, err := fetchAll(t, mbox, imap.FetchFlags, item)
+		if err == nil {
+			t.Errorf("FETCH %v: ListMessages() succeeded, want an error", item)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("FETCH %v: sent %v messages, want none", item, len(msgs))
+		}
+		if got := api.madeRequests(); len(got) != 0 {
+			t.Errorf("FETCH %v: made requests %v, want none", item, got)
+		}
+	}
+}
+
+// The macros stand for their items (RFC 3501 section 6.4.5), whoever parsed
+// the command.
+// evidence: witnesses
+func TestFetchMacros(t *testing.T) {
+	tests := []struct {
+		macro imap.FetchItem
+		want  []imap.FetchItem
+	}{
+		{imap.FetchFast, []imap.FetchItem{imap.FetchFlags, imap.FetchInternalDate, imap.FetchRFC822Size}},
+		{imap.FetchAll, []imap.FetchItem{imap.FetchFlags, imap.FetchInternalDate, imap.FetchRFC822Size, imap.FetchEnvelope}},
+		{imap.FetchFull, []imap.FetchItem{imap.FetchFlags, imap.FetchInternalDate, imap.FetchRFC822Size, imap.FetchEnvelope, imap.FetchBody}},
+	}
+	for _, tt := range tests {
+		api := &fakeAPI{t: t}
+		mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{fetchTestMessage("a", 0)})
+
+		msgs, err := fetchAll(t, mbox, tt.macro)
+		if err != nil {
+			t.Fatalf("FETCH %v: ListMessages() = %v", tt.macro, err)
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("FETCH %v: sent %v messages, want 1", tt.macro, len(msgs))
+		}
+		got := slices.Sorted(maps.Keys(msgs[0].Items))
+		want := slices.Sorted(slices.Values(tt.want))
+		if !slices.Equal(got, want) {
+			t.Errorf("FETCH %v: sent items %v, want %v", tt.macro, got, want)
+		}
 	}
 }
