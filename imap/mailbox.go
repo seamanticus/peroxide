@@ -354,12 +354,24 @@ func setsSeen(items []imap.FetchItem) bool {
 	return false
 }
 
+// ListMessages is FETCH as go-imap's own handler calls it, which can't say
+// whether the mailbox was opened read-only: it never sets \Seen, so that it
+// can't set it where RFC 3501 forbids it. Extension's FETCH, which knows,
+// calls fetch instead.
 func (mbox *mailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.FetchItem, ch chan<- *imap.Message) error {
+	return mbox.fetch(uid, seqSet, items, ch, false)
+}
+
+// fetch sends the messages of seqSet with items to ch, and closes it. With
+// markRead, the unread ones it sends a body section of without .PEEK get
+// \Seen (RFC 3501 section 6.4.5); markRead is false in a mailbox opened
+// read-only (section 6.3.2).
+func (mbox *mailbox) fetch(uid bool, seqSet *imap.SeqSet, items []imap.FetchItem, ch chan<- *imap.Message, markRead bool) error {
 	opened, err := mbox.listMessages(uid, seqSet, items, ch)
 	if err != nil {
 		return err
 	}
-	if len(opened) == 0 {
+	if !markRead || len(opened) == 0 {
 		return nil
 	}
 

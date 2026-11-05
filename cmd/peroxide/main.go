@@ -142,6 +142,7 @@ func listenAndServeSMTP(addr string, debug bool, authManager *auth.Manager, tlsC
 func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, eventsManager *events.Manager, tlsConfig *tls.Config) error {
 	be := imapbackend.New(authManager, eventsManager)
 	s := imapserver.New(be)
+	s.Enable(imapbackend.Extension{})
 	s.Addr = addr
 	s.AllowInsecureAuth = tlsConfig == nil
 	s.TLSConfig = tlsConfigFor(tlsConfig, "imap")

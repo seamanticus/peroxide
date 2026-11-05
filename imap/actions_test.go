@@ -14,6 +14,8 @@ import (
 
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
+	"github.com/emersion/go-imap/responses"
+	imapserver "github.com/emersion/go-imap/server"
 
 	"github.com/seamanticus/peroxide/protonmail"
 )
@@ -228,20 +230,97 @@ func cacheFull(mbox *mailbox, msgs ...*protonmail.Message) {
 	}
 }
 
-// fetchAll runs FETCH 1:* with items and returns what it sent.
-func fetchAll(t *testing.T, mbox *mailbox, items ...imap.FetchItem) ([]*imap.Message, error) {
+// fetchConn is the part of a server connection FETCH uses: its context and
+// WriteResp, which drains the FETCH responses into msgs. The embedded nil
+// Conn makes the type a Conn; other methods aren't called.
+type fetchConn struct {
+	imapserver.Conn
+	ctx  *imapserver.Context
+	msgs []*imap.Message
+}
+
+func (c *fetchConn) Context() *imapserver.Context { return c.ctx }
+
+func (c *fetchConn) WriteResp(res imap.WriterTo) error {
+	fetch, ok := res.(*responses.Fetch)
+	if !ok {
+		return fmt.Errorf("unexpected response %T", res)
+	}
+	for msg := range fetch.Messages {
+		c.msgs = append(c.msgs, msg)
+	}
+	return nil
+}
+
+// fetchWith runs FETCH 1:* items through Extension's FETCH, as go-imap's
+// server does, on mbox opened read-only or not, and returns what it sent.
+func fetchWith(t *testing.T, mbox *mailbox, readOnly bool, items ...imap.FetchItem) ([]*imap.Message, error) {
 	t.Helper()
 	seqSet, err := imap.ParseSeqSet("1:*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch := make(chan *imap.Message, 10)
-	err = mbox.ListMessages(false, seqSet, items, ch)
-	var msgs []*imap.Message
-	for msg := range ch {
-		msgs = append(msgs, msg)
+	cmd, ok := Extension{}.Command("FETCH")().(*fetchCommand)
+	if !ok {
+		t.Fatal("Extension doesn't handle FETCH")
 	}
-	return msgs, err
+	cmd.SeqSet, cmd.Items = seqSet, items
+	conn := &fetchConn{ctx: &imapserver.Context{Mailbox: mbox, MailboxReadOnly: readOnly}}
+	err = cmd.Handle(conn)
+	return conn.msgs, err
+}
+
+// fetchAll runs FETCH 1:* with items on mbox opened read-write.
+func fetchAll(t *testing.T, mbox *mailbox, items ...imap.FetchItem) ([]*imap.Message, error) {
+	t.Helper()
+	return fetchWith(t, mbox, false, items...)
+}
+
+// In a mailbox opened read-only (EXAMINE), and through go-imap's own FETCH
+// (ListMessages), which can't tell, fetching a body leaves it unread
+// (RFC 3501 section 6.3.2).
+func TestFetchBodyReadOnlyLeavesUnread(t *testing.T) {
+	api := &fakeAPI{t: t}
+	msg := fetchTestMessage("a", 1)
+	mbox, sent := newActionTestMailbox(t, api, []*protonmail.Message{msg})
+	cacheFull(mbox, msg)
+
+	if _, err := fetchWith(t, mbox, true, "BODY[HEADER]"); err != nil {
+		t.Fatalf("FETCH in a read-only mailbox: %v", err)
+	}
+
+	seqSet, _ := imap.ParseSeqSet("1:*")
+	ch := make(chan *imap.Message, 10)
+	if err := mbox.ListMessages(false, seqSet, []imap.FetchItem{"BODY[HEADER]"}, ch); err != nil {
+		t.Fatalf("ListMessages() = %v", err)
+	}
+
+	if got := api.madeRequests(); len(got) != 0 {
+		t.Errorf("made requests %v, want none", got)
+	}
+	if updates := sent(); len(updates) != 0 {
+		t.Errorf("sent %v updates, want none", len(updates))
+	}
+	checkStatus(t, mbox, 1, 1)
+}
+
+// UID FETCH answers with the UID even when the client didn't ask for it
+// (RFC 3501 section 6.4.8).
+func TestUidFetchAddsUid(t *testing.T) {
+	api := &fakeAPI{t: t}
+	msg := fetchTestMessage("a", 0)
+	mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{msg})
+
+	seqSet, _ := imap.ParseSeqSet("1:*")
+	cmd := &fetchCommand{}
+	cmd.SeqSet, cmd.Items = seqSet, []imap.FetchItem{imap.FetchFlags}
+	conn := &fetchConn{ctx: &imapserver.Context{Mailbox: mbox}}
+	if err := cmd.UidHandle(conn); err != nil {
+		t.Fatalf("UID FETCH: %v", err)
+	}
+	if len(conn.msgs) != 1 || conn.msgs[0].Uid != 1 {
+		t.Errorf("sent %+v, want message 1 with UID 1", conn.msgs)
+	}
 }
 
 // Fetching a body section without .PEEK sets \Seen (RFC 3501 section 6.4.5),
