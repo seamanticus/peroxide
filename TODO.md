@@ -320,3 +320,69 @@ and a failed sync rewinds the events to that ID.
    request; an edited draft is fetched again; on 429 the downloader
    backs off and the parallelism drops (testing/synctest); a FETCH of a
    message being downloaded makes one request, not two.
+
+## 10. CREATE, DELETE and RENAME are not implemented
+
+**Problem.** `user.CreateMailbox`, `DeleteMailbox` and `RenameMailbox`
+(imap/user.go) return `errNotYetImplemented`, and so does
+`mailbox.SetSubscribed` (SUBSCRIBE, UNSUBSCRIBE). A client can't create,
+delete or rename a folder: on 2026-11-05 aerc's `:mkdir` and `:rmdir`
+got `NO not yet implemented`:
+
+    _x4klw CREATE "FOLDER_CREATE_FROM_CLIENT"
+    _x4klw NO not yet implemented
+    Xi67Lg DELETE "FOLDER_CLIENT_SHUTDOWN"
+    Xi67Lg NO not yet implemented
+
+**How proton-bridge does it** (internal/services/imapservice/connector.go,
+`CreateMailbox`, `UpdateMailboxName`, `DeleteMailbox`, and
+`createFolder`, `createLabel`, `updateFolder`, `updateLabel`): mailbox
+names are `Folders/<path>` or `Labels/<name>`; anything else is refused
+(`ErrOperationNotAllowed`), so system mailboxes can't be created,
+renamed or deleted. Through go-proton-api (label.go):
+
+- CREATE: `POST /core/v4/labels` with `{Name, Color: "#f66", Type,
+  ParentID}`. A nested folder needs its parent to exist (looked up by
+  path); a label can't be nested.
+- RENAME: reads the label for its color (`GET /core/v4/labels?Type=`),
+  then `PUT /core/v4/labels/{id}` with `{Name, Color, ParentID}`.
+- DELETE: `DELETE /core/v4/labels/{id}`. Proton moves the folder's
+  messages out of it itself.
+- The result is stored in bridge's label map at once, before the
+  `Labels` event arrives, so the next LIST shows it.
+
+**Differences to settle for peroxide.**
+
+1. Naming. peroxide names folders by `Name`, flat, and labels are
+   keywords, not mailboxes (section 1.1). So CREATE "X" can only make
+   a top-level folder, and there is no IMAP way to create a label
+   (a keyword appears with its first STORE). Refuse names containing
+   the delimiter `/` until section 1.1 is decided.
+2. Label type. bridge sends `Type` 3 (`LabelTypeFolder`) for folders,
+   but `GET /labels` returned peroxide's folders as `Type` 1 with
+   `Exclusive` 1 (section 1, 2026-11-04). Check with a `-debug-raw` run
+   which form `POST /labels` takes (`Type: 3`, or `Type: 1` with
+   `Exclusive: 1`), and what the created label looks like in the
+   following `Labels` event.
+3. Refuse every system mailbox (INBOX, Sent, Drafts, Trash, Spam,
+   Archive, All Mail, Starred) with NO, and DELETE of INBOX in
+   particular (RFC 3501 section 6.3.4).
+4. The event that follows. peroxide's own create, rename or delete
+   comes back as a `Labels` event 20-40 s later; `createLabel` keeps the
+   existing `*mailbox` (it doesn't replace one with the same label ID),
+   `updateLabel` renames only if the name changed, `deleteLabel` copes
+   with a missing one. Apply the API's answer at once (as bridge does)
+   so the tagged OK is followed by a LIST that shows it, and let the
+   event be a no-op.
+5. RENAME INBOX moves its messages to a new folder (RFC 3501 section
+   6.3.5); Proton can't rename INBOX. Refuse it with NO.
+6. SUBSCRIBE/UNSUBSCRIBE: peroxide has no subscriptions (LSUB lists
+   every mailbox). Decide whether to accept both as no-ops, so a client
+   that subscribes a folder after creating it doesn't see the CREATE
+   half fail, or to keep subscriptions in the local database.
+7. Client: `protonmail.Client` has only `ListLabels`; add
+   `CreateLabel`, `UpdateLabel`, `DeleteLabel` (protonmail/labels.go).
+8. Tests (imap): CREATE makes one POST with the name and folder type
+   and lists the folder before its event; the later `Labels` create
+   changes nothing; RENAME sends the color it read; DELETE of a system
+   mailbox and of INBOX makes no request; a name with `/` is refused.
