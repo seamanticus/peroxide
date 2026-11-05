@@ -13,7 +13,10 @@ const (
 )
 
 type Event struct {
-	ID       string `json:"EventID"`
+	ID string `json:"EventID"`
+	// More is 1 when more events follow this page: ask for the events after
+	// ID again before waiting.
+	More     int
 	Refresh  EventRefresh
 	Messages []*EventMessage
 	Contacts []*EventContact
@@ -193,4 +196,14 @@ func (c *Client) GetEvent(last string) (*Event, error) {
 	}
 
 	return respData.Event, nil
+}
+
+// GetLatestEventID returns the ID of the latest event: polling the events
+// after it gives every change made since this call.
+func (c *Client) GetLatestEventID() (string, error) {
+	event, err := c.GetEvent("latest")
+	if err != nil {
+		return "", err
+	}
+	return event.ID, nil
 }

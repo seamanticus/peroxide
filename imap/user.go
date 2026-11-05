@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -48,7 +49,7 @@ type user struct {
 	eventsReceiver *events.Receiver
 	messages       *messageCache // full messages, safe for concurrent use
 
-	done      chan<- struct{}
+	done      chan struct{} // closed by the last Logout
 	eventSent chan struct{}
 
 	sync.Mutex // protects everything below
@@ -113,11 +114,25 @@ func newUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 		return nil, err
 	}
 
-	done := make(chan struct{})
-	uu.done = done
+	// Resume after the last event applied, even from a previous session: the
+	// events of the time peroxide was stopped are then not lost.
+	lastEventID, ok, err := db.LastEventID()
+	if err != nil {
+		return nil, fmt.Errorf("cannot read last event ID: %w", err)
+	}
+	if !ok {
+		if lastEventID, err = c.GetLatestEventID(); err != nil {
+			return nil, fmt.Errorf("cannot get latest event ID: %w", err)
+		}
+		if err := db.SetLastEventID(lastEventID); err != nil {
+			return nil, fmt.Errorf("cannot store last event ID: %w", err)
+		}
+	}
+
+	uu.done = make(chan struct{})
 	ch := make(chan *protonmail.Event)
 	go uu.receiveEvents(be.updates, ch)
-	uu.eventsReceiver = be.eventsManager.Register(c, u.Name, ch, done)
+	uu.eventsReceiver = be.eventsManager.Register(c, u.Name, lastEventID, ch, uu.done)
 
 	log.Printf("User %q logged in via IMAP", u.Name)
 	return uu, nil
@@ -300,9 +315,14 @@ func (u *user) Logout() error {
 	return nil
 }
 
+// poll asks for the events now, and waits until one is applied, or the user
+// logged out.
 func (u *user) poll() {
-	go u.eventsReceiver.Poll()
-	<-u.eventSent
+	u.eventsReceiver.Poll()
+	select {
+	case <-u.eventSent:
+	case <-u.done:
+	}
 }
 
 func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *protonmail.Event) {
@@ -401,6 +421,12 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			default:
 			}
 		}()
+
+		// Once applied, so that a page stopped halfway is applied again by the
+		// next session: creates, deletes and label changes are idempotent.
+		if err := u.db.SetLastEventID(event.ID); err != nil {
+			log.Printf("cannot store last event ID %v: %v", event.ID, err)
+		}
 
 		// Only now: commands waiting for this event, such as STORE, don't wait
 		// for this request too. Synchronized mailboxes don't need it.

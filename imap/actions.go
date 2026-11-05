@@ -172,7 +172,7 @@ func (u *user) applyDeleteAction(apiIDs []string, failed map[string]error) error
 // message with an exclusive folder removes it from the others.
 func (u *user) pollSoon() {
 	if u.eventsReceiver != nil {
-		go u.eventsReceiver.Poll()
+		u.eventsReceiver.Poll()
 	}
 }
 

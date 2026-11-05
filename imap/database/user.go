@@ -17,7 +17,11 @@ var (
 	mailboxesBucket = []byte("mailboxes")
 	messagesBucket  = []byte("messages")
 	countsBucket    = []byte("counts")
+	eventsBucket    = []byte("events")
 )
+
+// lastEventIDKey holds, in eventsBucket, the ID of the last event applied.
+var lastEventIDKey = []byte("last")
 
 func userMessage(b *bolt.Bucket, apiID string) (*protonmail.Message, error) {
 	k := []byte(apiID)
@@ -319,6 +323,34 @@ func (u *User) DeleteMessage(apiID string) (seqNums map[string]uint32, err error
 
 func (u *User) Close() error {
 	return u.db.Close()
+}
+
+// LastEventID returns the ID of the last Proton event applied to the database,
+// and whether one was.
+func (u *User) LastEventID() (id string, ok bool, err error) {
+	err = u.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(eventsBucket)
+		if b == nil {
+			return nil
+		}
+		if v := b.Get(lastEventIDKey); v != nil {
+			id, ok = string(v), true
+		}
+		return nil
+	})
+	return id, ok, err
+}
+
+// SetLastEventID records id as the last Proton event applied: the next session
+// resumes from the event after it.
+func (u *User) SetLastEventID(id string) error {
+	return u.db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists(eventsBucket)
+		if err != nil {
+			return err
+		}
+		return b.Put(lastEventIDKey, []byte(id))
+	})
 }
 
 func Open(filename string) (*User, error) {

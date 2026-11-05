@@ -2,60 +2,86 @@ package events
 
 import (
 	"log"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/seamanticus/peroxide/protonmail"
 )
 
-const pollInterval = 30 * time.Second
+// pollInterval is how often events are polled while a client is logged in.
+// proton-bridge waits 20 s plus up to 20 s of jitter.
+const pollInterval = 20 * time.Second
 
+// EventSource gives the events after an event ID, one page at a time.
+type EventSource interface {
+	GetEvent(last string) (*protonmail.Event, error)
+}
+
+// Receiver polls the events of one Proton account and hands every page, in
+// order, to each channel registered for it. It runs while one is registered.
 type Receiver struct {
-	c *protonmail.Client
+	c EventSource
 
 	locker   sync.Mutex
 	channels []chan<- *protonmail.Event
 
-	poll chan struct{}
+	poll chan struct{} // capacity 1: a pending request covers new ones
+	stop chan struct{} // closed with the last channel
 }
 
-func (r *Receiver) receiveEvents() {
+func (r *Receiver) receiveEvents(last string) {
 	t := time.NewTicker(pollInterval)
 	defer t.Stop()
 
-	var last string
 	for {
-		event, err := r.c.GetEvent(last)
-		if err != nil {
-			log.Println("cannot receive event:", err)
-			select {
-			case <-t.C:
-			case <-r.poll:
-			}
-			continue
-		}
-		last = event.ID
-
-		r.locker.Lock()
-		n := len(r.channels)
-		for _, ch := range r.channels {
-			ch <- event
-		}
-		r.locker.Unlock()
-
-		if n == 0 {
-			break
-		}
+		last = r.receivePages(last)
 
 		select {
 		case <-t.C:
 		case <-r.poll:
+		case <-r.stop:
+			return
 		}
 	}
 }
 
+// receivePages delivers the events after last, page after page until Proton
+// has no more, and returns the ID of the last page delivered. A change
+// spanning many pages is thus applied at once, not one page per poll.
+func (r *Receiver) receivePages(last string) string {
+	for {
+		select {
+		case <-r.stop:
+			return last
+		default:
+		}
+
+		event, err := r.c.GetEvent(last)
+		if err != nil {
+			log.Printf("cannot receive events after %v: %v", last, err)
+			return last
+		}
+
+		r.locker.Lock()
+		for _, ch := range r.channels {
+			ch <- event
+		}
+		r.locker.Unlock()
+		last = event.ID
+
+		if event.More != 1 {
+			return last
+		}
+	}
+}
+
+// Poll asks for the events now. It doesn't wait, even if r has stopped.
 func (r *Receiver) Poll() {
-	r.poll <- struct{}{}
+	select {
+	case r.poll <- struct{}{}:
+	default:
+	}
 }
 
 type Manager struct {
@@ -69,7 +95,11 @@ func NewManager() *Manager {
 	}
 }
 
-func (m *Manager) Register(c *protonmail.Client, username string, ch chan<- *protonmail.Event, done <-chan struct{}) *Receiver {
+// Register adds ch to the receiver of username, and starts one polling the
+// events after lastEventID if none runs. Once done is closed, ch is removed
+// and closed; the receiver stops with its last channel, so nothing is polled
+// while no client is logged in.
+func (m *Manager) Register(c EventSource, username, lastEventID string, ch chan<- *protonmail.Event, done <-chan struct{}) *Receiver {
 	m.locker.Lock()
 	defer m.locker.Unlock()
 
@@ -82,35 +112,34 @@ func (m *Manager) Register(c *protonmail.Client, username string, ch chan<- *pro
 		r = &Receiver{
 			c:        c,
 			channels: []chan<- *protonmail.Event{ch},
-			poll:     make(chan struct{}),
+			poll:     make(chan struct{}, 1),
+			stop:     make(chan struct{}),
 		}
-
-		go func() {
-			r.receiveEvents()
-
-			m.locker.Lock()
-			delete(m.receivers, username)
-			m.locker.Unlock()
-		}()
-
+		go r.receiveEvents(lastEventID)
 		m.receivers[username] = r
 	}
 
-	if done != nil {
-		go func() {
-			<-done
-
-			r.locker.Lock()
-			for i, c := range r.channels {
-				if c == ch {
-					r.channels = append(r.channels[:i], r.channels[i+1:]...)
-				}
-			}
-			r.locker.Unlock()
-
-			close(ch)
-		}()
-	}
+	go func() {
+		<-done
+		m.remove(username, r, ch)
+	}()
 
 	return r
+}
+
+// remove takes ch from r, and stops r if it was the last channel. Both happen
+// under m.locker, so Register never adds a channel to a stopped receiver.
+func (m *Manager) remove(username string, r *Receiver, ch chan<- *protonmail.Event) {
+	m.locker.Lock()
+	defer m.locker.Unlock()
+	r.locker.Lock()
+	defer r.locker.Unlock()
+
+	r.channels = slices.DeleteFunc(r.channels, func(c chan<- *protonmail.Event) bool { return c == ch })
+	close(ch)
+
+	if len(r.channels) == 0 {
+		close(r.stop)
+		delete(m.receivers, username)
+	}
 }
