@@ -1,6 +1,7 @@
 package events
 
 import (
+	crand "crypto/rand"
 	"log"
 	"math/rand/v2"
 	"slices"
@@ -18,11 +19,21 @@ const (
 	pollJitter   = 20 * time.Second
 )
 
-// jitteredPollDelay draws one wait between polls. math/rand/v2's top-level
-// functions are randomly seeded and safe for concurrent use; no output
-// depends on the value.
-func jitteredPollDelay() time.Duration {
-	return pollInterval + rand.N(pollJitter)
+// newJitteredPollDelay returns the waits of one receiver, drawn from a
+// ChaCha8 source seeded with seed. Only that receiver's goroutine calls it.
+func newJitteredPollDelay(seed [32]byte) func() time.Duration {
+	r := rand.New(rand.NewChaCha8(seed))
+	return func() time.Duration {
+		return pollInterval + time.Duration(r.Int64N(int64(pollJitter)))
+	}
+}
+
+// randomSeed returns a seed from the operating system, so that two peroxide
+// instances don't draw the same waits. crypto/rand.Read never fails.
+func randomSeed() [32]byte {
+	var seed [32]byte
+	crand.Read(seed[:])
+	return seed
 }
 
 // EventSource gives the events after an event ID, one page at a time.
@@ -100,13 +111,17 @@ type Manager struct {
 	receivers map[string]*Receiver
 	locker    sync.Mutex
 
-	pollDelay func() time.Duration // given to each new Receiver
+	// newPollDelay gives each new Receiver its waits between polls. Tests
+	// replace it.
+	newPollDelay func() func() time.Duration
 }
 
 func NewManager() *Manager {
 	return &Manager{
 		receivers: make(map[string]*Receiver),
-		pollDelay: jitteredPollDelay,
+		newPollDelay: func() func() time.Duration {
+			return newJitteredPollDelay(randomSeed())
+		},
 	}
 }
 
@@ -126,7 +141,7 @@ func (m *Manager) Register(c EventSource, username, lastEventID string, ch chan<
 	} else {
 		r = &Receiver{
 			c:        c,
-			delay:    m.pollDelay,
+			delay:    m.newPollDelay(),
 			channels: []chan<- *protonmail.Event{ch},
 			poll:     make(chan struct{}, 1),
 			stop:     make(chan struct{}),

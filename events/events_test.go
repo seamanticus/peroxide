@@ -49,7 +49,9 @@ func receive(ch <-chan *protonmail.Event) <-chan []string {
 // newTestManager returns a Manager whose receivers wait exactly pollInterval.
 func newTestManager() *Manager {
 	m := NewManager()
-	m.pollDelay = func() time.Duration { return pollInterval }
+	m.newPollDelay = func() func() time.Duration {
+		return func() time.Duration { return pollInterval }
+	}
 	return m
 }
 
@@ -158,10 +160,12 @@ func TestReceiverDrawsEachDelay(t *testing.T) {
 		m := NewManager()
 		delays := []time.Duration{25 * time.Second, 35 * time.Second}
 		var drawn int // only the receiver's goroutine draws
-		m.pollDelay = func() time.Duration {
-			d := delays[drawn%len(delays)]
-			drawn++
-			return d
+		m.newPollDelay = func() func() time.Duration {
+			return func() time.Duration {
+				d := delays[drawn%len(delays)]
+				drawn++
+				return d
+			}
 		}
 		ch := make(chan *protonmail.Event)
 		done := make(chan struct{})
@@ -189,6 +193,41 @@ func TestReceiverDrawsEachDelay(t *testing.T) {
 		close(done)
 		<-ids
 	})
+}
+
+// The waits lie in [pollInterval, pollInterval+pollJitter), vary, and depend
+// on the seed alone.
+// evidence: witnesses
+func TestJitteredPollDelay(t *testing.T) {
+	var seed [32]byte
+	seed[0] = 1
+	a, b := newJitteredPollDelay(seed), newJitteredPollDelay(seed)
+	seen := make(map[time.Duration]bool)
+	for i := range 100 {
+		da, db := a(), b()
+		if da != db {
+			t.Fatalf("draw %v: %v and %v from the same seed", i, da, db)
+		}
+		if da < pollInterval || da >= pollInterval+pollJitter {
+			t.Fatalf("draw %v: %v, want in [%v, %v)", i, da, pollInterval, pollInterval+pollJitter)
+		}
+		seen[da] = true
+	}
+	if len(seen) < 50 {
+		t.Errorf("100 draws gave %v distinct waits, want them to vary", len(seen))
+	}
+
+	seed[0] = 2
+	other := newJitteredPollDelay(seed)
+	same := 0
+	for range 100 {
+		if a() == other() {
+			same++
+		}
+	}
+	if same > 5 {
+		t.Errorf("two seeds drew %v equal waits out of 100", same)
+	}
 }
 
 // Poll asks for the events before the interval elapses.
