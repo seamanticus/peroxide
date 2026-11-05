@@ -183,3 +183,57 @@ everything is in memory, the trade-off ruled out above.
 3. Refresh the SMTP session's address list from the same events.
 4. Tests: an address event with a new key makes it usable for
    decryption without restarting.
+
+## 8. The All Mail Problem
+
+**What it is.** Proton keeps every message in the system label All Mail
+(`"5"`, plus `"15"` Almost All Mail, which excludes Spam and Trash), and
+peroxide shows it as the mailbox `All Mail` (`\All`, imap/user.go,
+`systemMailboxes`). A client sees every message twice or more: once in
+its folder, once in All Mail. Some want that, to search everything in one
+place (people, and LLM tools reading a mailbox over IMAP); others don't.
+
+**Observed** (2026-11-05 `-debug-raw` log, line 4504):
+
+    cannot get sequence number of message kPAWhk... in All Mail:
+    message not found in local database
+
+logged by `user.applyUpdate` (imap/actions.go) for a `STORE +FLAGS
+(\Seen)` in INBOX. The STORE succeeded and the client got its FETCH.
+
+**Cause.** A mailbox is synced into the local database only when a client
+first opens it (`mailbox.init`, from SELECT, FETCH, SEARCH...); STATUS
+uses the API's counts until then. aerc STATUSes All Mail but never
+selects it, so its bucket stays empty, while each message still lists
+`"5"` in `LabelIDs`. `applyUpdate` walks every label of the message,
+finds the All Mail mailbox, and doesn't find the message in it. Harmless
+today (an unsynced mailbox needs no FETCH), but it is logged for every
+flag change of every message, and the same happens for any folder not
+opened yet, Starred included.
+
+**Also.**
+
+- Syncing All Mail means listing every message of the account
+  (`mailbox.sync`, 150 per page, from 0): slow for a large account, and
+  it stores each message's metadata again under another bucket.
+- proton-bridge has a setting for it, `ShowAllMail`, on by default
+  (internal/vault/types_settings.go): off, All Mail is hidden from LIST
+  (`Connector.GetMailboxVisibility`, connector.go). It also refuses APPEND
+  and moves into All Mail (`isAllMailOrScheduled`, helpers.go).
+- Almost All Mail (`"15"`) and the categories (`"24"` Default and the
+  others, seen in every message's `LabelIDs` in the log) have no mailbox
+  in peroxide.
+
+**Steps.**
+
+1. `applyUpdate`: skip mailboxes not synced yet (`mbox.initialized`
+   false) instead of looking the message up, which also drops the
+   warning; they get their counts from the API until synced.
+2. Decide whether All Mail is shown: always (as now), or behind an
+   option like bridge's `ShowAllMail`, so users who don't want the
+   duplicates don't get them. Same question for Almost All Mail.
+3. If shown, decide how it syncs: on first use as now, or in the
+   background after login, so a search over it doesn't wait for a full
+   listing.
+4. Tests: a flag change on a message whose All Mail isn't synced logs
+   nothing and sends no FETCH for All Mail.
