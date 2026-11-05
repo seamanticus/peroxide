@@ -32,14 +32,12 @@ import (
 
 // passThrough reports whether the body of msg is a PGP message that none of
 // the account's keys opens, and must go to the client as it is. Read gives
-// ErrKeyIncorrect only for an armored PGP message; any other failure to
-// decrypt is an error of its own, reported when the body is read.
+// ErrKeyIncorrect only for an armored PGP message, and before it reads any of
+// the encrypted data (go-crypto openpgp.ReadMessage), so the body itself is
+// left unread. Any other failure to decrypt is an error of its own, reported
+// when the body is read.
 func (mbox *mailbox) passThrough(msg *protonmail.Message) bool {
-	md, err := msg.Read(mbox.u.privateKeys, nil)
-	if err == nil {
-		// Read checks integrity only at the end of the plaintext.
-		_, err = io.Copy(io.Discard, md.UnverifiedBody)
-	}
+	_, err := msg.Read(mbox.u.privateKeys, nil)
 	return errors.Is(err, pgperrors.ErrKeyIncorrect)
 }
 
