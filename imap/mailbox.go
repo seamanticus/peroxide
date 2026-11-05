@@ -198,13 +198,25 @@ func (mbox *mailbox) sync() error {
 
 func (mbox *mailbox) init() error {
 	mbox.Lock()
-	defer mbox.Unlock()
-
-	if mbox.initialized {
+	initialized := mbox.initialized
+	mbox.Unlock()
+	if initialized {
 		return nil
 	}
 
-	// TODO: sync only the first time
+	// Taken before mbox's lock (user.syncSem): no event page is applied while
+	// the sync has emptied the mailbox, so none of its messages gets a UID
+	// before the older ones.
+	mbox.u.lockSync()
+	defer mbox.u.unlockSync()
+	mbox.Lock()
+	defer mbox.Unlock()
+
+	if mbox.initialized { // synchronized while this one waited
+		return nil
+	}
+
+	// TODO: sync only the first time (TODO.md section 9, step 6)
 	if err := mbox.sync(); err != nil {
 		return err
 	}

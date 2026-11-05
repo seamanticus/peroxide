@@ -54,6 +54,14 @@ type user struct {
 	// The goroutine applying events, started by startEvents. getUser waits
 	// for it after a logout.
 	eventLoop sync.WaitGroup
+	// syncSem serializes what adds or renumbers mailboxes' UIDs: a mailbox
+	// sync, an event page, an action applied without waiting for its event
+	// (lockSync, unlockSync). Without it, a page applied while a sync had just
+	// emptied a mailbox gave its new message UID 1 (2026-11-05). A 1-slot
+	// channel rather than a sync.Mutex, so that a goroutine waiting on it is
+	// durably blocked for testing/synctest. Taken before u's and the
+	// mailboxes' locks, and never inside a database transaction.
+	syncSem chan struct{}
 
 	sync.Mutex // protects everything below
 
@@ -119,6 +127,7 @@ func newUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 		privateKeys: privateKeys,
 		addrs:       addrs,
 		eventSent:   make(chan struct{}),
+		syncSem:     make(chan struct{}, 1),
 		numClients:  1,
 		messages:    newMessageCache(),
 	}
@@ -372,6 +381,19 @@ func (u *user) closeAfterLogout() {
 	u.privateKeys = nil
 }
 
+// lockSync waits until no other goroutine adds or renumbers mailboxes' UIDs
+// (user.syncSem); unlockSync lets the next one.
+func (u *user) lockSync() {
+	if u.syncSem == nil {
+		panic("invariant: newUser makes user.syncSem")
+	}
+	u.syncSem <- struct{}{}
+}
+
+func (u *user) unlockSync() {
+	<-u.syncSem
+}
+
 // poll asks for the events now, and waits until one is applied, or the user
 // logged out.
 func (u *user) poll() {
@@ -387,6 +409,9 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 		var eventUpdates []imapbackend.Update
 		var fetchCounts bool
 
+		// Applied whole while no mailbox syncs, but sent after: sending waits
+		// for go-imap, which mustn't wait for a sync.
+		u.lockSync()
 		if event.Refresh&protonmail.EventRefreshMail != 0 {
 			log.Println("Reinitializing the whole IMAP database")
 
@@ -464,6 +489,7 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			// all there is for mailboxes not synchronized yet.
 			fetchCounts = len(event.MessageCounts) == 0 && len(event.Messages) > 0
 		}
+		u.unlockSync()
 
 		for _, update := range eventUpdates {
 			// go-imap creates Done's channel lazily without synchronization, and

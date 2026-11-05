@@ -134,6 +134,9 @@ func actionError(apiIDs []string, failed map[string]error) error {
 // for, as returned by the API.
 func (u *user) applyAction(apiIDs []string, failed map[string]error, update *protonmail.EventMessageUpdate) error {
 	var updates []imapbackend.Update
+	// A COPY or MOVE adds the messages to the destination: not while it syncs
+	// (user.syncSem). Sent after, as event pages are.
+	u.lockSync()
 	for _, apiID := range apiIDs {
 		if err, ok := failed[apiID]; ok && !nothingToDo(err) {
 			continue
@@ -144,6 +147,7 @@ func (u *user) applyAction(apiIDs []string, failed map[string]error, update *pro
 			log.Printf("cannot apply action to message %v: %v", apiID, err)
 		}
 	}
+	u.unlockSync()
 	u.sendUpdates(updates)
 	u.pollSoon()
 	return actionError(apiIDs, failed)
@@ -152,6 +156,7 @@ func (u *user) applyAction(apiIDs []string, failed map[string]error, update *pro
 // applyDeleteAction is applyAction for deleting messages.
 func (u *user) applyDeleteAction(apiIDs []string, failed map[string]error) error {
 	var updates []imapbackend.Update
+	u.lockSync()
 	for _, apiID := range apiIDs {
 		if err, ok := failed[apiID]; ok && !nothingToDo(err) {
 			continue
@@ -162,6 +167,7 @@ func (u *user) applyDeleteAction(apiIDs []string, failed map[string]error) error
 			log.Printf("cannot apply deletion of message %v: %v", apiID, err)
 		}
 	}
+	u.unlockSync()
 	u.sendUpdates(updates)
 	u.pollSoon()
 	return actionError(apiIDs, failed)

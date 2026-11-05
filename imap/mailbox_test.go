@@ -65,7 +65,7 @@ func newTestMailbox(t *testing.T, msgs []*protonmail.Message) (*mailbox, *databa
 	return &mailbox{
 		name:        imap.InboxName,
 		label:       protonmail.LabelInbox,
-		u:           &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache()},
+		u:           &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), syncSem: make(chan struct{}, 1)},
 		db:          mboxDB,
 		deleted:     make(map[string]struct{}),
 		initialized: true,
@@ -569,6 +569,89 @@ func TestLogoutWhileApplyingEvents(t *testing.T) {
 		}
 		if err := reopened.Close(); err != nil {
 			t.Errorf("close reopened database: %v", err)
+		}
+	})
+}
+
+// An event page that arrives while a mailbox syncs is applied after the sync,
+// so a message it adds gets a UID after those the sync listed. On 2026-11-05
+// a message received while peroxide was idle got UID 1, below the older ones,
+// because its replayed create event landed in the mailbox the sync had just
+// emptied, and aerc showed it last.
+func TestEventDuringSyncKeepsOrder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		inbox, db := newTestMailbox(t, nil)
+		inbox.initialized = false
+		u := inbox.u
+		u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
+		u.flags = map[string]string{}
+
+		// The sync's listing waits on release, as a slow Proton would.
+		listing, release := make(chan struct{}), make(chan struct{})
+		u.c = &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				body := `{"Code":1000,"Counts":[{"LabelID":"0","Total":3,"Unread":0}]}`
+				if r.URL.Path == "/messages" {
+					close(listing)
+					<-release
+					body = `{"Code":1000,"Total":2,"Messages":[` +
+						`{"ID":"old1","LabelIDs":["0"]},{"ID":"old2","LabelIDs":["0"]}]}`
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Request:    r,
+				}, nil
+			}),
+		}}
+
+		synced := make(chan error, 1)
+		go func() { synced <- inbox.init() }()
+		<-listing // the sync has emptied INBOX and waits for its listing
+
+		updates := make(chan imapbackend.Update, 10)
+		events := make(chan *protonmail.Event, 1)
+		events <- &protonmail.Event{ID: "e1", Messages: []*protonmail.EventMessage{{
+			ID:      "new",
+			Action:  protonmail.EventCreate,
+			Created: inboxMessage("new", 1),
+		}}}
+		close(events)
+		applied := make(chan struct{})
+		go func() {
+			u.receiveEvents(updates, events)
+			close(applied)
+		}()
+		synctest.Wait()
+		if _, _, err := inbox.db.FromApiID("new"); err == nil {
+			t.Error("the event page was applied while the mailbox synced")
+		}
+
+		close(release)
+		if err := <-synced; err != nil {
+			t.Fatalf("init() = %v", err)
+		}
+		// What go-imap does: deliver the page's updates, so it finishes.
+		go func() {
+			for update := range updates {
+				close(update.Done())
+			}
+		}()
+		<-applied
+		close(updates)
+
+		for _, want := range []struct {
+			id  string
+			uid uint32
+		}{{"old1", 1}, {"old2", 2}, {"new", 3}} {
+			_, uid, err := inbox.db.FromApiID(want.id)
+			if err != nil || uid != want.uid {
+				t.Errorf("message %v has UID %v (%v), want %v", want.id, uid, err, want.uid)
+			}
+		}
+		if id, ok, err := db.LastEventID(); err != nil || !ok || id != "e1" {
+			t.Errorf("stored last event ID = %q, %v, %v, want e1", id, ok, err)
 		}
 	})
 }
