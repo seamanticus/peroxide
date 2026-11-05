@@ -46,6 +46,13 @@ func receive(ch <-chan *protonmail.Event) <-chan []string {
 	return ids
 }
 
+// newTestManager returns a Manager whose receivers wait exactly pollInterval.
+func newTestManager() *Manager {
+	m := NewManager()
+	m.pollDelay = func() time.Duration { return pollInterval }
+	return m
+}
+
 // Pages that say More are followed at once, from the ID registered, not one
 // page per poll interval.
 func TestReceiverFollowsMore(t *testing.T) {
@@ -55,7 +62,7 @@ func TestReceiverFollowsMore(t *testing.T) {
 			"e1":     {ID: "e2", More: 1},
 			"e2":     {ID: "e3"},
 		}}
-		m := NewManager()
+		m := newTestManager()
 		ch := make(chan *protonmail.Event)
 		done := make(chan struct{})
 		ids := receive(ch)
@@ -78,7 +85,7 @@ func TestReceiverFollowsMore(t *testing.T) {
 func TestReceiverStopsWithLastChannel(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		src := &fakeSource{pages: map[string]*protonmail.Event{}}
-		m := NewManager()
+		m := newTestManager()
 		ch1, ch2 := make(chan *protonmail.Event), make(chan *protonmail.Event)
 		done1, done2 := make(chan struct{}), make(chan struct{})
 		ids1, ids2 := receive(ch1), receive(ch2)
@@ -120,7 +127,7 @@ func TestReceiverStopsWithLastChannel(t *testing.T) {
 func TestRegisterAfterStopStartsAgain(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		src := &fakeSource{pages: map[string]*protonmail.Event{"e5": {ID: "e6"}}}
-		m := NewManager()
+		m := newTestManager()
 
 		ch := make(chan *protonmail.Event)
 		done := make(chan struct{})
@@ -144,11 +151,51 @@ func TestRegisterAfterStopStartsAgain(t *testing.T) {
 	})
 }
 
+// Every wait draws a new delay, counted from the end of the last poll.
+func TestReceiverDrawsEachDelay(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := &fakeSource{pages: map[string]*protonmail.Event{}}
+		m := NewManager()
+		delays := []time.Duration{25 * time.Second, 35 * time.Second}
+		var drawn int // only the receiver's goroutine draws
+		m.pollDelay = func() time.Duration {
+			d := delays[drawn%len(delays)]
+			drawn++
+			return d
+		}
+		ch := make(chan *protonmail.Event)
+		done := make(chan struct{})
+		ids := receive(ch)
+		m.Register(src, "bob", "e0", ch, done)
+
+		// The first poll is at once; then 25 s, then 35 s after it.
+		steps := []struct {
+			sleep     time.Duration
+			wantPolls int
+		}{
+			{0, 1},
+			{delays[0], 2},
+			{delays[1] - time.Nanosecond, 2},
+			{time.Nanosecond, 3},
+		}
+		for i, step := range steps {
+			time.Sleep(step.sleep)
+			synctest.Wait()
+			if got := len(src.askedFor()); got != step.wantPolls {
+				t.Errorf("step %v: polled %v times, want %v", i, got, step.wantPolls)
+			}
+		}
+
+		close(done)
+		<-ids
+	})
+}
+
 // Poll asks for the events before the interval elapses.
 func TestReceiverPoll(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		src := &fakeSource{pages: map[string]*protonmail.Event{}}
-		m := NewManager()
+		m := newTestManager()
 		ch := make(chan *protonmail.Event)
 		done := make(chan struct{})
 		ids := receive(ch)

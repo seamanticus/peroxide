@@ -2,6 +2,7 @@ package events
 
 import (
 	"log"
+	"math/rand/v2"
 	"slices"
 	"sync"
 	"time"
@@ -9,9 +10,20 @@ import (
 	"github.com/seamanticus/peroxide/protonmail"
 )
 
-// pollInterval is how often events are polled while a client is logged in.
-// proton-bridge waits 20 s plus up to 20 s of jitter.
-const pollInterval = 20 * time.Second
+// Each wait between polls, while a client is logged in, lasts pollInterval
+// plus a random part of pollJitter, as proton-bridge's: accounts and peroxide
+// instances then don't poll Proton in step.
+const (
+	pollInterval = 20 * time.Second
+	pollJitter   = 20 * time.Second
+)
+
+// jitteredPollDelay draws one wait between polls. math/rand/v2's top-level
+// functions are randomly seeded and safe for concurrent use; no output
+// depends on the value.
+func jitteredPollDelay() time.Duration {
+	return pollInterval + rand.N(pollJitter)
+}
 
 // EventSource gives the events after an event ID, one page at a time.
 type EventSource interface {
@@ -21,7 +33,8 @@ type EventSource interface {
 // Receiver polls the events of one Proton account and hands every page, in
 // order, to each channel registered for it. It runs while one is registered.
 type Receiver struct {
-	c EventSource
+	c     EventSource
+	delay func() time.Duration // the wait before the next poll
 
 	locker   sync.Mutex
 	channels []chan<- *protonmail.Event
@@ -31,14 +44,13 @@ type Receiver struct {
 }
 
 func (r *Receiver) receiveEvents(last string) {
-	t := time.NewTicker(pollInterval)
-	defer t.Stop()
-
 	for {
 		last = r.receivePages(last)
 
+		// Drawn afresh each time, and counted from the end of the last
+		// poll, so an early Poll also postpones the next one.
 		select {
-		case <-t.C:
+		case <-time.After(r.delay()):
 		case <-r.poll:
 		case <-r.stop:
 			return
@@ -87,11 +99,14 @@ func (r *Receiver) Poll() {
 type Manager struct {
 	receivers map[string]*Receiver
 	locker    sync.Mutex
+
+	pollDelay func() time.Duration // given to each new Receiver
 }
 
 func NewManager() *Manager {
 	return &Manager{
 		receivers: make(map[string]*Receiver),
+		pollDelay: jitteredPollDelay,
 	}
 }
 
@@ -111,6 +126,7 @@ func (m *Manager) Register(c EventSource, username, lastEventID string, ch chan<
 	} else {
 		r = &Receiver{
 			c:        c,
+			delay:    m.pollDelay,
 			channels: []chan<- *protonmail.Event{ch},
 			poll:     make(chan struct{}, 1),
 			stop:     make(chan struct{}),
