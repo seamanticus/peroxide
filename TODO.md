@@ -321,6 +321,84 @@ and a failed sync rewinds the events to that ID.
    backs off and the parallelism drops (testing/synctest); a FETCH of a
    message being downloaded makes one request, not two.
 
+### 9.1 Keep UIDs across sessions (option b)
+
+**Problem.** `mailbox.init` syncs a mailbox on its first use in every
+session (FETCH, SEARCH, STORE, COPY, MOVE, EXPUNGE, APPEND; not SELECT
+or STATUS, which use the API's counts until then), and `mailbox.sync`
+(imap/mailbox.go) starts with
+`mbox.db.Reset()`: it deletes the mailbox's bucket and recreates it,
+so its bolt sequence restarts and every message gets a new UID from 1.
+UIDVALIDITY stays 1 (`Status`, `StatusUidValidity`). RFC 3501 section
+2.3.1.1 forbids it: a UID may never name another message under the same
+UIDVALIDITY.
+
+**Observed** (2026-11-05 `-debug-raw` log, bob, INBOX):
+
+| Message | UID 21:50 | UID 21:56 |
+|---|---|---|
+| LOGOUT TEST (arrived 21:52:59, while logged out) | - | 1 |
+| Peroxide non-encrypted test | 1 | 2 |
+| PEROXIDE ENCRYPTED TEST 3 | 2 | 3 |
+| PEROXIDE ENCRYPT TEST 4 | 3 | 4 |
+
+The message got UID 1, below the older ones, so aerc (which orders by
+UID) showed it last. The cause was a race: its replayed create event was
+applied while the 21:56 sync had emptied INBOX. Commit c3dc632 serializes
+syncs, event pages and actions (`user.syncSem`), so the message now gets
+the next UID after the sync; but the renumbering of the others remains.
+
+**Why it matters.**
+
+- Clients that cache by UID see the wrong message: aerc's header cache
+  (`cache-headers`, worker/imap/cache.go) keys entries by mailbox,
+  UIDVALIDITY and UID (`header.<mailbox>.<uidvalidity>.<uid>`), so with
+  it on, a renumbered message shows another's headers. Any client with
+  an offline store keyed by UID is exposed the same way.
+- A client that stays connected across a Refresh event keeps UIDs that
+  `reset` then reuses (NOTIFY design question 3).
+- Every session lists every opened mailbox from Proton again: one
+  request per 150 messages, before the first command answers.
+- It blocks section 9 step 6: a background downloader would start over
+  each session.
+
+**How proton-bridge does it.** gluon keeps each mailbox's UIDs and its
+UIDVALIDITY in its database across sessions. A sync adds only messages
+it doesn't know and removes those gone; UIDVALIDITY is bumped only when
+the store must be rebuilt (`NewUIDValidityBumpedStateUpdate`, which also
+marks connected clients' state invalid so they get BYE and reconnect).
+
+**Steps.**
+
+1. Store per mailbox, in its bucket or the counts bucket: UIDVALIDITY
+   (start at a value derived from the time, as servers usually do, so
+   it never repeats after a database is deleted), and whether the
+   mailbox has ever been synced. `Status` and SELECT report the stored
+   UIDVALIDITY.
+2. `mailbox.sync`: no `Reset`. List the mailbox from Proton, add the
+   messages missing from the bucket (new UIDs, above the bolt sequence),
+   remove the entries no longer listed, and leave the others with their
+   UIDs. Messages missed while logged out arrive anyway as replayed
+   events (resume, commit dafd522); the listing then repairs what an
+   event couldn't (an event lost to a Refresh, a database from an older
+   peroxide).
+3. Order: Proton lists by ID (`Sort: "ID"`, ascending), which is roughly
+   arrival order; messages added during a sync get UIDs in that order.
+   A message older than ones already stored (moved in from another
+   folder) gets a higher UID, which is correct IMAP: UIDs order arrival
+   in the mailbox, not dates.
+4. `reset` (Refresh event) and any other case where UIDs can't be kept:
+   clear the bucket and increment UIDVALIDITY; tell connected clients
+   (a `* OK [UIDVALIDITY n]` is not enough for a selected mailbox: send
+   BYE, as gluon does, so they resync).
+5. Sync once per database, not per session: `initialized` comes from the
+   stored flag, and later sessions rely on events. Keep a way to force a
+   full listing (a new `peroxide -resync` flag, or on a Refresh event).
+6. Tests (imap, database): a second session keeps the UIDs and
+   UIDVALIDITY of the first; a message added while logged out gets the
+   next UID; one removed is expunged; a Refresh changes UIDVALIDITY and
+   restarts UIDs; STATUS UIDVALIDITY matches SELECT.
+
 ## 10. CREATE, DELETE and RENAME are not implemented
 
 **Problem.** `user.CreateMailbox`, `DeleteMailbox` and `RenameMailbox`
