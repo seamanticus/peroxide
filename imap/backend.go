@@ -13,6 +13,19 @@ import (
 
 var errNotYetImplemented = errors.New("not yet implemented")
 
+// appendLimit is the largest message APPEND accepts, in octets: Proton refuses
+// to import messages over 50 MB (go-proton-api ErrImportSizeExceeded).
+const appendLimit = 50 << 20
+
+// CreateMessageLimit makes go-imap announce APPENDLIMIT=appendLimit, the same
+// for every mailbox (RFC 7889 section 2).
+func (u *user) CreateMessageLimit() *uint32 {
+	limit := uint32(appendLimit)
+	return &limit
+}
+
+var _ imapbackend.AppendLimitUser = (*user)(nil) // proof: compile-time
+
 type backend struct {
 	sessions      *auth.Manager
 	eventsManager *events.Manager
