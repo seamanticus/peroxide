@@ -61,21 +61,27 @@ func fetchItems(t *testing.T, mbox *mailbox, items ...imap.FetchItem) *imap.Mess
 	return msgs[0]
 }
 
+// sectionBytes returns the body section item of fetched. The server keys
+// sections by the name requested, .PEEK included; imap.Message.GetBody strips
+// .PEEK, as clients receive them, so it can't find them here.
 func sectionBytes(t *testing.T, fetched *imap.Message, item imap.FetchItem) []byte {
 	t.Helper()
-	section, err := imap.ParseBodySectionName(item)
+	want, err := imap.ParseBodySectionName(item)
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := fetched.GetBody(section)
-	if l == nil {
-		t.Fatalf("no %v in the response", item)
+	for section, l := range fetched.Body {
+		if !section.Equal(want) {
+			continue
+		}
+		b, err := io.ReadAll(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
 	}
-	b, err := io.ReadAll(l)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
+	t.Fatalf("no %v in the response", item)
+	return nil
 }
 
 // A body encrypted end to end to a key the account doesn't have reaches the
