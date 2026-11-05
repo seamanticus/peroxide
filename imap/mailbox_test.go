@@ -1,10 +1,12 @@
 package imap
 
 import (
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"testing/synctest"
 
@@ -464,12 +466,19 @@ func TestAddressEvents(t *testing.T) {
 	}
 }
 
+// roundTripFunc answers HTTP requests in memory: unlike an httptest server,
+// it starts no goroutine, so it works inside a synctest bubble.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // The last Logout can come while the events goroutine is still applying a
 // page, blocked sending its updates: go-imap calls Logout with its server
 // lock held, and its update loop needs that lock to take more, so Logout must
-// not wait. The database is closed, and the account leaves the backend, only
-// once the page is done; a login meanwhile finds the session closing
-// (getUser waits for it).
+// not wait. The page then finishes with the session intact (its counts
+// request needs the client), and only then is the database closed and the
+// account removed from the backend; a login meanwhile finds the session
+// closing (getUser waits for it).
 func TestLogoutWhileApplyingEvents(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		inbox, db := newTestMailbox(t, nil)
@@ -483,11 +492,26 @@ func TestLogoutWhileApplyingEvents(t *testing.T) {
 		u.flags = map[string]string{}
 		u.numClients = 1
 		u.done = make(chan struct{})
+		var countRequests int // only the events goroutine writes it
+		u.c = &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path != "/messages/count" {
+					t.Errorf("unexpected request %v %v", r.Method, r.URL.Path)
+				}
+				countRequests++
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"Code":1000,"Counts":[{"LabelID":"0","Total":0,"Unread":0}]}`)),
+					Request:    r,
+				}, nil
+			}),
+		}}
 		be.users["bob"] = u
 		syncTestMailbox(t, db, protonmail.LabelInbox, []*protonmail.Message{inboxMessage("a", 0)})
 
-		// A message deleted: its EXPUNGE is the page's one update, and a delete
-		// makes no counts request.
+		// A message deleted: its EXPUNGE is the page's one update, and once it
+		// is taken the page asks the API for message counts.
 		events := make(chan *protonmail.Event)
 		u.startEvents(be.updates, events)
 		events <- &protonmail.Event{ID: "e1", Messages: []*protonmail.EventMessage{{
@@ -516,6 +540,10 @@ func TestLogoutWhileApplyingEvents(t *testing.T) {
 		close((<-be.updates).Done())
 		u.eventLoop.Wait()
 
+		if countRequests != 1 {
+			t.Errorf("made %v counts requests after Logout, want 1: the page finishes with the session", countRequests)
+		}
+
 		be.Lock()
 		_, still := be.users["bob"]
 		be.Unlock()
@@ -526,7 +554,21 @@ func TestLogoutWhileApplyingEvents(t *testing.T) {
 			t.Error("the session was kept after its events stopped")
 		}
 		if _, _, err := db.LastEventID(); err == nil {
-			t.Error("the database is still open after its events stopped")
+			// Reopening below would wait forever on bolt's file lock.
+			t.Fatal("the database is still open after its events stopped")
+		}
+
+		// The page cut by Logout was recorded before the database closed: the
+		// next session resumes after it.
+		reopened, err := database.Open("test.db")
+		if err != nil {
+			t.Fatalf("reopen database: %v", err)
+		}
+		if id, ok, err := reopened.LastEventID(); err != nil || !ok || id != "e1" {
+			t.Errorf("stored last event ID = %q, %v, %v, want e1", id, ok, err)
+		}
+		if err := reopened.Close(); err != nil {
+			t.Errorf("close reopened database: %v", err)
 		}
 	})
 }
