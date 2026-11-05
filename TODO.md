@@ -145,3 +145,41 @@ Perform an analysis of what schema is utilised in both procedures and verify if 
 ## 6. Captcha solution
 
 Attempt a more elegant workaround or optimise the Captcha implementation.
+
+## 7. Unlock keys added by `Addresses` events
+
+**Problem.** `user.handleAddressEvent` (imap/addresses.go) applies
+addresses created, changed and deleted in Proton to the address list, but
+not their keys. Private keys are unlocked once per peroxide process, by
+`protonmail.Client.Unlock` at the first login of the account, and
+`auth.Manager` caches that session (auth/auth.go, `sessions`). A key
+added later (a new address, a key rotation) is logged as "is new: it is
+unlocked when peroxide restarts" and stays locked until then: mail
+encrypted to it fails to decrypt, and drafts from that address fail with
+"sender address key hasn't been decrypted". The SMTP session's address
+list (smtp/smtp.go, `session.addrs`) isn't refreshed at all.
+
+**Constraint.** Don't keep the mailbox password, or anything that
+unlocks keys, in memory for the session.
+
+**How proton-bridge does it**: it stores the salted key password in its
+encrypted vault (internal/vault/user.go, `KeyPass`), reads it whenever a
+key ring is needed and unlocks the address keys on demand
+(internal/services/useridentity/state.go, `WithAddrKR`), so a new key
+works at once. The vault stays encrypted in memory (`vault.enc`) but is
+decrypted on every read with an AES-GCM key bridge holds for its whole run
+(internal/vault/vault.go, `New`, `getUnsafe`): the key that unlocks
+everything is in memory, the trade-off ruled out above.
+
+**Steps.**
+
+1. Pick a way to unlock on an event without holding the secret, e.g.
+   re-reading it from the encrypted `auth.json` with a key the client
+   proves again, or deferring to the next IMAP/SMTP login that carries
+   the bridge password. To be decided.
+2. Unlock the new keys of `event.Address` with the user key ring and
+   add them to the session's key ring (`auth.session.privateKeys`), so
+   IMAP and SMTP see them.
+3. Refresh the SMTP session's address list from the same events.
+4. Tests: an address event with a new key makes it usable for
+   decryption without restarting.
