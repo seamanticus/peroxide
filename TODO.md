@@ -237,3 +237,86 @@ opened yet, Starred included.
    listing.
 4. Tests: a flag change on a message whose All Mail isn't synced logs
    nothing and sends no FETCH for All Mail.
+
+## 9. Fetch full messages in the background (BODYSTRUCTURE cost)
+
+**Problem.** Since commit f82e989, BODYSTRUCTURE and every body section
+need the full message (`GET /messages/{id}`): the local database has
+neither the body nor its MIME type, and only the decrypted body says
+whether a message is passed through as PGP/MIME. aerc fetches
+BODYSTRUCTURE for every message of its list (`UID FETCH 1:3
+(BODYSTRUCTURE ENVELOPE INTERNALDATE FLAGS UID RFC822.SIZE
+BODY.PEEK[HEADER])`), so opening a folder costs one request per message
+not in the 32-message memory cache (`messageCache`, imap/cache.go). The
+2026-11-05 log shows 3 requests for `1:3` and 2 for `4:5`, each 0-1 s.
+A folder of 500 messages opened for the first time in a session waits
+for 500 sequential requests, and again after every restart: the cache
+is in memory only.
+
+**How proton-bridge does it** (internal/services/syncservice): one sync
+after login, as a pipeline of four stages, persisted and resumable:
+
+1. Metadata (stage_metadata.go): `GetMessageMetadataPage` 128 per page
+   (`MetadataPageSize`), newest first (`Desc: true`, then `EndID` = last
+   ID of the previous page, which comes back as the first result and is
+   skipped). Batches of at most 64 messages (`MetadataMaxMessages`) and
+   at most `DownloadRequestMem` (40-128 MB, from `MaxSyncMemory`, 2 GB by
+   default) of message and attachment sizes.
+2. Download (stage_download.go): `GetMessage` for each message, then
+   every attachment, in parallel: up to `MaxParallelDownloads` (32, "the
+   maximum recommended by the API team", doubled to 64 in
+   `NewDownloadStage`). Each request retries with exponential cool-down
+   on 429 and 5xx (`network.ExpCoolDown`). Parallelism adapts per chunk
+   (`DefaultDownloadRateModifier`): note that its test
+   (`TestAutoDownloadScale_429or500x`) expects it to fall to 2 after a
+   chunk without 429 and to double after one with a 429, which looks
+   inverted; don't copy it as is.
+3. Build (stage_build.go): decrypt and build the RFC 822 message
+   (`DecryptAndBuildRFC822Into`, `IgnoreDecryptionErrors`: an
+   undecryptable body becomes the PGP/MIME fallback peroxide now uses),
+   parse its structure (`imap.NewParsedMessage`).
+4. Apply (stage_apply.go): store the literal and the parsed structure in
+   gluon's on-disk store, so later FETCHes make no request.
+
+Progress is saved (`syncservice.Status`: `LastSyncedMessageID`,
+`NumSyncedMessages`, `FailedMessages`): a sync stopped halfway resumes,
+and messages that failed are retried later. `StartSyncEventID` is the
+event ID when the sync began: events received meanwhile go to a reduced
+handler (messages only, `newSyncEventHandler`, service_sync_events.go),
+and a failed sync rewinds the events to that ID.
+
+**What peroxide would need.**
+
+1. Storage, i.e. option (b) first: a bolt bucket keyed by message ID
+   with what FETCH needs without a request. Either the API's full
+   message as received (body still PGP-encrypted to the account's keys,
+   attachments' key packets, names, MIME types, sizes), which is no less
+   safe at rest than the metadata already stored in clear (subjects,
+   addresses); or the computed BODYSTRUCTURE plus the pass-through flag,
+   which needs no decryption per FETCH but stores attachment names in
+   clear. Decryption keys are never stored.
+2. A downloader per user, started by the first `mailbox.init` of a
+   session (not at login: no requests while no client looks), stopped
+   with the last logout (`u.done`), as the events poll is. Newest first,
+   the selected mailbox before the others.
+3. Bounded parallelism (start at 4, at most 32 per bridge's figure),
+   halved on 429 or 5xx with exponential back-off, raised slowly while
+   requests succeed. No attachments: BODYSTRUCTURE needs only the
+   message; attachments are fetched when a client asks for them.
+4. Interactive FETCHes go first: a FETCH needing a message the
+   downloader hasn't reached fetches it at once (as now) and stores it,
+   and the downloader skips it.
+5. Invalidation: `EventUpdate` (a draft edited) and deletes remove the
+   stored entry, and a Refresh event clears all of it, as already done
+   for the memory cache (`receiveEvents`, imap/user.go; `applyDelete`,
+   imap/actions.go).
+6. Resume: the stored entries are the progress, so a restart continues
+   where the last session stopped. This needs `mailbox.sync` to stop
+   resetting the mailbox on the first open of every session ("TODO:
+   sync only the first time", "TODO: don't do this without incrementing
+   UIDVALIDITY", imap/mailbox.go), or the downloader would start over
+   each session.
+7. Tests: a stored message makes BODYSTRUCTURE and BODY[] make no
+   request; an edited draft is fetched again; on 429 the downloader
+   backs off and the parallelism drops (testing/synctest); a FETCH of a
+   message being downloaded makes one request, not two.
