@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -50,6 +51,9 @@ type user struct {
 
 	done      chan struct{} // closed by the last Logout
 	eventSent chan struct{}
+	// The goroutine applying events, started by startEvents. getUser waits
+	// for it after a logout.
+	eventLoop sync.WaitGroup
 
 	sync.Mutex // protects everything below
 
@@ -62,24 +66,37 @@ type user struct {
 }
 
 func getUser(be *backend, username string, c *protonmail.Client, privateKeys openpgp.EntityList) (*user, error) {
-	// TODO: logging a user in may take some time, find a way not to lock all
-	// other logins during this time
-	be.Lock()
-	defer be.Unlock()
-
-	if u, ok := be.users[username]; ok {
-		u.Lock()
-		u.numClients++
-		u.Unlock()
-		return u, nil
-	} else {
-		u, err := newUser(be, username, c, privateKeys)
-		if err != nil {
-			return nil, err
+	for {
+		// TODO: logging a user in may take some time, find a way not to lock all
+		// other logins during this time
+		be.Lock()
+		u, ok := be.users[username]
+		if !ok {
+			u, err := newUser(be, username, c, privateKeys)
+			if err != nil {
+				be.Unlock()
+				return nil, err
+			}
+			be.users[username] = u
+			be.Unlock()
+			return u, nil
 		}
 
-		be.users[username] = u
-		return u, nil
+		u.Lock()
+		closing := u.numClients == 0
+		if !closing {
+			u.numClients++
+		}
+		u.Unlock()
+		be.Unlock()
+		if !closing {
+			return u, nil
+		}
+
+		// Logged out, but still applying its last events, and holding the
+		// account's database (closeAfterLogout). Wait without be's lock, so
+		// that other accounts still log in and log out meanwhile.
+		u.eventLoop.Wait()
 	}
 }
 
@@ -112,32 +129,47 @@ func newUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 	}
 	uu.db = db
 
-	if err := uu.initMailboxes(); err != nil {
-		return nil, err
-	}
-
-	// Resume after the last event applied, even from a previous session: the
-	// events of the time peroxide was stopped are then not lost.
-	lastEventID, ok, err := db.LastEventID()
+	lastEventID, err := uu.initSession()
 	if err != nil {
-		return nil, fmt.Errorf("cannot read last event ID: %w", err)
-	}
-	if !ok {
-		if lastEventID, err = c.GetLatestEventID(); err != nil {
-			return nil, fmt.Errorf("cannot get latest event ID: %w", err)
+		// bolt locks the file until it is closed: the next login would wait
+		// for it forever.
+		if closeErr := db.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("cannot close database: %w", closeErr))
 		}
-		if err := db.SetLastEventID(lastEventID); err != nil {
-			return nil, fmt.Errorf("cannot store last event ID: %w", err)
-		}
+		return nil, err
 	}
 
 	uu.done = make(chan struct{})
 	ch := make(chan *protonmail.Event)
-	go uu.receiveEvents(be.updates, ch)
+	uu.startEvents(be.updates, ch)
 	uu.eventsReceiver = be.eventsManager.Register(c, u.Name, lastEventID, ch, uu.done)
 
 	log.Printf("User %q logged in via IMAP", u.Name)
 	return uu, nil
+}
+
+// initSession loads the mailboxes and returns the event ID to resume from:
+// the last event applied, even in a previous session, so that the events of
+// the time peroxide was stopped are not lost.
+func (u *user) initSession() (lastEventID string, err error) {
+	if err := u.initMailboxes(); err != nil {
+		return "", err
+	}
+
+	lastEventID, ok, err := u.db.LastEventID()
+	if err != nil {
+		return "", fmt.Errorf("cannot read last event ID: %w", err)
+	}
+	if ok {
+		return lastEventID, nil
+	}
+	if lastEventID, err = u.c.GetLatestEventID(); err != nil {
+		return "", fmt.Errorf("cannot get latest event ID: %w", err)
+	}
+	if err := u.db.SetLastEventID(lastEventID); err != nil {
+		return "", fmt.Errorf("cannot store last event ID: %w", err)
+	}
+	return lastEventID, nil
 }
 
 func labelNameToFlag(s string) string {
@@ -302,19 +334,42 @@ func (u *user) Logout() error {
 		return nil
 	}
 
-	delete(u.backend.users, u.username)
-
+	log.Printf("User %q logged out via IMAP", u.u.Name)
+	// The events goroutine may be applying a page: it closes the database
+	// and leaves be.users once it has stopped (closeAfterLogout). Logout
+	// can't wait for it: go-imap calls Logout holding its server lock,
+	// which delivering that page's updates needs.
 	close(u.done)
+	return nil
+}
 
+// startEvents applies the events received on ch until it is closed, after
+// the last Logout, then ends the session: the events goroutine is the last to
+// use the database.
+func (u *user) startEvents(updates chan<- imapbackend.Update, ch <-chan *protonmail.Event) {
+	u.eventLoop.Go(func() {
+		u.receiveEvents(updates, ch)
+		u.closeAfterLogout()
+	})
+}
+
+// closeAfterLogout closes the database and lets go of the session once the
+// events have stopped, and only then leaves be.users, so that the next login
+// of the account (getUser) opens the database after it is closed.
+func (u *user) closeAfterLogout() {
 	if err := u.db.Close(); err != nil {
-		return err
+		log.Printf("cannot close the database of %q: %v", u.username, err)
 	}
 
-	log.Printf("User %q logged out via IMAP", u.u.Name)
+	u.backend.Lock()
+	defer u.backend.Unlock()
+	u.Lock()
+	defer u.Unlock()
+
+	delete(u.backend.users, u.username)
 	u.c = nil
 	u.u = nil
 	u.privateKeys = nil
-	return nil
 }
 
 // poll asks for the events now, and waits until one is applied, or the user
@@ -436,16 +491,11 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 		// Only now: commands waiting for this event, such as STORE, don't wait
 		// for this request too. Synchronized mailboxes don't need it.
 		if fetchCounts {
-			u.Lock()
-			c := u.c // Cleared by Logout, which may race with this event.
-			u.Unlock()
-			if c != nil {
-				counts, err := c.CountMessages("")
-				if err != nil {
-					log.Printf("cannot refresh message counts after event: %v", err)
-				}
-				u.setAPICounts(counts)
+			counts, err := u.c.CountMessages("")
+			if err != nil {
+				log.Printf("cannot refresh message counts after event: %v", err)
 			}
+			u.setAPICounts(counts)
 		}
 	}
 }

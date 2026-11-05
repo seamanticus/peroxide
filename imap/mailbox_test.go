@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"testing"
+	"testing/synctest"
 
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
@@ -461,4 +462,71 @@ func TestAddressEvents(t *testing.T) {
 			t.Errorf("%v: list read before changed to %v, was %v", step.name, got, kept)
 		}
 	}
+}
+
+// The last Logout can come while the events goroutine is still applying a
+// page, blocked sending its updates: go-imap calls Logout with its server
+// lock held, and its update loop needs that lock to take more, so Logout must
+// not wait. The database is closed, and the account leaves the backend, only
+// once the page is done; a login meanwhile finds the session closing
+// (getUser waits for it).
+func TestLogoutWhileApplyingEvents(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		inbox, db := newTestMailbox(t, nil)
+		// Unbuffered and unread: the page blocks on its first update, as when
+		// go-imap's update loop waits for the server lock Logout runs under.
+		be := &backend{users: make(map[string]*user), updates: make(chan imapbackend.Update)}
+		u := inbox.u
+		u.backend = be
+		u.username = "bob"
+		u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
+		u.flags = map[string]string{}
+		u.numClients = 1
+		u.done = make(chan struct{})
+		be.users["bob"] = u
+		syncTestMailbox(t, db, protonmail.LabelInbox, []*protonmail.Message{inboxMessage("a", 0)})
+
+		// A message deleted: its EXPUNGE is the page's one update, and a delete
+		// makes no counts request.
+		events := make(chan *protonmail.Event)
+		u.startEvents(be.updates, events)
+		events <- &protonmail.Event{ID: "e1", Messages: []*protonmail.EventMessage{{
+			ID:     "a",
+			Action: protonmail.EventDelete,
+		}}}
+		synctest.Wait() // blocked sending the page's EXPUNGE
+
+		if err := u.Logout(); err != nil {
+			t.Fatalf("Logout() = %v", err)
+		}
+		close(events) // as the receiver does once done is closed
+		synctest.Wait()
+
+		be.Lock()
+		kept := be.users["bob"] == u
+		be.Unlock()
+		if !kept {
+			t.Error("the account left the backend before its events stopped")
+		}
+		if _, _, err := db.LastEventID(); err != nil {
+			t.Errorf("the database closed before its events stopped: %v", err)
+		}
+
+		// What go-imap does once Logout has returned: take the update.
+		close((<-be.updates).Done())
+		u.eventLoop.Wait()
+
+		be.Lock()
+		_, still := be.users["bob"]
+		be.Unlock()
+		if still {
+			t.Error("the account is still in the backend after its events stopped")
+		}
+		if u.u != nil || u.c != nil || u.privateKeys != nil {
+			t.Error("the session was kept after its events stopped")
+		}
+		if _, _, err := db.LastEventID(); err == nil {
+			t.Error("the database is still open after its events stopped")
+		}
+	})
 }
