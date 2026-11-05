@@ -105,29 +105,42 @@ func splitMIMEType(t string) (string, string) {
 }
 
 func (mbox *mailbox) fetchBodyStructure(msg *protonmail.Message, extended bool) (*imap.BodyStructure, error) {
-	if msg.NumAttachments > 0 {
-		var err error
-		msg, err = mbox.u.fullMessage(msg.ID)
-		if err != nil {
-			return nil, err
-		}
+	// The local database keeps neither the body nor its MIME type: guessing
+	// them made a text/plain body a text/html part of size 0.
+	msg, err := mbox.u.fullMessage(msg.ID)
+	if err != nil {
+		return nil, err
 	}
 
-	inlineType := "text"
-	inlineSubType := "html"
+	if mbox.passThrough(msg) {
+		return mbox.passThroughBodyStructure(msg, extended)
+	}
+
+	inlineType, inlineSubType := "text", "plain"
 	if msg.MIMEType != "" {
 		inlineType, inlineSubType = splitMIMEType(msg.MIMEType)
 	}
-	parts := []*imap.BodyStructure{
-		&imap.BodyStructure{
-			MIMEType:    inlineType,
-			MIMESubType: inlineSubType,
-			Encoding:    "quoted-printable",
-			Size:        uint32(len(msg.Body)),
-			Extended:    extended,
-			Disposition: "inline",
-		},
+	inline := &imap.BodyStructure{
+		MIMEType:    inlineType,
+		MIMESubType: inlineSubType,
+		Params:      map[string]string{"charset": "utf-8"},
+		Encoding:    "quoted-printable",
+		Extended:    extended,
+		Disposition: "inline",
 	}
+	// Size and Lines are of the part as sent, after quoted-printable.
+	body, err := mbox.encodedInlineBody(msg)
+	if err != nil {
+		return nil, err
+	}
+	inline.Size = uint32(len(body))
+	if inlineType == "text" {
+		inline.Lines = uint32(bytes.Count(body, []byte("\n")))
+		if len(body) > 0 && body[len(body)-1] != '\n' {
+			inline.Lines++
+		}
+	}
+	parts := []*imap.BodyStructure{inline}
 
 	for _, att := range msg.Attachments {
 		attType, attSubType := splitMIMEType(att.MIMEType)
@@ -161,6 +174,28 @@ func (mbox *mailbox) inlineBody(msg *protonmail.Message) (io.Reader, error) {
 
 	// TODO: check signature
 	return md.UnverifiedBody, nil
+}
+
+// encodedInlineBody returns the inline part of msg as written in a FETCH:
+// decrypted, then quoted-printable as inlineHeader says.
+func (mbox *mailbox) encodedInlineBody(msg *protonmail.Message) ([]byte, error) {
+	r, err := mbox.inlineBody(msg)
+	if err != nil {
+		return nil, err
+	}
+	var b bytes.Buffer
+	w, err := message.CreateWriter(&b, inlineHeader(msg))
+	if err != nil {
+		return nil, err
+	}
+	b.Reset() // keep the body only
+	if _, err := io.Copy(w, r); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
 }
 
 func (mbox *mailbox) attachmentBody(att *protonmail.Attachment) (io.Reader, error) {
@@ -241,10 +276,22 @@ func messageHeader(msg *protonmail.Message) message.Header {
 }
 
 func (mbox *mailbox) fetchBodySection(msg *protonmail.Message, section *imap.BodySectionName) (imap.Literal, error) {
+	// Only the encrypted body says whether the message is passed through, and
+	// then its header too differs (its Content-Type), so every section of a
+	// PGP message needs the full message. The cache keeps the cost to one
+	// request per message.
+	full, err := mbox.u.fullMessage(msg.ID)
+	if err != nil {
+		return nil, err
+	}
+	if mbox.passThrough(full) {
+		return mbox.passThroughBodySection(full, section)
+	}
+
 	b := new(bytes.Buffer)
 
 	if len(section.Path) == 0 {
-		w, err := message.CreateWriter(b, messageHeader(msg))
+		w, err := message.CreateWriter(b, messageHeader(full))
 		if err != nil {
 			return nil, err
 		}
@@ -255,16 +302,11 @@ func (mbox *mailbox) fetchBodySection(msg *protonmail.Message, section *imap.Bod
 
 		switch section.Specifier {
 		case imap.EntireSpecifier, imap.TextSpecifier:
-			msg, err := mbox.u.fullMessage(msg.ID)
+			pw, err := w.CreatePart(inlineHeader(full))
 			if err != nil {
 				return nil, err
 			}
-
-			pw, err := w.CreatePart(inlineHeader(msg))
-			if err != nil {
-				return nil, err
-			}
-			pr, err := mbox.inlineBody(msg)
+			pr, err := mbox.inlineBody(full)
 			if err != nil {
 				return nil, err
 			}
@@ -273,7 +315,7 @@ func (mbox *mailbox) fetchBodySection(msg *protonmail.Message, section *imap.Bod
 			}
 			pw.Close()
 
-			for _, att := range msg.Attachments {
+			for _, att := range full.Attachments {
 				pw, err := w.CreatePart(attachmentHeader(att))
 				if err != nil {
 					return nil, err
@@ -298,30 +340,17 @@ func (mbox *mailbox) fetchBodySection(msg *protonmail.Message, section *imap.Bod
 		var h message.Header
 		var getBody func() (io.Reader, error)
 		if part := section.Path[0]; part == 1 {
-			// TODO: only fetch the message if the body is needed
-			// For now we fetch it in all cases because the MIME type is not included
-			// in the cached message, and inlineHeader needs it
-			msg, err := mbox.u.fullMessage(msg.ID)
-			if err != nil {
-				return nil, err
-			}
-
-			h = inlineHeader(msg)
+			h = inlineHeader(full)
 			getBody = func() (io.Reader, error) {
-				return mbox.inlineBody(msg)
+				return mbox.inlineBody(full)
 			}
 		} else {
 			i := part - 2
-			if i >= msg.NumAttachments {
+			if i < 0 || i >= len(full.Attachments) {
 				return nil, errors.New("invalid attachment section path")
 			}
 
-			msg, err := mbox.u.fullMessage(msg.ID)
-			if err != nil {
-				return nil, err
-			}
-
-			att := msg.Attachments[i]
+			att := full.Attachments[i]
 			h = attachmentHeader(att)
 			getBody = func() (io.Reader, error) {
 				return mbox.attachmentBody(att)

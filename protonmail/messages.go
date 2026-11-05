@@ -84,22 +84,26 @@ type Message struct {
 	ExternalID     string `json:",omitempty"`
 }
 
+// Read decrypts the body of msg with keyring. Proton stores bodies as armored
+// PGP messages whatever IsEncrypted says about how they were sent, so the
+// body itself decides: one that doesn't start with a PGP message is returned
+// as is. A body encrypted to no key of keyring gives
+// openpgp/errors.ErrKeyIncorrect, as when the sender encrypted it end to end
+// to a key Proton doesn't have.
 func (msg *Message) Read(keyring openpgp.KeyRing, prompt openpgp.PromptFunction) (*openpgp.MessageDetails, error) {
-	switch msg.IsEncrypted {
-	case MessageUnencrypted:
+	if !strings.HasPrefix(strings.TrimLeft(msg.Body, " \t\r\n"), "-----BEGIN PGP MESSAGE-----") {
 		return &openpgp.MessageDetails{
 			IsEncrypted:    false,
 			IsSigned:       false,
 			UnverifiedBody: strings.NewReader(msg.Body),
 		}, nil
-	default:
-		block, err := armor.Decode(strings.NewReader(msg.Body))
-		if err != nil {
-			return nil, err
-		}
-
-		return openpgp.ReadMessage(block.Body, keyring, prompt, nil)
 	}
+
+	block, err := armor.Decode(strings.NewReader(msg.Body))
+	if err != nil {
+		return nil, fmt.Errorf("cannot read armored body: %w", err)
+	}
+	return openpgp.ReadMessage(block.Body, keyring, prompt, nil)
 }
 
 type messageWriter struct {

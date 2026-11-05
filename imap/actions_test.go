@@ -210,11 +210,22 @@ func TestExpungeForgetsDeletedMessages(t *testing.T) {
 	}
 }
 
-// fetchTestMessage is an INBOX message whose header needs no API request.
+// fetchTestMessage is an INBOX message with a plain body, whose header needs
+// no API request.
 func fetchTestMessage(id string, unread int) *protonmail.Message {
 	msg := inboxMessage(id, unread)
 	msg.Sender = &protonmail.MessageAddress{Address: "from@example.org"}
+	msg.MIMEType = "text/plain"
+	msg.Body = "Hello\r\n"
 	return msg
+}
+
+// cacheFull puts msgs in mbox's full-message cache, as if fetched already, so
+// fetching their bodies makes no API request.
+func cacheFull(mbox *mailbox, msgs ...*protonmail.Message) {
+	for _, msg := range msgs {
+		mbox.u.messages.put(msg)
+	}
 }
 
 // fetchAll runs FETCH 1:* with items and returns what it sent.
@@ -251,7 +262,9 @@ func TestFetchBodySetsSeen(t *testing.T) {
 	}
 	for _, tt := range tests {
 		api := &fakeAPI{t: t}
-		mbox, sent := newActionTestMailbox(t, api, []*protonmail.Message{fetchTestMessage("a", tt.unread)})
+		msg := fetchTestMessage("a", tt.unread)
+		mbox, sent := newActionTestMailbox(t, api, []*protonmail.Message{msg})
+		cacheFull(mbox, msg)
 
 		msgs, err := fetchAll(t, mbox, tt.item)
 		if err != nil {
@@ -322,7 +335,9 @@ func TestFetchMacros(t *testing.T) {
 	}
 	for _, tt := range tests {
 		api := &fakeAPI{t: t}
-		mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{fetchTestMessage("a", 0)})
+		msg := fetchTestMessage("a", 0)
+		mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{msg})
+		cacheFull(mbox, msg)
 
 		msgs, err := fetchAll(t, mbox, tt.macro)
 		if err != nil {
