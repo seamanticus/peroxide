@@ -24,8 +24,10 @@ after it reconnects). go-imap can send an unsolicited LIST
   type, lists custom folders and labels alike, both `Type` 1: folder
   `PEROXIDE_FOLDER` with `Exclusive` 1, labels `peroxide_label_1..3`
   with `Exclusive` 0. `Path` equals `Name` for these top-level ones.
-  No `Labels` event was in that log: create, rename and delete events
-  are only checked against the 2026-10-14 shape and go-proton-api.
+- 2026-11-04/05 `-debug-raw` logs: a folder created (`Action` 1),
+  renamed (`Action` 2) and deleted (`Action` 0, `ID` only) arrived at the
+  next poll and were applied. The event `ID` of system-label updates
+  differs from `Label.ID`; for custom folders it was the same.
 
 **Left open.**
 
@@ -57,10 +59,10 @@ after it reconnects). go-imap can send an unsolicited LIST
    does, handle it as a delete then a create.
 3. A folder deleted while a client has it selected gives that client
    errors on its next command, instead of a BYE or a closed mailbox.
-4. Check live: create, rename and delete a folder and a label while
-   peroxide runs with `-debug-raw` (capture with `2>&1`: API logs go to
-   stderr, IMAP logs to stdout), and check the event shape and the logs
-   `Folder ... created/renamed/deleted`.
+4. Check live with a label (not a folder): create, rename and delete one
+   while peroxide runs with `-debug-raw` (capture with `2>&1`: API logs
+   go to stderr, IMAP logs to stdout), and check the logs
+   `Label ... created/renamed`. Folders were checked on 2026-11-04/05.
 
 ## 2. `STORE +FLAGS (\Deleted)` without `.SILENT` sends no FETCH
 
@@ -95,35 +97,42 @@ fetches flags again.
    FETCH with `\Deleted` and the UID; `-FLAGS (\Deleted)` sends one
    without it; no API request is made.
 
-## 3. Background polls can leave an idle goroutine after logout
+## 3. APPEND only into Drafts
 
-**Problem.** `Receiver.Poll` (events/events.go) sends on an unbuffered
-channel, which `Receiver.receiveEvents` only reads while waiting between
-polls. `user.pollSoon` (imap/actions.go), called after every STORE, COPY,
-MOVE and EXPUNGE, and `user.poll` (imap/user.go) call it with `go`. Once
-the last client logs out, the receiver fetches one more event, finds no
-channel (`if n == 0 { break }`) and returns without reading the poll
-channel again: a `Poll` still pending then blocks forever, keeping its
-goroutine and the `Receiver` alive.
+**Problem.** `mailbox.CreateMessage` (imap/mailbox.go) refuses APPEND
+outside Drafts ("cannot create messages outside the Drafts mailbox"), a
+rule of peroxide's own since 2018 (commit 2a1b998), not of Proton's. So a
+client can't copy or move a message from another account into a Proton
+folder, nor save a sent copy into Sent: aerc tried `APPEND INBOX` on
+2026-11-04 and got NO.
+
+**How proton-bridge does it** (`Connector.CreateMessage`,
+internal/services/imapservice/connector.go): every mailbox but All Mail
+accepts APPEND, through Proton's import API (`ImportMessages`,
+go-proton-api message_import.go), with:
+
+- label IDs: the mailbox, plus Starred if `\Flagged` is set;
+- flags: Received into INBOX, Sent into Sent; elsewhere Received if the
+  message has a `Received` header, Sent otherwise; Replied if
+  `\Answered`; Drafts keeps its own draft path (peroxide's `createMessage`);
+- unread unless `\Seen` (always read in Drafts);
+- size: at most 50 MB once encrypted (`ErrImportSizeExceeded`), the
+  APPENDLIMIT peroxide already announces;
+- a message just sent over SMTP is matched by hash (`sendRecorder`) and
+  not imported twice into Sent.
 
 **Steps.**
 
-1. Make the poll channel buffered (capacity 1) and `Poll` non-blocking:
-   `select { case r.poll <- struct{}{}: default: }`. A pending request
-   already covers a new one, so nothing is lost. Callers then drop the
-   `go`.
-2. `user.poll` (used by NOOP and APPEND) then waits on `u.eventSent`,
-   which a pending poll still signals. It also blocks forever if the
-   receiver stopped, or while `GetEvent` keeps failing (that path
-   delivers nothing): wait with a timeout, or also on the user's `done`.
-3. Related race, same file: `Manager.Register` can add a new user's
-   channel to a receiver that just found no channel and is about to
-   return, but hasn't left `m.receivers` yet. That user then never gets
-   events. Remove the receiver from `m.receivers` under `m.locker` before
-   it returns, and let `Register` start a new one.
-4. Tests (events): with no reader, `Poll` returns at once; a receiver
-   whose last channel was removed accepts no new channel (`Register`
-   starts a new receiver). Don't count goroutines, which is flaky.
+1. peroxide has an import client (`protonmail.Client.Import`, used by
+   imports/messages.go): reuse it for APPEND, with the metadata above.
+2. Refuse All Mail (and Starred, a flag here) with NO, as bridge does.
+3. Decide on the SMTP duplicate check: peroxide's SMTP server sends
+   through a Proton draft (`CreateDraftMessage` then `SendMessage`,
+   smtp/smtp.go), which Proton files in Sent, so a client that also
+   APPENDs to Sent (aerc `copy-to`) would create a second copy.
+4. Tests (imap): the label IDs and flags sent for INBOX, Sent, a custom
+   folder and Drafts; All Mail refused; a literal over APPENDLIMIT gets
+   TOOBIG before any request.
 
 ## 4. Debug Raw
 
