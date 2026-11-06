@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-message"
 	"github.com/emersion/go-message/mail"
+	"github.com/emersion/go-message/textproto"
 
 	"github.com/seamanticus/peroxide/protonmail"
 )
@@ -73,17 +75,23 @@ func fetchEnvelope(msg *protonmail.Message) *imap.Envelope {
 	env := &imap.Envelope{
 		Date:    msg.Time.Time(),
 		Subject: msg.Subject,
-		// TODO: Sender
 		To:      imapAddressList(msg.ToList),
 		Cc:      imapAddressList(msg.CCList),
 		Bcc:     imapAddressList(msg.BCCList),
 		ReplyTo: imapAddressList(msg.ReplyTos),
-		// TODO: InReplyTo
-		MessageId: messageID(msg),
+		// In the same form as the Message-Id header, angle brackets included.
+		MessageId: "<" + messageID(msg) + ">",
 	}
 	// Sender is decoded from the API and may be missing: From is then NIL.
 	if msg.Sender != nil {
 		env.From = []*imap.Address{imapAddress(msg.Sender)}
+	}
+	// RFC 3501 section 7.4.2: the server sets Sender and Reply-To to From
+	// when the header has none. The metadata keeps no Sender header, so
+	// Sender is always From, as proton-bridge's is for most mail.
+	env.Sender = env.From
+	if len(env.ReplyTo) == 0 {
+		env.ReplyTo = env.From
 	}
 	return env
 }
@@ -357,31 +365,60 @@ func mailAddressList(addresses []*protonmail.MessageAddress) []*mail.Address {
 	return l
 }
 
+// messageHeader returns msg's header, with peroxide's multipart/mixed
+// Content-Type. A full message (GetMessage) carries the header Proton
+// received: it is kept, as proton-bridge does, so threading fields
+// (In-Reply-To, References) and the sent Date survive, with the address and
+// subject fields set from the metadata. Message metadata carries no header:
+// it is built from the metadata alone.
 func messageHeader(msg *protonmail.Message) message.Header {
 	typeParams := map[string]string{"boundary": msgBoundary(msg)}
 
 	var h mail.Header
+	if msg.Header != "" {
+		orig, err := originalHeader(msg.Header)
+		if err != nil {
+			log.Printf("Message %v: ignoring its header from Proton: %v", msg.ID, err)
+		} else {
+			h = mail.Header{Header: message.Header{Header: orig}}
+			// The body is peroxide's multipart, not the one sent.
+			h.Del("Content-Transfer-Encoding")
+		}
+	}
 	h.SetContentType("multipart/mixed", typeParams)
-	h.SetDate(msg.Time.Time())
+	if _, err := h.Date(); err != nil || !h.Has("Date") {
+		h.SetDate(msg.Time.Time())
+	}
 	h.SetSubject(msg.Subject)
 	if msg.Sender != nil {
 		h.SetAddressList("From", []*mail.Address{mailAddress(msg.Sender)})
 	}
-	if len(msg.ReplyTos) > 0 {
-		h.SetAddressList("Reply-To", mailAddressList(msg.ReplyTos))
+	setAddresses(&h, "Reply-To", msg.ReplyTos)
+	setAddresses(&h, "To", msg.ToList)
+	setAddresses(&h, "Cc", msg.CCList)
+	setAddresses(&h, "Bcc", msg.BCCList)
+	if !h.Has("Message-Id") {
+		h.Set("Message-Id", fmt.Sprintf("<%s>", messageID(msg)))
 	}
-	if len(msg.ToList) > 0 {
-		h.SetAddressList("To", mailAddressList(msg.ToList))
-	}
-	if len(msg.CCList) > 0 {
-		h.SetAddressList("Cc", mailAddressList(msg.CCList))
-	}
-	if len(msg.BCCList) > 0 {
-		h.SetAddressList("Bcc", mailAddressList(msg.BCCList))
-	}
-	// TODO: In-Reply-To
-	h.Set("Message-Id", fmt.Sprintf("<%s>", messageID(msg)))
 	return h.Header
+}
+
+// setAddresses sets field k to addresses, unless there are none: then a field
+// the original header has is kept, as proton-bridge does.
+func setAddresses(h *mail.Header, k string, addresses []*protonmail.MessageAddress) {
+	if len(addresses) > 0 {
+		h.SetAddressList(k, mailAddressList(addresses))
+	}
+}
+
+// originalHeader parses the header Proton keeps for a message. Proton sends
+// it without the blank line that ends a header.
+func originalHeader(s string) (textproto.Header, error) {
+	h, err := textproto.ReadHeader(bufio.NewReader(strings.NewReader(s + "\r\n")))
+	if err != nil {
+		return textproto.Header{}, err
+	}
+	return h, nil
 }
 
 func (mbox *mailbox) fetchBodySection(msg *protonmail.Message, section *imap.BodySectionName) (imap.Literal, error) {
