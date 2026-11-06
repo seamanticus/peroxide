@@ -50,9 +50,9 @@ after it reconnects). go-imap can send an unsolicited LIST
    - Cost: it renames every custom mailbox, breaking client settings
      that name them (aerc `folders`, `archive`, `copy-to`). Local data is
      keyed by label ID, so no resync. Labels as mailboxes also need COPY
-     to label and EXPUNGE to unlabel. A parent's rename sends no event
-     for its children: proton-bridge fetches each child again
-     (`onLabelUpdated`).
+     to label (EXPUNGE already unlabels, 46d246c). A parent's rename
+     sends no event for its children: proton-bridge fetches each child
+     again (`onLabelUpdated`).
 2. A folder that becomes a label, or back (`Exclusive` changes in an
    update), is logged and ignored until the next login. proton-bridge
    never handles it either, so Proton probably never sends it. If it
@@ -643,16 +643,6 @@ Found in the 2026-11-06 audit; none is from branch `labels-events`.
    API counts current (`fetchCounts`, already done). Test: a create
    event for an unsynced mailbox sends no update; STATUS stays on API
    counts until SELECT.
-6. **SearchMessages nests bolt transactions.** It runs `u.db.Message`,
-   its own read transaction, inside `mbox.db.ForEach`'s, and takes
-   `mbox.Lock` inside it (`fetchFlags`). A write that grows the file
-   (more likely once section 9 stores bodies) remaps it under
-   `mmaplock`, which waits for every open read transaction, while the
-   outer one waits for the inner, behind the writer in RWMutex order:
-   deadlock. Fix: collect `(seqNum, uid, apiID)` in `ForEach`, end the
-   transaction, then read messages and flags outside it (or read both
-   buckets in one transaction, `database.Mailbox.ForEachMessage`).
-   Test: SEARCH while another goroutine writes enough to remap.
 
 ## 12. Nits from the 2026-11-06 audit
 
