@@ -49,6 +49,21 @@ func writeLog(w io.Writer, b []byte) error {
 	return nil
 }
 
+// logLines writes the complete lines of *held followed by b in one Write, and
+// keeps what follows the last of them in *held. The API client and every other
+// connection log to the same stream, one Write per entry: an entry written
+// while a line is half logged would land inside it.
+func logLines(w io.Writer, held *[]byte, b []byte) error {
+	*held = append(*held, b...)
+	i := bytes.LastIndexByte(*held, '\n')
+	if i < 0 {
+		return nil
+	}
+	err := writeLog(w, (*held)[:i+1])
+	*held = append((*held)[:0], (*held)[i+1:]...)
+	return err
+}
+
 // redactArgs returns the line made of fields, followed by the redaction marker
 // if redacted.
 func redactArgs(fields [][]byte, redacted bool) []byte {
@@ -84,6 +99,9 @@ type imapScrubber struct {
 	mu sync.Mutex
 	// Incomplete lines.
 	client, server []byte
+	// Logged output held back until its line ends: literals and go-imap's
+	// buffered writes end anywhere.
+	clientOut, serverOut []byte
 	// Bytes left in the literals being sent, logged as they are. Only the
 	// client's non-synchronizing literals are followed: whether a synchronizing
 	// one is sent depends on the server, so its data is read as lines.
@@ -116,7 +134,7 @@ func (s *imapScrubber) writeClient(p []byte) (int, error) {
 		buf = buf[i+1:]
 	}
 	s.client = append(s.client[:0], buf...)
-	return len(p), writeLog(s.w, out)
+	return len(p), logLines(s.w, &s.clientOut, out)
 }
 
 func (s *imapScrubber) clientLine(line []byte) []byte {
@@ -178,7 +196,7 @@ func (s *imapScrubber) writeServer(p []byte) (int, error) {
 		buf = buf[i+1:]
 	}
 	s.server = append(s.server[:0], buf...)
-	return len(p), writeLog(s.w, p)
+	return len(p), logLines(s.w, &s.serverOut, p)
 }
 
 // The two directions of an IMAP connection, as writers. They must be distinct
@@ -224,6 +242,8 @@ type smtpScrubber struct {
 
 	mu             sync.Mutex
 	client, server []byte // incomplete lines
+	// Server output held back until its line ends.
+	serverOut []byte
 	// Replies owed and received. The greeting is owed to the connection.
 	// Lines owing no reply, such as message data, only make the AUTH exchange
 	// look longer.
@@ -243,6 +263,7 @@ func (s *smtpScrubber) writeClient(p []byte) error {
 	defer s.mu.Unlock()
 
 	var out []byte
+	// eachLine yields whole lines only, so out needs no logLines.
 	s.client = eachLine(s.client, p, func(line []byte) {
 		out = append(out, s.clientLine(line)...)
 	})
@@ -281,7 +302,7 @@ func (s *smtpScrubber) writeServer(p []byte) error {
 			s.hiding = false
 		}
 	})
-	return writeLog(s.w, p)
+	return logLines(s.w, &s.serverOut, p)
 }
 
 // smtpDebugConn logs the traffic of an SMTP connection.

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -230,6 +231,70 @@ func TestSMTPScrubber(t *testing.T) {
 		sc := newSMTPScrubber(w)
 		return sc.writeClient, sc.writeServer
 	})
+}
+
+// writesLog records each Write separately.
+type writesLog struct{ writes []string }
+
+func (l *writesLog) Write(p []byte) (int, error) {
+	l.writes = append(l.writes, string(p))
+	return len(p), nil
+}
+
+// Other connections and the API client log to the same stream, one Write per
+// entry, so each Write a scrubber makes must end a line: whatever is written
+// next then starts on its own line. Literals, message data and go-imap's
+// buffered writes end anywhere.
+// evidence: witnesses
+func TestScrubbersWriteWholeLines(t *testing.T) {
+	const literal = "Subject: hi\r\n\r\nhello\r\n"
+	fetch := fmt.Sprintf("* 1 FETCH (BODY[] {%d}\r\n%s)\r\na1 OK done\r\n", len(literal), literal)
+	appendCmd := fmt.Sprintf("a2 APPEND Drafts {%d+}\r\n%s\r\n", len(literal), literal)
+
+	tests := []struct {
+		name   string
+		write  func(w io.Writer) func(p []byte) error
+		stream string
+	}{
+		{"IMAP server", func(w io.Writer) func([]byte) error {
+			sc := &imapScrubber{w: w}
+			return func(p []byte) error {
+				_, err := sc.writeServer(p)
+				return err
+			}
+		}, fetch},
+		{"IMAP client literal", func(w io.Writer) func([]byte) error {
+			sc := &imapScrubber{w: w}
+			return func(p []byte) error {
+				_, err := sc.writeClient(p)
+				return err
+			}
+		}, appendCmd},
+		{"SMTP server", func(w io.Writer) func([]byte) error {
+			return newSMTPScrubber(w).writeServer
+		}, "220 hello\r\n250-a\r\n250 b\r\n354 go ahead\r\n250 ok\r\n"},
+	}
+	for _, tt := range tests {
+		for _, chunk := range []int{1, 5, 7, 23} {
+			var l writesLog
+			write := tt.write(&l)
+			for s := tt.stream; s != ""; {
+				n := min(chunk, len(s))
+				if err := write([]byte(s[:n])); err != nil {
+					t.Fatalf("%v: write() = %v", tt.name, err)
+				}
+				s = s[n:]
+			}
+			for _, w := range l.writes {
+				if !strings.HasSuffix(w, "\n") {
+					t.Errorf("%v, writes of %v bytes: wrote %q, which ends mid-line", tt.name, chunk, w)
+				}
+			}
+			if got := strings.Join(l.writes, ""); got != tt.stream {
+				t.Errorf("%v, writes of %v bytes: logged %q, want %q", tt.name, chunk, got, tt.stream)
+			}
+		}
+	}
 }
 
 // lockedBuffer is a bytes.Buffer safe to share with server goroutines.
