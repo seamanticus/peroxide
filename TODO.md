@@ -63,38 +63,7 @@ after it reconnects). go-imap can send an unsolicited LIST
    while peroxide runs with `-debug`, and check the logs
    `Label ... created/renamed`. Folders were checked on 2026-11-04/05.
 
-## 2. `STORE +FLAGS (\Deleted)` without `.SILENT` sends no FETCH
-
-**Problem.** In `mailbox.UpdateMessagesFlags` (imap/mailbox.go), the
-`imap.DeletedFlag` case (`// TODO: send updates`) only records the flag
-in memory (`mbox.deleted`) and tells no client. RFC 3501 6.4.6: "The new
-value of the flags is returned as if a FETCH of those flags was done",
-unless `.SILENT` is used. go-imap only sends that FETCH itself when the
-backend has no updates channel (`Store.handle` in
-go-imap/server/cmd_selected.go), and peroxide has one.
-
-aerc always uses `+FLAGS.SILENT (\Deleted)`, so it isn't affected. A
-client that doesn't would not see the message as deleted until it
-fetches flags again.
-
-**Steps.**
-
-1. After changing `mbox.deleted`, build a `backend.MessageUpdate` per
-   message, as `user.applyUpdate` (imap/actions.go) does: sequence number
-   and UID from `mbox.db.FromApiID`, flags from `mbox.fetchFlags`. Send
-   them with `user.sendUpdates`. go-imap drops them for the connection
-   that sent a `.SILENT` STORE (`conn.silent`), so aerc sees no change.
-2. `mbox.deleted` belongs to the mailbox, shared by its connections:
-   other connections with the mailbox selected get the FETCH too, which
-   is right.
-3. Same switch, `// TODO: imap.SetFlags should remove currently set
-   flags`: `STORE FLAGS (...)` must also clear the flags not listed
-   (`\Seen`, `\Deleted`, labels). Worth fixing in the same commit.
-4. Document that `\Deleted` isn't sent to Proton and is lost when peroxide
-   restarts; IMAP allows that.
-5. Tests (imap/actions_test.go): non-silent `+FLAGS (\Deleted)` sends one
-   FETCH with `\Deleted` and the UID; `-FLAGS (\Deleted)` sends one
-   without it; no API request is made.
+## 2. (done: STORE `\Deleted` sends FETCH, STORE FLAGS replaces, 1dfcddc)
 
 ## 3. APPEND only into Drafts
 
