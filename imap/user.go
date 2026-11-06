@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 
@@ -305,12 +307,16 @@ func (u *user) GetMailbox(name string) (imapbackend.Mailbox, error) {
 	return mbox, nil
 }
 
+// getFlag returns the label whose flag is name. Flags are case-insensitive,
+// and go-imap hands over every flag RFC 3501 doesn't define in lower case
+// (imap.CanonicalFlag) while label flags keep their case. Labels are tried in
+// ID order, so two that differ only in case resolve the same way every time.
 func (u *user) getFlag(name string) string {
 	u.Lock()
 	defer u.Unlock()
 
-	for label, flag := range u.flags {
-		if flag == name {
+	for _, label := range slices.Sorted(maps.Keys(u.flags)) {
+		if strings.EqualFold(u.flags[label], name) {
 			return label
 		}
 	}

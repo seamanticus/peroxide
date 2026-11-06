@@ -211,6 +211,118 @@ func TestStoreSeenAppliedWithoutEvent(t *testing.T) {
 	}
 }
 
+// STORE \Deleted without .SILENT must answer with the new flags (RFC 3501
+// section 6.4.6): go-imap only sends that FETCH itself for backends without
+// updates. \Deleted is peroxide's own, so no API request is made.
+// evidence: witnesses
+func TestStoreDeletedSendsFlags(t *testing.T) {
+	tests := []struct {
+		name      string
+		op        imap.FlagsOp
+		wantFlags []string
+	}{
+		{"+FLAGS", imap.AddFlags, []string{imap.SeenFlag, imap.DeletedFlag}},
+		{"-FLAGS", imap.RemoveFlags, []string{imap.SeenFlag}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeAPI{t: t}
+			mbox, sent := newActionTestMailbox(t, api, []*protonmail.Message{inboxMessage("a", 1), inboxMessage("b", 0)})
+			if tt.op == imap.RemoveFlags {
+				mbox.deleted["b"] = struct{}{}
+			}
+
+			if err := mbox.UpdateMessagesFlags(true, uidSet(2), tt.op, []string{imap.DeletedFlag}); err != nil {
+				t.Fatalf("UpdateMessagesFlags() = %v", err)
+			}
+			if got := api.madeRequests(); len(got) != 0 {
+				t.Errorf("made requests %q, want none", got)
+			}
+			updates := sent()
+			if len(updates) != 1 {
+				t.Fatalf("sent %v updates, want 1", len(updates))
+			}
+			up, ok := updates[0].(*imapbackend.MessageUpdate)
+			if !ok {
+				t.Fatalf("sent %T, want a message update", updates[0])
+			}
+			if up.Message.SeqNum != 2 || up.Message.Uid != 2 || !slices.Equal(up.Message.Flags, tt.wantFlags) {
+				t.Errorf("sent FETCH %v UID %v FLAGS %v, want 2 UID 2 FLAGS %v", up.Message.SeqNum, up.Message.Uid, up.Message.Flags, tt.wantFlags)
+			}
+			if _, ok := up.Message.Items[imap.FetchUid]; !ok {
+				t.Error("sent FETCH doesn't hold the UID item")
+			}
+			if up.Mailbox() != imap.InboxName {
+				t.Errorf("sent update for mailbox %q, want %q", up.Mailbox(), imap.InboxName)
+			}
+		})
+	}
+}
+
+// STORE FLAGS replaces the flags (RFC 3501 section 6.4.6): flags it doesn't
+// list are removed, from the messages holding them only; flags it lists are
+// added; flags with no Proton meaning are left alone.
+// evidence: witnesses
+func TestStoreSetFlagsReplaces(t *testing.T) {
+	const work = "label-work"
+	msgs := []*protonmail.Message{
+		{ID: "a", Unread: 0, LabelIDs: []string{protonmail.LabelInbox, work}},
+		{ID: "b", Unread: 1, LabelIDs: []string{protonmail.LabelInbox}},
+	}
+	tests := []struct {
+		name         string
+		flags        []string
+		wantRequests []string
+		wantFlags    [][]string // by UID, from 1
+	}{
+		{"empty clears", nil,
+			[]string{"PUT /messages/unlabel", "PUT /messages/unread"},
+			[][]string{nil, nil}},
+		// go-imap lowercases a label flag: it must still count as listed.
+		{"keeps listed label", []string{"work"},
+			[]string{"PUT /messages/label", "PUT /messages/unread"},
+			[][]string{{"Work"}, {"Work"}}},
+		{"sets seen and deleted", []string{imap.SeenFlag, imap.DeletedFlag},
+			[]string{"PUT /messages/read", "PUT /messages/unlabel"},
+			[][]string{{imap.SeenFlag, imap.DeletedFlag}, {imap.SeenFlag, imap.DeletedFlag}}},
+		{"answered and draft alone change nothing in Proton", []string{imap.AnsweredFlag, imap.DraftFlag},
+			[]string{"PUT /messages/unlabel", "PUT /messages/unread"},
+			[][]string{nil, nil}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeAPI{t: t}
+			mbox, _ := newActionTestMailbox(t, api, msgs)
+			mbox.u.flags = map[string]string{work: "Work"}
+			mbox.deleted["b"] = struct{}{}
+
+			if err := mbox.UpdateMessagesFlags(true, uidSet(1, 2), imap.SetFlags, tt.flags); err != nil {
+				t.Fatalf("UpdateMessagesFlags() = %v", err)
+			}
+			if got := api.madeRequests(); !slices.Equal(got, tt.wantRequests) {
+				t.Errorf("made requests %q, want %q", got, tt.wantRequests)
+			}
+			for i, want := range tt.wantFlags {
+				uid := uint32(i + 1)
+				apiIDs, err := mbox.fromSeqSet(true, uidSet(uid))
+				if err != nil || len(apiIDs) != 1 {
+					t.Fatalf("fromSeqSet(%v) = %v, %v", uid, apiIDs, err)
+				}
+				msg, err := mbox.u.db.Message(apiIDs[0])
+				if err != nil {
+					t.Fatalf("Message(%v) = %v", apiIDs[0], err)
+				}
+				got := mbox.fetchFlags(msg)
+				slices.Sort(got)
+				want = slices.Sorted(slices.Values(want))
+				if !slices.Equal(got, want) {
+					t.Errorf("UID %v flags = %v, want %v", uid, got, want)
+				}
+			}
+		})
+	}
+}
+
 // Proton reports a message already as asked as "does not exist": clients must
 // still learn its flags, or a client toggling flags keeps asking the same.
 func TestStoreSeenNothingToDo(t *testing.T) {
@@ -263,11 +375,13 @@ func TestExpungeForgetsDeletedMessages(t *testing.T) {
 	if err := mbox.UpdateMessagesFlags(true, uidSet(1), imap.AddFlags, []string{imap.DeletedFlag}); err != nil {
 		t.Fatalf("UpdateMessagesFlags() = %v", err)
 	}
+	// The STORE sends a FETCH of the new flags: count what EXPUNGE sends.
+	stored := len(sent())
 	if err := mbox.Expunge(); err != nil {
 		t.Fatalf("Expunge() = %v", err)
 	}
 	checkStatus(t, mbox, 1, 1)
-	if updates := sent(); len(updates) != 1 {
+	if updates := sent()[stored:]; len(updates) != 1 {
 		t.Errorf("sent %v updates, want 1 EXPUNGE", len(updates))
 	} else if up, ok := updates[0].(*imapbackend.ExpungeUpdate); !ok || up.SeqNum != 1 {
 		t.Errorf("sent %#v, want EXPUNGE 1", updates[0])
@@ -362,6 +476,8 @@ func TestExpungeFromTrash(t *testing.T) {
 			if err := trash.UpdateMessagesFlags(true, uidSet(1), imap.AddFlags, []string{imap.DeletedFlag}); err != nil {
 				t.Fatalf("UpdateMessagesFlags() = %v", err)
 			}
+			// The STORE sends a FETCH of the new flags: count what EXPUNGE sends.
+			stored := len(sent())
 			if err := trash.Expunge(); err != nil {
 				t.Fatalf("Expunge() = %v", err)
 			}
@@ -369,7 +485,7 @@ func TestExpungeFromTrash(t *testing.T) {
 			if got := api.madeRequests(); !slices.Equal(got, tc.wantRequests) {
 				t.Errorf("made requests %q, want %q", got, tc.wantRequests)
 			}
-			if updates := sent(); len(updates) != 1 {
+			if updates := sent()[stored:]; len(updates) != 1 {
 				t.Errorf("sent %v updates, want 1 EXPUNGE", len(updates))
 			} else if up, ok := updates[0].(*imapbackend.ExpungeUpdate); !ok || up.SeqNum != 1 {
 				t.Errorf("sent %#v, want EXPUNGE 1", updates[0])
@@ -405,7 +521,8 @@ func TestExpungeAllMailRefused(t *testing.T) {
 }
 
 func TestSearchMessages(t *testing.T) {
-	mbox, _ := newTestMailbox(t, []*protonmail.Message{inboxMessage("a", 1), inboxMessage("b", 0), inboxMessage("c", 1)})
+	// An action test mailbox: STORE \Deleted tells clients through the backend.
+	mbox, _ := newActionTestMailbox(t, &fakeAPI{t: t}, []*protonmail.Message{inboxMessage("a", 1), inboxMessage("b", 0), inboxMessage("c", 1)})
 	if err := mbox.UpdateMessagesFlags(true, uidSet(3), imap.AddFlags, []string{imap.DeletedFlag}); err != nil {
 		t.Fatalf("UpdateMessagesFlags() = %v", err)
 	}

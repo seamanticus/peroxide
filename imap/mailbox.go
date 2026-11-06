@@ -664,64 +664,163 @@ func (mbox *mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, op imap.
 		return err
 	}
 
-	// TODO: imap.SetFlags should remove currently set flags
+	switch op {
+	case imap.AddFlags, imap.RemoveFlags:
+		for _, flag := range flags {
+			if err := mbox.applyFlag(apiIDs, flag, op == imap.AddFlags); err != nil {
+				return err
+			}
+		}
+		return nil
+	case imap.SetFlags:
+		// RFC 3501 section 6.4.6: FLAGS replaces the flags. Read who holds
+		// what first: adding the listed flags changes it.
+		holders, err := mbox.flagHolders(apiIDs)
+		if err != nil {
+			return err
+		}
+		for _, flag := range flags {
+			if err := mbox.applyFlag(apiIDs, flag, true); err != nil {
+				return err
+			}
+		}
+		for _, flag := range slices.Sorted(maps.Keys(holders)) {
+			// go-imap lowercases flags RFC 3501 doesn't define, and label
+			// flags keep their case: compare without it, or a label asked
+			// for would be removed.
+			if slices.ContainsFunc(flags, func(f string) bool { return strings.EqualFold(f, flag) }) {
+				continue
+			}
+			if err := mbox.applyFlag(holders[flag], flag, false); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		panic(fmt.Sprintf("invariant: unknown flags operation %q", op))
+	}
+}
 
-	for _, flag := range flags {
+// applyFlag adds flag to, or removes it from, the messages apiIDs. Flags that
+// stand for nothing in Proton, such as \Answered and \Draft, are left alone.
+func (mbox *mailbox) applyFlag(apiIDs []string, flag string, add bool) error {
+	switch flag {
+	case imap.SeenFlag:
+		var failed map[string]error
 		var err error
-		switch flag {
-		case imap.SeenFlag:
-			var failed map[string]error
-			unread := 0
-			switch op {
-			case imap.SetFlags, imap.AddFlags:
-				failed, err = mbox.u.c.MarkMessagesRead(apiIDs)
-			case imap.RemoveFlags:
-				failed, err = mbox.u.c.MarkMessagesUnread(apiIDs)
-				unread = 1
-			}
-			if err == nil {
-				err = mbox.u.applyAction(apiIDs, failed, unreadUpdate(unread))
-			}
-		case imap.DeletedFlag:
-			// TODO: send updates
-			mbox.Lock()
-			switch op {
-			case imap.SetFlags, imap.AddFlags:
-				for _, apiID := range apiIDs {
-					mbox.deleted[apiID] = struct{}{}
-				}
-			case imap.RemoveFlags:
-				for _, apiID := range apiIDs {
-					delete(mbox.deleted, apiID)
-				}
-			}
-			mbox.Unlock()
-		case imap.DraftFlag:
-			// No-op
-		default:
-			label := mbox.u.getFlag(flag)
-			if label == "" {
-				break
-			}
-
-			var failed map[string]error
-			add := op != imap.RemoveFlags
-			switch op {
-			case imap.SetFlags, imap.AddFlags:
-				failed, err = mbox.u.c.LabelMessages(label, apiIDs)
-			case imap.RemoveFlags:
-				failed, err = mbox.u.c.UnlabelMessages(label, apiIDs)
-			}
-			if err == nil {
-				err = mbox.u.applyAction(apiIDs, failed, labelUpdate(label, add))
-			}
+		unread := 0
+		if add {
+			failed, err = mbox.u.c.MarkMessagesRead(apiIDs)
+		} else {
+			failed, err = mbox.u.c.MarkMessagesUnread(apiIDs)
+			unread = 1
 		}
 		if err != nil {
 			return err
 		}
+		return mbox.u.applyAction(apiIDs, failed, unreadUpdate(unread))
+	case imap.DeletedFlag:
+		// \Deleted is kept by the mailbox only, for its EXPUNGE: Proton has
+		// no such flag, so it is never sent there and is lost when peroxide
+		// restarts, which RFC 3501 allows. Every connection with the mailbox
+		// selected shares it and is told; go-imap drops the FETCH for one
+		// that sent .SILENT.
+		mbox.Lock()
+		for _, apiID := range apiIDs {
+			if add {
+				mbox.deleted[apiID] = struct{}{}
+			} else {
+				delete(mbox.deleted, apiID)
+			}
+		}
+		mbox.Unlock()
+		updates, err := mbox.flagsUpdates(apiIDs)
+		if err != nil {
+			return err
+		}
+		mbox.u.sendUpdates(updates)
+		return nil
+	case imap.DraftFlag:
+		// Drafts are a mailbox in Proton, not a label a message can be given.
+		return nil
+	default:
+		label := mbox.u.getFlag(flag)
+		if label == "" {
+			return nil
+		}
+		var failed map[string]error
+		var err error
+		if add {
+			failed, err = mbox.u.c.LabelMessages(label, apiIDs)
+		} else {
+			failed, err = mbox.u.c.UnlabelMessages(label, apiIDs)
+		}
+		if err != nil {
+			return err
+		}
+		return mbox.u.applyAction(apiIDs, failed, labelUpdate(label, add))
+	}
+}
+
+// flagHolders returns, for each flag one of the messages apiIDs has, the
+// messages that have it, in the order of apiIDs.
+func (mbox *mailbox) flagHolders(apiIDs []string) (map[string][]string, error) {
+	holders := make(map[string][]string)
+	for _, apiID := range apiIDs {
+		msg, err := mbox.u.db.Message(apiID)
+		if errors.Is(err, database.ErrNotFound) {
+			continue // deleted by an event since the IDs were read
+		} else if err != nil {
+			return nil, err
+		}
+		for _, flag := range mbox.fetchFlags(msg) {
+			holders[flag] = append(holders[flag], apiID)
+		}
+	}
+	return holders, nil
+}
+
+// flagsUpdates returns a FETCH of the flags of each message of apiIDs in this
+// mailbox, with its UID, as clients may have asked with a UID command and only
+// take responses bearing it (RFC 3501 section 6.4.8).
+func (mbox *mailbox) flagsUpdates(apiIDs []string) ([]imapbackend.Update, error) {
+	want := make(map[string]struct{}, len(apiIDs))
+	for _, apiID := range apiIDs {
+		want[apiID] = struct{}{}
+	}
+	// The entries are read in one transaction and the messages after it ends,
+	// as in SearchMessages: a nested read transaction deadlocks with writers.
+	type entry struct {
+		seqNum, uid uint32
+		apiID       string
+	}
+	var entries []entry
+	err := mbox.db.ForEach(func(seqNum, uid uint32, apiID string) error {
+		if _, ok := want[apiID]; ok {
+			entries = append(entries, entry{seqNum, uid, apiID})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	return nil
+	var updates []imapbackend.Update
+	for _, e := range entries {
+		msg, err := mbox.u.db.Message(e.apiID)
+		if errors.Is(err, database.ErrNotFound) {
+			continue // deleted by an event since the entries were read
+		} else if err != nil {
+			return nil, err
+		}
+		up := new(imapbackend.MessageUpdate)
+		up.Update = newMailboxUpdate(mbox.u.u.Name, mbox)
+		up.Message = imap.NewMessage(e.seqNum, []imap.FetchItem{imap.FetchFlags, imap.FetchUid})
+		up.Message.Flags = mbox.fetchFlags(msg)
+		up.Message.Uid = e.uid
+		updates = append(updates, up)
+	}
+	return updates, nil
 }
 
 func (mbox *mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string) error {
