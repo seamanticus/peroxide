@@ -2,7 +2,9 @@ package protonmail
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
+	"slices"
 )
 
 type EventRefresh int
@@ -83,12 +85,14 @@ func (update *EventMessageUpdate) DiffLabelIDs(current []string) (added, removed
 
 	currentSet := buildLabelsSet(current)
 	updateSet := buildLabelsSet(update.LabelIDs)
-	for labelID := range currentSet {
+	// In sorted order, not map order: the result must not change from one
+	// call to the next.
+	for _, labelID := range slices.Sorted(maps.Keys(currentSet)) {
 		if _, ok := updateSet[labelID]; !ok {
 			removed = append(removed, labelID)
 		}
 	}
-	for labelID := range updateSet {
+	for _, labelID := range slices.Sorted(maps.Keys(updateSet)) {
 		if _, ok := currentSet[labelID]; !ok {
 			added = append(added, labelID)
 		}
@@ -127,10 +131,9 @@ func (update *EventMessageUpdate) Patch(msg *Message) {
 		for _, labelID := range update.LabelIDsRemoved {
 			delete(set, labelID)
 		}
-		msg.LabelIDs = make([]string, 0, len(set))
-		for labelID := range set {
-			msg.LabelIDs = append(msg.LabelIDs, labelID)
-		}
+		// Sorted, not in map order, so the stored labels and the flags
+		// FETCH lists from them are the same every time.
+		msg.LabelIDs = slices.Sorted(maps.Keys(set))
 	}
 }
 
