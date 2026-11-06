@@ -11,6 +11,7 @@ import (
 	"net/http/cookiejar"
 	"os"
 	"os/signal"
+	rtdebug "runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -69,10 +70,12 @@ func askPass(prompt string) ([]byte, error) {
 		}
 		defer f.Close()
 	}
-	fmt.Fprintf(os.Stderr, "%v: ", prompt)
+	// Prompts go where logs go: stderr, or stdout with -debug. Only the
+	// prompt is written; the password is read without echo.
+	fmt.Fprintf(log.Writer(), "%v: ", prompt)
 	b, err := term.ReadPassword(int(f.Fd()))
 	if err == nil {
-		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Fprintf(log.Writer(), "\n")
 	}
 	return b, err
 }
@@ -85,10 +88,10 @@ func askBridgePass() (string, error) {
 	return string(b), err
 }
 
-// promptConfirm asks a yes/no question on stderr and reports whether the
-// answer is y or Y. Everything else, including EOF, means no.
+// promptConfirm asks a yes/no question where logs go and reports whether
+// the answer is y or Y. Everything else, including EOF, means no.
 func promptConfirm(prompt string) bool {
-	fmt.Fprintf(os.Stderr, "%v", prompt)
+	fmt.Fprintf(log.Writer(), "%v", prompt)
 	scanner := bufio.NewScanner(os.Stdin)
 	if !scanner.Scan() {
 		return false
@@ -117,6 +120,8 @@ func listenAndServeSMTP(addr string, debug bool, authManager *auth.Manager, tlsC
 	s := smtp.NewServer(be)
 	s.Addr = addr
 	s.Domain = "localhost" // TODO: make this configurable
+	// go-smtp's default writes to os.Stderr, which -debug doesn't capture.
+	s.ErrorLog = log.New(log.Writer(), "smtp/server ", log.LstdFlags)
 	s.AllowInsecureAuth = tlsConfig == nil
 	s.TLSConfig = tlsConfigFor(tlsConfig, "smtp")
 	if debug {
@@ -140,6 +145,8 @@ func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, even
 	// go-imap gives no way to answer NO [TOOBIG] at that point.
 	s.MaxLiteralSize = imapbackend.MaxLiteralSize
 	s.Addr = addr
+	// go-imap's default writes to os.Stderr, which -debug doesn't capture.
+	s.ErrorLog = log.New(log.Writer(), "imap/server: ", log.LstdFlags)
 	s.AllowInsecureAuth = tlsConfig == nil
 	s.TLSConfig = tlsConfigFor(tlsConfig, "imap")
 	if debug {
@@ -178,9 +185,10 @@ Global options:
 
 	-debug
 		Log API requests and responses as received, and IMAP and SMTP
-		traffic, with credentials scrubbed. Everything goes to stdout,
-		except for export-secret-keys, whose stdout is its output: its
-		logs stay on stderr
+		traffic, with credentials scrubbed. Everything else written to
+		stderr, prompts and crashes included, goes to stdout too, except
+		for export-secret-keys, whose stdout is its output: its logs and
+		prompts stay on stderr
 	
 	-api-endpoint <url>
 		ProtonMail API endpoint
@@ -280,8 +288,13 @@ func main() {
 		// Its stdout is its output.
 	default:
 		if debug {
-			// One redirect then captures the whole session in order.
+			// One redirect then captures the whole session in order, as
+			// 2>&1 would: prompts and server error logs follow log.Writer(),
+			// and a crash, which the runtime writes to fd 2, is copied here.
 			log.SetOutput(os.Stdout)
+			if err := rtdebug.SetCrashOutput(os.Stdout, rtdebug.CrashOptions{}); err != nil {
+				log.Fatalf("copy crashes to stdout: %v", err)
+			}
 		}
 	}
 	switch cmd {
@@ -336,7 +349,7 @@ func main() {
 			ListenAddr:  captchaListen,
 			Timeout:     captchaTimeout,
 			OpenBrowser: !noOpenBrowser,
-			Output:      os.Stderr,
+			Output:      log.Writer(),
 		}
 
 		// Make sure Ctrl+C tears down the CAPTCHA server cleanly.
@@ -374,7 +387,8 @@ func main() {
 				}
 
 				scanner := bufio.NewScanner(os.Stdin)
-				fmt.Printf("2FA TOTP code: ")
+				// The code is typed in and echoed by the terminal, never logged.
+				fmt.Fprintf(log.Writer(), "2FA TOTP code: ")
 				scanner.Scan()
 				code := scanner.Text()
 
