@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	nettextproto "net/textproto"
 	"slices"
 	"strings"
 
@@ -530,12 +531,49 @@ func (mbox *mailbox) fetchBodySection(msg *protonmail.Message, section *imap.Bod
 		w.Close()
 	}
 
+	if section.Specifier == imap.HeaderSpecifier && section.Fields != nil {
+		// b holds the header alone, as BODY[HEADER] sends it: keep the fields
+		// asked for from it, so both agree.
+		h, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(b.Bytes())))
+		if err != nil {
+			return nil, fmt.Errorf("cannot read header of message %v: %w", msg.ID, err)
+		}
+		b = new(bytes.Buffer)
+		if err := textproto.WriteHeader(b, headerFields(h, section)); err != nil {
+			return nil, err
+		}
+	}
+
 	var l imap.Literal = b
 	if section.Partial != nil {
 		l = bytes.NewReader(section.ExtractPartial(b.Bytes()))
 	}
 
 	return l, nil
+}
+
+// headerFields returns h with only the fields section names, or all but those
+// with HEADER.FIELDS.NOT (RFC 3501 section 6.4.5), matched without case. It
+// filters as go-imap's backendutil.FetchBodySection, which pass-through uses,
+// so both paths answer alike.
+func headerFields(h textproto.Header, section *imap.BodySectionName) textproto.Header {
+	h = h.Copy()
+	if section.NotFields {
+		for _, k := range section.Fields {
+			h.Del(k)
+		}
+		return h
+	}
+	keep := make(map[string]struct{}, len(section.Fields))
+	for _, k := range section.Fields {
+		keep[nettextproto.CanonicalMIMEHeaderKey(k)] = struct{}{}
+	}
+	for f := h.Fields(); f.Next(); {
+		if _, ok := keep[f.Key()]; !ok {
+			f.Del()
+		}
+	}
+	return h
 }
 
 func createMessage(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.EntityList, addrs []*protonmail.Address, r io.Reader) (*protonmail.Message, error) {

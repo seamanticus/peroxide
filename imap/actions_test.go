@@ -1,6 +1,8 @@
 package imap
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,9 +17,11 @@ import (
 
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
+	"github.com/emersion/go-imap/backend/backendutil"
 	"github.com/emersion/go-imap/responses"
 	imapserver "github.com/emersion/go-imap/server"
 	"github.com/emersion/go-message/mail"
+	"github.com/emersion/go-message/textproto"
 
 	"github.com/seamanticus/peroxide/imap/database"
 	"github.com/seamanticus/peroxide/protonmail"
@@ -658,6 +662,77 @@ func fetchTestMessage(id string, unread int) *protonmail.Message {
 	msg.MIMEType = "text/plain"
 	msg.Body = "Hello\r\n"
 	return msg
+}
+
+// BODY[HEADER.FIELDS (...)] sends only the fields named, and
+// HEADER.FIELDS.NOT all but those, matched without case (RFC 3501 section
+// 6.4.5). Each equals go-imap's filter, which pass-through uses, applied to
+// BODY[HEADER].
+// evidence: witnesses
+func TestFetchHeaderFields(t *testing.T) {
+	api := &fakeAPI{t: t}
+	msg := fetchTestMessage("a", 0)
+	msg.Subject = "hello"
+	msg.Header = "Date: Mon, 02 Nov 2026 10:00:00 +1300\r\n" +
+		"Message-Id: <orig@example.org>\r\n" +
+		"X-Mailer: test\r\n" +
+		"Received: from a\r\n" +
+		"Received: from b\r\n"
+	mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{msg})
+	cacheFull(mbox, msg)
+
+	const whole = "BODY.PEEK[HEADER]"
+	wholeHeader := sectionBytes(t, fetchItems(t, mbox, whole), whole)
+	parsed, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(wholeHeader)))
+	if err != nil {
+		t.Fatalf("read %v: %v", whole, err)
+	}
+
+	for _, tc := range []struct {
+		item       imap.FetchItem
+		wantKeys   []string
+		unwantKeys []string
+	}{
+		{"BODY.PEEK[HEADER.FIELDS (SUBJECT message-id)]", []string{"Subject", "Message-Id"}, []string{"Date", "X-Mailer", "Content-Type"}},
+		{"BODY.PEEK[HEADER.FIELDS (RECEIVED)]", []string{"Received"}, []string{"Subject"}},
+		{"BODY.PEEK[HEADER.FIELDS (X-NONE)]", nil, []string{"Subject", "Date"}},
+		{"BODY.PEEK[HEADER.FIELDS.NOT (subject X-MAILER)]", []string{"Date", "Message-Id", "Content-Type"}, []string{"Subject", "X-Mailer"}},
+	} {
+		got := sectionBytes(t, fetchItems(t, mbox, tc.item), tc.item)
+		h, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(got)))
+		if err != nil {
+			t.Fatalf("%v: read header: %v", tc.item, err)
+		}
+		for _, k := range tc.wantKeys {
+			if !h.Has(k) {
+				t.Errorf("%v: no %v in %q", tc.item, k, got)
+			}
+		}
+		for _, k := range tc.unwantKeys {
+			if h.Has(k) {
+				t.Errorf("%v: has %v in %q", tc.item, k, got)
+			}
+		}
+		if n := len(h.Values("Received")); slices.Contains(tc.wantKeys, "Received") && n != 2 {
+			t.Errorf("%v: %v Received fields, want 2", tc.item, n)
+		}
+
+		section, err := imap.ParseBodySectionName(tc.item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := backendutil.FetchBodySection(parsed, strings.NewReader(""), section)
+		if err != nil {
+			t.Fatalf("%v: backendutil: %v", tc.item, err)
+		}
+		want, err := io.ReadAll(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%v = %q, go-imap's filter gives %q", tc.item, got, want)
+		}
+	}
 }
 
 // cacheFull puts msgs in mbox's full-message cache, as if fetched already, so
