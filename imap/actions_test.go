@@ -435,6 +435,19 @@ func TestSearchMessages(t *testing.T) {
 	}
 }
 
+// A message the API returns without a Sender has no From, rather than
+// crashing the connection that fetches or searches it.
+// evidence: witnesses
+func TestNoSender(t *testing.T) {
+	msg := inboxMessage("a", 0)
+	if env := fetchEnvelope(msg); env.From != nil {
+		t.Errorf("fetchEnvelope().From = %v, want nil", env.From)
+	}
+	if h := messageHeader(msg); h.Has("From") {
+		t.Errorf("messageHeader() has From %q, want none", h.Get("From"))
+	}
+}
+
 // fetchTestMessage is an INBOX message with a plain body, whose header needs
 // no API request.
 func fetchTestMessage(id string, unread int) *protonmail.Message {

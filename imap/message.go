@@ -70,10 +70,9 @@ func imapAddressList(addresses []*protonmail.MessageAddress) []*imap.Address {
 }
 
 func fetchEnvelope(msg *protonmail.Message) *imap.Envelope {
-	return &imap.Envelope{
+	env := &imap.Envelope{
 		Date:    msg.Time.Time(),
 		Subject: msg.Subject,
-		From:    []*imap.Address{imapAddress(msg.Sender)},
 		// TODO: Sender
 		To:      imapAddressList(msg.ToList),
 		Cc:      imapAddressList(msg.CCList),
@@ -82,6 +81,11 @@ func fetchEnvelope(msg *protonmail.Message) *imap.Envelope {
 		// TODO: InReplyTo
 		MessageId: messageID(msg),
 	}
+	// Sender is decoded from the API and may be missing: From is then NIL.
+	if msg.Sender != nil {
+		env.From = []*imap.Address{imapAddress(msg.Sender)}
+	}
+	return env
 }
 
 func msgBoundary(msg *protonmail.Message) string {
@@ -360,7 +364,9 @@ func messageHeader(msg *protonmail.Message) message.Header {
 	h.SetContentType("multipart/mixed", typeParams)
 	h.SetDate(msg.Time.Time())
 	h.SetSubject(msg.Subject)
-	h.SetAddressList("From", []*mail.Address{mailAddress(msg.Sender)})
+	if msg.Sender != nil {
+		h.SetAddressList("From", []*mail.Address{mailAddress(msg.Sender)})
+	}
 	if len(msg.ReplyTos) > 0 {
 		h.SetAddressList("Reply-To", mailAddressList(msg.ReplyTos))
 	}
