@@ -234,12 +234,15 @@ func (mbox *mailbox) reset() error {
 }
 
 // delete forgets the mailbox after its folder was deleted. Clients that still
-// have it selected get errors from then on.
+// have it selected get errors from then on. The bucket is deleted outside
+// mbox's lock: a database write may wait for read transactions, and
+// SearchMessages takes that lock inside one (fetchFlags). Called while an
+// event page holds user.syncSem, so no sync refills the bucket meanwhile.
 func (mbox *mailbox) delete() error {
 	mbox.Lock()
-	defer mbox.Unlock()
-
 	mbox.initialized = false
+	mbox.Unlock()
+
 	return mbox.db.Delete()
 }
 
