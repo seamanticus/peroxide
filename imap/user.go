@@ -348,7 +348,7 @@ func (u *user) Logout() error {
 	defer u.Unlock()
 
 	if u.numClients <= 0 {
-		panic("unreachable")
+		panic("invariant: go-imap calls Logout once per Login")
 	}
 	u.numClients--
 	if u.numClients > 0 {
@@ -616,8 +616,8 @@ func (u *user) createLabel(label *protonmail.Label) {
 	}
 
 	log.Printf("Folder %v %q created", label.ID, label.Name)
-	// Outside u's lock: a database write may wait for read transactions, and
-	// SearchMessages takes the lock inside one.
+	// Outside u's lock: newMailbox writes to the database, and u's lock is
+	// taken by commands that shouldn't wait for that write.
 	mbox, err := newMailbox(label.Name, label.ID, nil, u)
 	if err != nil {
 		log.Printf("cannot create mailbox for folder %v: %v", label.ID, err)

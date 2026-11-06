@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-imap/backend/memory"
 	imapserver "github.com/emersion/go-imap/server"
@@ -306,6 +307,7 @@ type lockedBuffer struct {
 	mu      sync.Mutex
 	b       bytes.Buffer
 	written sync.Cond
+	expired bool // set when a waitFor times out, to wake it
 }
 
 func (b *lockedBuffer) Write(p []byte) (int, error) {
@@ -323,14 +325,35 @@ func (b *lockedBuffer) String() string {
 	return b.b.String()
 }
 
-// waitFor waits until s has been written.
-func (b *lockedBuffer) waitFor(s string) {
+// waitForTimeout bounds waitFor: far longer than any write here takes, so it
+// only turns a regression that never writes into a failure instead of a hang
+// until go test's own 10-minute timeout.
+const waitForTimeout = 30 * time.Second
+
+// waitFor waits until s has been written, and fails t if it isn't within
+// waitForTimeout. Called from the test goroutine only.
+func (b *lockedBuffer) waitFor(t *testing.T, s string) {
+	t.Helper()
+	timer := time.AfterFunc(waitForTimeout, func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.expired = true
+		if b.written.L != nil {
+			b.written.Broadcast()
+		}
+	})
+	defer timer.Stop()
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.written.L == nil {
 		b.written.L = &b.mu
 	}
+	b.expired = false
 	for !strings.Contains(b.b.String(), s) {
+		if b.expired {
+			t.Fatalf("%q not logged within %v; log:\n%v", s, waitForTimeout, b.b.String())
+		}
 		b.written.Wait()
 	}
 }
@@ -450,7 +473,7 @@ func TestDebugSharesOneStream(t *testing.T) {
 		tag := cmd[:3]
 		line := readReply(t, br, func(l string) bool { return strings.HasPrefix(l, tag) })
 		// go-imap logs what it sends after sending it.
-		logged.waitFor(line)
+		logged.waitFor(t, line)
 	}
 	client.Close()
 
@@ -539,7 +562,7 @@ func TestIMAPDebugExtension(t *testing.T) {
 					}
 					// go-imap logs what it sends once sent: wait for it, or
 					// the next command may be read before.
-					logged.waitFor(line)
+					logged.waitFor(t, line)
 					break
 				}
 				if strings.HasPrefix(line, "+") {
