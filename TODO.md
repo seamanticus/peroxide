@@ -684,6 +684,4 @@ Small, independent, found reviewing branch `labels-events`.
    endpoint. Bridge and go-proton-api use `/core/v4/events`. Either
    correct the docs or move peroxide to the `core/v4` path, checking it
    with a `-debug` log first.
-9. **Old idioms.** `go fix -diff ./...` reports modernisations in
-   config/tls.go and protonmail/ (`ioutil`, `interface{}`), captcha/,
-   imap/message.go and imap/cache_test.go.
+9. (done: `go fix ./...` applied, `go fix -diff ./...` prints nothing)
