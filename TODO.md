@@ -122,8 +122,9 @@ go-proton-api message_import.go), with:
 
 **Steps.**
 
-1. peroxide has an import client (`protonmail.Client.Import`, used by
-   imports/messages.go): reuse it for APPEND, with the metadata above.
+1. peroxide has an import client (`protonmail.Client.Import`,
+   protonmail/import.go, unused since the import-messages command was
+   removed): reuse it for APPEND, with the metadata above.
 2. Refuse All Mail (and Starred, a flag here) with NO, as bridge does.
 3. Decide on the SMTP duplicate check: peroxide's SMTP server sends
    through a Proton draft (`CreateDraftMessage` then `SendMessage`,
@@ -138,16 +139,7 @@ go-proton-api message_import.go), with:
 
 ## 4. (done: `-debug` is the raw mode, to one stream)
 
-## 5. Import / Export
-
-Perform an analysis of what schema is utilised in both procedures and verify if it is currently compliant with Proton API.
-
-**Direction.** This feature will probably be removed, leaving import and
-export to IMAP clients (APPEND, FETCH; see section 3). Noted on
-2026-11-06: `go vet` fails on exports/messages.go:30 (`mail.Header` and
-`message.Header` struct literals with unkeyed fields, from 2020), and
-`go fix -diff` reports old idioms across protonmail/, config/ and
-captcha/. Fix the vet failure only if the feature stays.
+## 5. (done: import-messages and export-messages removed; clients use APPEND and FETCH)
 
 ## 6. Captcha solution
 
@@ -668,3 +660,6 @@ Small, independent, found reviewing branch `labels-events`.
    endpoint. Bridge and go-proton-api use `/core/v4/events`. Either
    correct the docs or move peroxide to the `core/v4` path, checking it
    with a `-debug` log first.
+9. **Old idioms.** `go fix -diff ./...` reports modernisations in
+   config/tls.go (`ioutil`), captcha/, imap/message.go and
+   imap/cache_test.go.
