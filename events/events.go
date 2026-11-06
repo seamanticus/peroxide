@@ -2,8 +2,11 @@ package events
 
 import (
 	crand "crypto/rand"
+	"errors"
+	"fmt"
 	"log"
 	"math/rand/v2"
+	"net/http"
 	"slices"
 	"sync"
 	"time"
@@ -36,10 +39,15 @@ func randomSeed() [32]byte {
 	return seed
 }
 
-// EventSource gives the events after an event ID, one page at a time.
+// EventSource gives the events after an event ID, one page at a time, and the
+// ID of the latest event.
 type EventSource interface {
 	GetEvent(last string) (*protonmail.Event, error)
+	GetLatestEventID() (string, error)
 }
+
+// errStopped answers the polls asked of a receiver that has stopped.
+var errStopped = errors.New("events: receiver stopped, no client is logged in")
 
 // Receiver polls the events of one Proton account and hands every page, in
 // order, to each channel registered for it. It runs while one is registered.
@@ -52,11 +60,24 @@ type Receiver struct {
 
 	poll chan struct{} // capacity 1: a pending request covers new ones
 	stop chan struct{} // closed with the last channel
+
+	// waiters get the outcome of the next poll to start after they asked
+	// (Poll). A lock of their own, as r.locker is held while a page waits to
+	// be delivered, and Poll mustn't wait for that.
+	waitersMu sync.Mutex
+	waiters   []chan<- error
+	stopped   bool // set, under waitersMu, once r answers no more waiters
 }
 
 func (r *Receiver) receiveEvents(last string) {
+	defer r.answerWaiters(errStopped, true)
 	for {
-		last = r.receivePages(last)
+		waiters := r.takeWaiters()
+		var err error
+		last, err = r.receivePages(last)
+		for _, w := range waiters {
+			w <- err // capacity 1, sent once
+		}
 
 		// Drawn afresh each time, and counted from the end of the last
 		// poll, so an early Poll also postpones the next one.
@@ -69,21 +90,45 @@ func (r *Receiver) receiveEvents(last string) {
 	}
 }
 
+func (r *Receiver) takeWaiters() []chan<- error {
+	r.waitersMu.Lock()
+	defer r.waitersMu.Unlock()
+	waiters := r.waiters
+	r.waiters = nil
+	return waiters
+}
+
+// answerWaiters sends err to every waiter left; stop makes r answer every
+// later Poll at once with errStopped.
+func (r *Receiver) answerWaiters(err error, stop bool) {
+	r.waitersMu.Lock()
+	defer r.waitersMu.Unlock()
+	for _, w := range r.waiters {
+		w <- err
+	}
+	r.waiters = nil
+	r.stopped = r.stopped || stop
+}
+
 // receivePages delivers the events after last, page after page until Proton
 // has no more, and returns the ID of the last page delivered. A change
-// spanning many pages is thus applied at once, not one page per poll.
-func (r *Receiver) receivePages(last string) string {
+// spanning many pages is thus applied at once, not one page per poll. err is
+// why it stopped early; last is then where the next poll starts again.
+func (r *Receiver) receivePages(last string) (string, error) {
 	for {
 		select {
 		case <-r.stop:
-			return last
+			return last, errStopped
 		default:
 		}
 
 		event, err := r.c.GetEvent(last)
+		if last != "" && refused(err) {
+			event, err = r.restart(last, err)
+		}
 		if err != nil {
 			log.Printf("cannot receive events after %v: %v", last, err)
-			return last
+			return last, err
 		}
 
 		r.locker.Lock()
@@ -94,17 +139,62 @@ func (r *Receiver) receivePages(last string) string {
 		last = event.ID
 
 		if event.More != 1 {
-			return last
+			return last, nil
 		}
 	}
 }
 
-// Poll asks for the events now. It doesn't wait, even if r has stopped.
-func (r *Receiver) Poll() {
+// refused reports whether err is Proton refusing the event ID asked for, as
+// opposed to a failure worth retrying with the same ID: a network error, a
+// session to refresh (401), a rate limit (429) or a server error (5xx). What
+// Proton answers for an ID it no longer keeps isn't recorded yet; these are
+// the statuses it gives for IDs it doesn't know (proton-bridge,
+// service_label_events.go and go-proton-api's server: 422 and 400).
+func refused(err error) bool {
+	apiErr, ok := errors.AsType[*protonmail.APIError](err)
+	if !ok {
+		return false
+	}
+	switch apiErr.Status {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
+}
+
+// restart gives up on the events after last, which Proton refused with
+// refusal: events since then are lost, so the page it returns starts from the
+// latest event and says to rebuild everything (Refresh), as Proton's own
+// Refresh does. Without it, a stored ID Proton refuses would be asked for
+// again at every poll, and every login, for good.
+func (r *Receiver) restart(last string, refusal error) (*protonmail.Event, error) {
+	latest, err := r.c.GetLatestEventID()
+	if err != nil {
+		return nil, errors.Join(refusal, fmt.Errorf("cannot get the latest event ID: %w", err))
+	}
+	log.Printf("Proton refused the events after %v (%v): starting again from event %v, and rebuilding every mailbox", last, refusal, latest)
+	return &protonmail.Event{ID: latest, Refresh: protonmail.EventRefreshMail}, nil
+}
+
+// Poll asks for the events now. It doesn't wait: the channel returned gets
+// the outcome of the next poll that starts after the call, nil once all its
+// pages are delivered, else the error that stopped it, errStopped if r has
+// stopped or stops first. The channel has room for it: callers may ignore it.
+func (r *Receiver) Poll() <-chan error {
+	result := make(chan error, 1)
+	r.waitersMu.Lock()
+	if r.stopped {
+		result <- errStopped
+	} else {
+		r.waiters = append(r.waiters, result)
+	}
+	r.waitersMu.Unlock()
+
 	select {
 	case r.poll <- struct{}{}:
 	default:
 	}
+	return result
 }
 
 type Manager struct {

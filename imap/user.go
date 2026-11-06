@@ -394,13 +394,28 @@ func (u *user) unlockSync() {
 	<-u.syncSem
 }
 
-// poll asks for the events now, and waits until one is applied, or the user
-// logged out.
+// poll asks for the events now, and waits until a page is applied, the poll
+// fails or the user logged out. NOOP and APPEND wait on it: a failed poll
+// (Proton unreachable, rate limited) used to leave them waiting for the next
+// poll that succeeds, past clients' timeouts. They answer OK all the same:
+// NOOP can't fail (RFC 3501 section 6.1.2), and APPEND has already created
+// its message; the updates come with a later poll.
 func (u *user) poll() {
-	u.eventsReceiver.Poll()
-	select {
-	case <-u.eventSent:
-	case <-u.done:
+	result := u.eventsReceiver.Poll()
+	for {
+		select {
+		case <-u.eventSent:
+			return
+		case err := <-result:
+			if err != nil {
+				log.Printf("Answering without new events: %v", err)
+				return
+			}
+			// Its pages are delivered: wait for the last to be applied.
+			result = nil
+		case <-u.done:
+			return
+		}
 	}
 }
 

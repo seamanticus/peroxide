@@ -50,6 +50,9 @@ type RawAPIError struct {
 }
 
 type APIError struct {
+	// Status is the HTTP status of the response, 0 when the error didn't come
+	// from one (e.g. an action's result for one message).
+	Status  int
 	Code    int
 	Message string
 	Details json.RawMessage
@@ -212,6 +215,9 @@ func (c *Client) doJSON(req *http.Request, respData interface{}) error {
 
 	if maybeError, ok := respData.(maybeError); ok {
 		if err := maybeError.Err(); err != nil {
+			if apiErr, ok := err.(*APIError); ok {
+				apiErr.Status = resp.StatusCode
+			}
 			log.Printf("request failed: %v %v: %v", req.Method, req.URL.String(), err)
 			return err
 		}
