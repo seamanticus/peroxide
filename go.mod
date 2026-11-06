@@ -6,7 +6,6 @@ require (
 	github.com/ProtonMail/go-crypto v1.4.1
 	github.com/emersion/go-bcrypt v0.0.0-20170822072041-6e724a1baa63
 	github.com/emersion/go-imap v1.2.1
-	github.com/emersion/go-mbox v1.0.4
 	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 	github.com/emersion/go-smtp v0.24.0

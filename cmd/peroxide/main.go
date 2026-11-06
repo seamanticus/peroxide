@@ -2,12 +2,10 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
@@ -20,7 +18,6 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	imapserver "github.com/emersion/go-imap/server"
-	"github.com/emersion/go-mbox"
 	"github.com/emersion/go-smtp"
 	"golang.org/x/term"
 
@@ -28,9 +25,7 @@ import (
 	"github.com/seamanticus/peroxide/captcha"
 	"github.com/seamanticus/peroxide/config"
 	"github.com/seamanticus/peroxide/events"
-	"github.com/seamanticus/peroxide/exports"
 	imapbackend "github.com/seamanticus/peroxide/imap"
-	"github.com/seamanticus/peroxide/imports"
 	"github.com/seamanticus/peroxide/protonmail"
 	smtpbackend "github.com/seamanticus/peroxide/smtp"
 )
@@ -162,25 +157,12 @@ func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, even
 	return s.ListenAndServe()
 }
 
-func isMbox(br *bufio.Reader) (bool, error) {
-	prefix := []byte("From ")
-	b, err := br.Peek(len(prefix))
-	if err != nil {
-		return false, err
-	}
-	return bytes.Equal(b, prefix), nil
-}
-
 const usage = `usage: peroxide [options...] <command>
 Commands:
 
 	auth [options...] <username>			Login to ProtonMail via peroxide
 
 	export-secret-keys 	<username> 			Export secret keys
-
-	import-messages <username> [file]		Import messages
-
-	export-messages [options...] <username>	Export messages
 
 	sendmail <username> -- <args...>		sendmail(1) interface
 
@@ -197,8 +179,8 @@ Global options:
 	-debug
 		Log API requests and responses as received, and IMAP and SMTP
 		traffic, with credentials scrubbed. Everything goes to stdout,
-		except for export-secret-keys and export-messages, whose stdout
-		is their output: their logs stay on stderr
+		except for export-secret-keys, whose stdout is its output: its
+		logs stay on stderr
 	
 	-api-endpoint <url>
 		ProtonMail API endpoint
@@ -279,8 +261,6 @@ func main() {
 
 	authCmd := flag.NewFlagSet("auth", flag.ExitOnError)
 	exportSecretKeysCmd := flag.NewFlagSet("export-secret-keys", flag.ExitOnError)
-	importMessagesCmd := flag.NewFlagSet("import-messages", flag.ExitOnError)
-	exportMessagesCmd := flag.NewFlagSet("export-messages", flag.ExitOnError)
 	sendmailCmd := flag.NewFlagSet("sendmail", flag.ExitOnError)
 
 	flag.Usage = func() {
@@ -296,8 +276,8 @@ func main() {
 
 	cmd := flag.Arg(0)
 	switch cmd {
-	case "export-secret-keys", "export-messages":
-		// Their stdout is their output.
+	case "export-secret-keys":
+		// Its stdout is its output.
 	default:
 		if debug {
 			// One redirect then captures the whole session in order.
@@ -491,91 +471,6 @@ func main() {
 		}
 
 		if err := wc.Close(); err != nil {
-			log.Fatal(err)
-		}
-	case "import-messages":
-		importMessagesCmd.Parse(flag.Args()[1:])
-		username := importMessagesCmd.Arg(0)
-		archivePath := importMessagesCmd.Arg(1)
-		if username == "" {
-			log.Fatal("usage: peroxide import-messages <username> [file]")
-		}
-
-		f := os.Stdin
-		if archivePath != "" {
-			f, err = os.Open(archivePath)
-			if err != nil {
-				log.Fatal(err)
-			}
-			defer f.Close()
-		}
-
-		bridgePassword, err := askBridgePass()
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		c, _, err := auth.NewManager(newClient).Auth(username, bridgePassword)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		br := bufio.NewReader(f)
-		if ok, err := isMbox(br); err != nil {
-			log.Fatal(err)
-		} else if ok {
-			mr := mbox.NewReader(br)
-			for {
-				r, err := mr.NextMessage()
-				if err == io.EOF {
-					break
-				} else if err != nil {
-					log.Fatal(err)
-				}
-				if err := imports.ImportMessage(c, r); err != nil {
-					log.Fatal(err)
-				}
-			}
-		} else {
-			if err := imports.ImportMessage(c, br); err != nil {
-				log.Fatal(err)
-			}
-		}
-	case "export-messages":
-		// TODO: allow specifying multiple IDs
-		var convID, msgID string
-		exportMessagesCmd.StringVar(&convID, "conversation-id", "", "conversation ID")
-		exportMessagesCmd.StringVar(&msgID, "message-id", "", "message ID")
-		exportMessagesCmd.Parse(flag.Args()[1:])
-		username := exportMessagesCmd.Arg(0)
-		if (convID == "" && msgID == "") || username == "" {
-			log.Fatal("usage: peroxide export-messages [-conversation-id <id>] [-message-id <id>] <username>")
-		}
-
-		bridgePassword, err := askBridgePass()
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		c, privateKeys, err := auth.NewManager(newClient).Auth(username, bridgePassword)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		mboxWriter := mbox.NewWriter(os.Stdout)
-
-		if convID != "" {
-			if err := exports.ExportConversationMbox(c, privateKeys, mboxWriter, convID); err != nil {
-				log.Fatal(err)
-			}
-		}
-		if msgID != "" {
-			if err := exports.ExportMessageMbox(c, privateKeys, mboxWriter, msgID); err != nil {
-				log.Fatal(err)
-			}
-		}
-
-		if err := mboxWriter.Close(); err != nil {
 			log.Fatal(err)
 		}
 	case "smtp":
