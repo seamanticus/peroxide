@@ -60,8 +60,7 @@ after it reconnects). go-imap can send an unsolicited LIST
 3. A folder deleted while a client has it selected gives that client
    errors on its next command, instead of a BYE or a closed mailbox.
 4. Check live with a label (not a folder): create, rename and delete one
-   while peroxide runs with `-debug-raw` (capture with `2>&1`: API logs
-   go to stderr, IMAP logs to stdout), and check the logs
+   while peroxide runs with `-debug`, and check the logs
    `Label ... created/renamed`. Folders were checked on 2026-11-04/05.
 
 ## 2. `STORE +FLAGS (\Deleted)` without `.SILENT` sends no FETCH
@@ -137,47 +136,7 @@ go-proton-api message_import.go), with:
    with BAD before it is read; one within it but whose encrypted import
    exceeds 50 MB still needs NO [TOOBIG] from CreateMessage.
 
-## 4. Debug Raw
-
-Make an educated decision into droping `-debug` in favour of `-debug-raw`. The raw dump of debug with API keys scrubbed from the flag '-debug-raw' has proven invaluable to all previous implementations, whilst '-debug' only presents a security threat.
-
-**Goal.** Unwire `-debug`; `-debug-raw` takes its place (under that name
-or as the new meaning of `-debug`, to be decided), being the more
-comprehensive of the two and scrubbing credentials.
-
-**Facts (2026-11-06 audit).**
-
-- Both modes redact with the same key list (`redactedJSONFields`,
-  protonmail/redact.go): `-debug` logs the response as decoded into
-  peroxide's structs (`redactValueOf`), so it shows only what peroxide
-  decodes; `-debug-raw` logs it as received (`redactJSON`), every field,
-  and withholds any body that isn't JSON. So `-debug-raw` exposes a
-  superset of `-debug`: the security argument above is about coverage
-  of the key list, not the mode. Before dropping `-debug`, audit the
-  key list against fields only the raw mode shows (e.g. `Signature`,
-  `KeyPackets`, `Token` variants, `Body`: message bodies are armored
-  ciphertext, but drafts and contacts carry other material).
-- IMAP traffic goes to stdout (cmd/peroxide/main.go, `imapDebugExtension`
-  with `os.Stdout`; SMTP likewise), API traffic through `log`, so to
-  stderr. A capture needs `2>&1` today.
-- go-imap v1.2.1 reads AUTHENTICATE's SASL lines and IDLE's `DONE` from
-  the raw connection (`bufio.NewScanner(conn)`), past the debug tee: they
-  never reach the log (TestIMAPDebugExtension pins this).
-
-**Steps.**
-
-1. With `-debug-raw`, send the IMAP and SMTP traces and the `log`
-   output to one stream, stdout (`log.SetOutput(os.Stdout)` when the
-   flag is set, before any server starts), so one redirect captures the
-   whole session in order. Check line atomicity then: `log` writes
-   each entry in one Write, and the scrubbers write whole lines per
-   call, but a large literal logged in one Write could still be split
-   by the OS between other writers' lines; a shared mutex around both
-   writers removes the doubt.
-2. Remove `-debug` (or alias it to the raw mode) and its decoded-value
-   logging (`redactValueOf` in doJSON); update the usage text.
-3. Tests: with the flag, a request's `<<` line and an IMAP command reach
-   the same writer, in order.
+## 4. (done: `-debug` is the raw mode, to one stream)
 
 ## 5. Import / Export
 
@@ -548,7 +507,7 @@ renamed or deleted. Through go-proton-api (label.go):
    the delimiter `/` until section 1.1 is decided.
 2. Label type. bridge sends `Type` 3 (`LabelTypeFolder`) for folders,
    but `GET /labels` returned peroxide's folders as `Type` 1 with
-   `Exclusive` 1 (section 1, 2026-11-04). Check with a `-debug-raw` run
+   `Exclusive` 1 (section 1, 2026-11-04). Check with a `-debug` run
    which form `POST /labels` takes (`Type: 3`, or `Type: 1` with
    `Exclusive: 1`), and what the created label looks like in the
    following `Labels` event.
@@ -708,8 +667,4 @@ Small, independent, found reviewing branch `labels-events`.
    `GetEvent`), `https://mail.proton.me/api/events/...` with the default
    endpoint. Bridge and go-proton-api use `/core/v4/events`. Either
    correct the docs or move peroxide to the `core/v4` path, checking it
-   with a `-debug-raw` log first.
-9. **Section 4's premise.** It says `-debug` "only presents a security
-   threat"; both modes redact with one key list and the raw mode
-   exposes more fields (section 4, facts). Reword when section 4 is
-   done.
+   with a `-debug` log first.
