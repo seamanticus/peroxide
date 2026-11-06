@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"strconv"
 	"time"
@@ -109,7 +108,7 @@ func (c *Client) newRequest(method, path string, body io.Reader) (*http.Request,
 	return req, nil
 }
 
-func (c *Client) newJSONRequest(method, path string, body interface{}) (*http.Request, error) {
+func (c *Client) newJSONRequest(method, path string, body any) (*http.Request, error) {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		return nil, err
@@ -127,7 +126,7 @@ func (c *Client) newJSONRequest(method, path string, body interface{}) (*http.Re
 
 	req.Header.Set("Content-Type", "application/json")
 	req.GetBody = func() (io.ReadCloser, error) {
-		return ioutil.NopCloser(bytes.NewReader(b)), nil
+		return io.NopCloser(bytes.NewReader(b)), nil
 	}
 	return req, nil
 }
@@ -168,7 +167,7 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-func (c *Client) doJSON(req *http.Request, respData interface{}) error {
+func (c *Client) doJSON(req *http.Request, respData any) error {
 	req.Header.Set("Accept", "application/json")
 
 	if respData == nil {

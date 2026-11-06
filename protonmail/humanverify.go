@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -95,12 +96,7 @@ func (err *APIError) HumanVerification() (*HumanVerification, error) {
 
 // HasMethod reports whether the challenge can be solved with the given method.
 func (hv *HumanVerification) HasMethod(method string) bool {
-	for _, m := range hv.Methods {
-		if m == method {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(hv.Methods, method)
 }
 
 // URL returns the Proton-operated page on which the challenge is presented to

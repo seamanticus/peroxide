@@ -47,7 +47,7 @@ func redactJSON(b []byte) []byte {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	// Keep numbers as sent, float64 would mangle large ones.
 	dec.UseNumber()
-	var v interface{}
+	var v any
 	if err := dec.Decode(&v); err != nil {
 		return []byte(`"` + RedactedValue + `"`)
 	}
@@ -62,9 +62,9 @@ func redactJSON(b []byte) []byte {
 	return bytes.TrimSuffix(out.Bytes(), []byte("\n"))
 }
 
-func redactValue(v interface{}) interface{} {
+func redactValue(v any) any {
 	switch v := v.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		for k, sub := range v {
 			if redactedJSONFields[strings.ToLower(k)] {
 				if sub != nil {
@@ -75,7 +75,7 @@ func redactValue(v interface{}) interface{} {
 			v[k] = redactValue(sub)
 		}
 		return v
-	case []interface{}:
+	case []any:
 		for i, sub := range v {
 			v[i] = redactValue(sub)
 		}

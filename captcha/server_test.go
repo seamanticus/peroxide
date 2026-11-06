@@ -63,7 +63,7 @@ func fakeBrowser(rawURL string) error {
 
 func TestNewState(t *testing.T) {
 	seen := make(map[string]bool)
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		state, err := newState()
 		if err != nil {
 			t.Fatal(err)

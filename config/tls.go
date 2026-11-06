@@ -4,7 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
+	"os"
 )
 
 func TLS(certPath string, keyPath string, clientCAPath string) (*tls.Config, error) {
@@ -26,7 +26,7 @@ func TLS(certPath string, keyPath string, clientCAPath string) (*tls.Config, err
 			return nil, fmt.Errorf("cannot check client certificate without a server certificate and key")
 		}
 
-		data, err := ioutil.ReadFile(clientCAPath)
+		data, err := os.ReadFile(clientCAPath)
 		if err != nil {
 			return nil, fmt.Errorf("unable read CA file: %s", err)
 		}

@@ -173,8 +173,7 @@ func Authenticate(ctx context.Context, c Client, username, password string, opts
 		return auth, nil
 	}
 
-	var apiErr *protonmail.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok {
 		switch {
 		case apiErr.IsHumanVerificationRequired():
 			return nil, fmt.Errorf("%w: Proton asked for human verification again after the challenge was completed; "+

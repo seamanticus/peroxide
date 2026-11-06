@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"slices"
 	"strings"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
@@ -102,12 +103,7 @@ func msgBoundary(msg *protonmail.Message) string {
 }
 
 func hasLabel(msg *protonmail.Message, labelID string) bool {
-	for _, id := range msg.LabelIDs {
-		if labelID == id {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(msg.LabelIDs, labelID)
 }
 
 func splitMIMEType(t string) (string, string) {

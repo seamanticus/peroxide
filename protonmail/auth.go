@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -97,7 +97,7 @@ type Auth struct {
 	PasswordMode PasswordMode
 	TwoFactor    struct {
 		Enabled int
-		U2F     interface{} // TODO
+		U2F     any // TODO
 		TOTP    int
 	} `json:"2FA"`
 }
@@ -298,7 +298,7 @@ func decryptPrivateKeyToken(key *PrivateKey, userKeyRing openpgp.EntityList) ([]
 		return nil, err
 	}
 
-	b, err := ioutil.ReadAll(md.UnverifiedBody)
+	b, err := io.ReadAll(md.UnverifiedBody)
 	if err != nil {
 		return nil, err
 	}

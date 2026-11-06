@@ -13,7 +13,7 @@ import (
 
 func TestMessageCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	c := newMessageCache()
-	for i := 0; i < messageCacheSize; i++ {
+	for i := range messageCacheSize {
 		c.put(&protonmail.Message{ID: fmt.Sprint(i)})
 	}
 	// Using 0 makes 1 the least recently used.
@@ -60,7 +60,7 @@ func TestFullMessageCached(t *testing.T) {
 	u.c = &protonmail.Client{RootURL: srv.URL}
 	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: mbox}
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		msg, err := u.fullMessage("a")
 		if err != nil {
 			t.Fatalf("fullMessage() = %v", err)
