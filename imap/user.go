@@ -161,24 +161,30 @@ func newUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 
 // initSession loads the mailboxes and returns the event ID to resume from:
 // the last event applied, even in a previous session, so that the events of
-// the time peroxide was stopped are not lost.
+// the time peroxide was stopped are not lost. With none stored, the latest
+// event ID is asked for before the labels and counts are listed: a change
+// made between the two then comes as an event, applied again if the listing
+// already had it, rather than being missed. It is stored only once the
+// mailboxes are loaded, so a failed login asks again.
 func (u *user) initSession() (lastEventID string, err error) {
+	lastEventID, stored, err := u.db.LastEventID()
+	if err != nil {
+		return "", fmt.Errorf("cannot read last event ID: %w", err)
+	}
+	if !stored {
+		if lastEventID, err = u.c.GetLatestEventID(); err != nil {
+			return "", fmt.Errorf("cannot get latest event ID: %w", err)
+		}
+	}
+
 	if err := u.initMailboxes(); err != nil {
 		return "", err
 	}
 
-	lastEventID, ok, err := u.db.LastEventID()
-	if err != nil {
-		return "", fmt.Errorf("cannot read last event ID: %w", err)
-	}
-	if ok {
-		return lastEventID, nil
-	}
-	if lastEventID, err = u.c.GetLatestEventID(); err != nil {
-		return "", fmt.Errorf("cannot get latest event ID: %w", err)
-	}
-	if err := u.db.SetLastEventID(lastEventID); err != nil {
-		return "", fmt.Errorf("cannot store last event ID: %w", err)
+	if !stored {
+		if err := u.db.SetLastEventID(lastEventID); err != nil {
+			return "", fmt.Errorf("cannot store last event ID: %w", err)
+		}
 	}
 	return lastEventID, nil
 }

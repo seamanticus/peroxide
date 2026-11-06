@@ -674,3 +674,72 @@ func TestEventDuringSyncKeepsOrder(t *testing.T) {
 		}
 	})
 }
+
+// On a first login (no event ID stored), the latest event ID is asked for
+// before the labels and counts are listed, so a change made between them
+// comes as an event instead of being lost; it is stored once they are
+// loaded. A stored ID is resumed from, with no request for it.
+// evidence: witnesses
+func TestInitSessionAsksLatestEventFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		stored       string
+		wantID       string
+		wantRequests []string
+	}{
+		{"first login", "", "latest1", []string{"/events/latest", "/labels", "/messages/count"}},
+		{"resumed", "e7", "e7", []string{"/labels", "/messages/count"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			if tc.stored != "" {
+				if err := db.SetLastEventID(tc.stored); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var requests []string
+			bodies := map[string]string{
+				"/events/latest":  `{"Code":1000,"EventID":"latest1","More":0}`,
+				"/labels":         `{"Code":1000,"Labels":[]}`,
+				"/messages/count": `{"Code":1000,"Counts":[]}`,
+			}
+			u := &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), syncSem: make(chan struct{}, 1)}
+			u.c = &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{
+				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					requests = append(requests, r.URL.Path)
+					if r.URL.Path == "/labels" {
+						// The ID asked for first must not be stored yet: a
+						// failed listing asks for it again.
+						if id, ok, err := db.LastEventID(); err != nil || (ok && id != tc.stored) {
+							t.Errorf("while listing, stored event ID = %q, %v, %v", id, ok, err)
+						}
+					}
+					body, ok := bodies[r.URL.Path]
+					if !ok {
+						t.Errorf("unexpected request %v %v", r.Method, r.URL.Path)
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": {"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(body)),
+						Request:    r,
+					}, nil
+				}),
+			}}
+
+			id, err := u.initSession()
+			if err != nil {
+				t.Fatalf("initSession() = %v", err)
+			}
+			if id != tc.wantID {
+				t.Errorf("initSession() = %q, want %q", id, tc.wantID)
+			}
+			if !slices.Equal(requests, tc.wantRequests) {
+				t.Errorf("requests = %v, want %v", requests, tc.wantRequests)
+			}
+			if got, ok, err := db.LastEventID(); err != nil || !ok || got != tc.wantID {
+				t.Errorf("stored event ID = %q, %v, %v, want %q", got, ok, err, tc.wantID)
+			}
+		})
+	}
+}
