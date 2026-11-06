@@ -122,9 +122,10 @@ go-proton-api message_import.go), with:
 
 **Steps.**
 
-1. peroxide has an import client (`protonmail.Client.Import`,
-   protonmail/import.go, unused since the import-messages command was
-   removed): reuse it for APPEND, with the metadata above.
+1. Write a client for Proton's import API, as go-proton-api's
+   `ImportMessages` does (peroxide's own, `protonmail.Client.Import`,
+   was removed in b170307 and can be recovered from its parent), and
+   use it for APPEND with the metadata above.
 2. Refuse All Mail (and Starred, a flag here) with NO, as bridge does.
 3. Decide on the SMTP duplicate check: peroxide's SMTP server sends
    through a Proton draft (`CreateDraftMessage` then `SendMessage`,
@@ -661,5 +662,5 @@ Small, independent, found reviewing branch `labels-events`.
    correct the docs or move peroxide to the `core/v4` path, checking it
    with a `-debug` log first.
 9. **Old idioms.** `go fix -diff ./...` reports modernisations in
-   config/tls.go (`ioutil`), captcha/, imap/message.go and
-   imap/cache_test.go.
+   config/tls.go and protonmail/ (`ioutil`, `interface{}`), captcha/,
+   imap/message.go and imap/cache_test.go.
