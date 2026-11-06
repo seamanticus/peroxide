@@ -55,11 +55,14 @@ type Receiver struct {
 	c     EventSource
 	delay func() time.Duration // the wait before the next poll
 
-	locker   sync.Mutex
+	// locker guards channels and stop. A 1-slot channel rather than a
+	// sync.Mutex, so that a goroutine waiting on it is durably blocked for
+	// testing/synctest (as imap's user.syncSem): lock, unlock.
+	locker   chan struct{}
 	channels []chan<- *protonmail.Event
 
 	poll chan struct{} // capacity 1: a pending request covers new ones
-	stop chan struct{} // closed with the last channel
+	stop chan struct{} // closed, under locker, with the last channel
 
 	// waiters get the outcome of the next poll to start after they asked
 	// (Poll). A lock of their own, as r.locker is held while a page waits to
@@ -68,6 +71,15 @@ type Receiver struct {
 	waiters   []chan<- error
 	stopped   bool // set, under waitersMu, once r answers no more waiters
 }
+
+func (r *Receiver) lock() {
+	if r.locker == nil {
+		panic("invariant: Register makes Receiver.locker")
+	}
+	r.locker <- struct{}{}
+}
+
+func (r *Receiver) unlock() { <-r.locker }
 
 func (r *Receiver) receiveEvents(last string) {
 	defer r.answerWaiters(errStopped, true)
@@ -131,11 +143,11 @@ func (r *Receiver) receivePages(last string) (string, error) {
 			return last, err
 		}
 
-		r.locker.Lock()
+		r.lock()
 		for _, ch := range r.channels {
 			ch <- event
 		}
-		r.locker.Unlock()
+		r.unlock()
 		last = event.ID
 
 		if event.More != 1 {
@@ -144,12 +156,24 @@ func (r *Receiver) receivePages(last string) (string, error) {
 	}
 }
 
+// Proton's codes, beside the HTTP status, for a value it rejects
+// (WebClients, packages/shared/lib/errors.ts, API_CUSTOM_ERROR_CODES):
+// INVALID_VALUE, INVALID_ID and NOT_FOUND.
+const (
+	codeInvalidValue = 2001
+	codeInvalidID    = 2061
+	codeNotFound     = 2501
+)
+
 // refused reports whether err is Proton refusing the event ID asked for, as
 // opposed to a failure worth retrying with the same ID: a network error, a
 // session to refresh (401), a rate limit (429) or a server error (5xx). What
 // Proton answers for an ID it no longer keeps isn't recorded yet; these are
 // the statuses it gives for IDs it doesn't know (proton-bridge,
-// service_label_events.go and go-proton-api's server: 422 and 400).
+// service_label_events.go and go-proton-api's server: 422 and 400). The code
+// must name the value too: a 400 also answers, e.g., an app version Proton no
+// longer accepts (5003), which a restart would not cure, and which would
+// rebuild every mailbox at every poll.
 func refused(err error) bool {
 	apiErr, ok := errors.AsType[*protonmail.APIError](err)
 	if !ok {
@@ -157,6 +181,11 @@ func refused(err error) bool {
 	}
 	switch apiErr.Status {
 	case http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity:
+	default:
+		return false
+	}
+	switch apiErr.Code {
+	case codeInvalidValue, codeInvalidID, codeNotFound:
 		return true
 	}
 	return false
@@ -199,7 +228,8 @@ func (r *Receiver) Poll() <-chan error {
 
 type Manager struct {
 	receivers map[string]*Receiver
-	locker    sync.Mutex
+	// locker guards receivers; a 1-slot channel as Receiver.locker.
+	locker chan struct{}
 
 	// newPollDelay gives each new Receiver its waits between polls. Tests
 	// replace it.
@@ -209,6 +239,7 @@ type Manager struct {
 func NewManager() *Manager {
 	return &Manager{
 		receivers: make(map[string]*Receiver),
+		locker:    make(chan struct{}, 1),
 		newPollDelay: func() func() time.Duration {
 			return newJitteredPollDelay(randomSeed())
 		},
@@ -220,18 +251,27 @@ func NewManager() *Manager {
 // and closed; the receiver stops with its last channel, so nothing is polled
 // while no client is logged in.
 func (m *Manager) Register(c EventSource, username, lastEventID string, ch chan<- *protonmail.Event, done <-chan struct{}) *Receiver {
-	m.locker.Lock()
-	defer m.locker.Unlock()
+	m.lock()
+	defer m.unlock()
 
 	r, ok := m.receivers[username]
 	if ok {
-		r.locker.Lock()
-		r.channels = append(r.channels, ch)
-		r.locker.Unlock()
-	} else {
+		r.lock()
+		select {
+		case <-r.stop:
+			// Stopped with its last channel, and not yet dropped by remove:
+			// a stopped receiver never delivers again.
+			ok = false
+		default:
+			r.channels = append(r.channels, ch)
+		}
+		r.unlock()
+	}
+	if !ok {
 		r = &Receiver{
 			c:        c,
 			delay:    m.newPollDelay(),
+			locker:   make(chan struct{}, 1),
 			channels: []chan<- *protonmail.Event{ch},
 			poll:     make(chan struct{}, 1),
 			stop:     make(chan struct{}),
@@ -248,19 +288,36 @@ func (m *Manager) Register(c EventSource, username, lastEventID string, ch chan<
 	return r
 }
 
-// remove takes ch from r, and stops r if it was the last channel. Both happen
-// under m.locker, so Register never adds a channel to a stopped receiver.
-func (m *Manager) remove(username string, r *Receiver, ch chan<- *protonmail.Event) {
-	m.locker.Lock()
-	defer m.locker.Unlock()
-	r.locker.Lock()
-	defer r.locker.Unlock()
+func (m *Manager) lock() {
+	if m.locker == nil {
+		panic("invariant: NewManager makes Manager.locker")
+	}
+	m.locker <- struct{}{}
+}
 
+func (m *Manager) unlock() { <-m.locker }
+
+// remove takes ch from r, and stops r if it was the last channel. It waits for
+// r's lock without m's: a page being delivered holds r's for as long as its
+// reader takes, and that reader may wait for a login of another account that
+// holds the IMAP backend's lock and calls Register. Register instead starts a
+// new receiver if it finds r stopped and not dropped yet.
+func (m *Manager) remove(username string, r *Receiver, ch chan<- *protonmail.Event) {
+	r.lock()
 	r.channels = slices.DeleteFunc(r.channels, func(c chan<- *protonmail.Event) bool { return c == ch })
 	close(ch)
-
-	if len(r.channels) == 0 {
+	last := len(r.channels) == 0
+	if last {
 		close(r.stop)
+	}
+	r.unlock()
+	if !last {
+		return
+	}
+
+	m.lock()
+	defer m.unlock()
+	if m.receivers[username] == r {
 		delete(m.receivers, username)
 	}
 }

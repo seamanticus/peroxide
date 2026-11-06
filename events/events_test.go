@@ -396,9 +396,13 @@ func TestReceiverRestartFails(t *testing.T) {
 
 // Only answers saying the ID itself is wrong restart from the latest event: a
 // session to refresh, a rate limit or a server error is retried with the
-// same ID, as the events after it are still there.
+// same ID, as the events after it are still there, and so is a 400 for
+// something else, such as the app version.
 // evidence: witnesses
 func TestRefused(t *testing.T) {
+	apiErr := func(status, code int) error {
+		return &protonmail.APIError{Status: status, Code: code}
+	}
 	tests := []struct {
 		name string
 		err  error
@@ -407,14 +411,19 @@ func TestRefused(t *testing.T) {
 		{"no error", nil, false},
 		{"network", errors.New("dial tcp: i/o timeout"), false},
 		{"no status", &protonmail.APIError{Code: 2501, Message: "x"}, false},
-		{"400", &protonmail.APIError{Status: http.StatusBadRequest}, true},
-		{"401", &protonmail.APIError{Status: http.StatusUnauthorized}, false},
-		{"404", &protonmail.APIError{Status: http.StatusNotFound}, true},
-		{"422", &protonmail.APIError{Status: http.StatusUnprocessableEntity}, true},
-		{"422 wrapped", fmt.Errorf("get event: %w", &protonmail.APIError{Status: http.StatusUnprocessableEntity}), true},
-		{"429", &protonmail.APIError{Status: http.StatusTooManyRequests}, false},
-		{"500", &protonmail.APIError{Status: http.StatusInternalServerError}, false},
-		{"503", &protonmail.APIError{Status: http.StatusServiceUnavailable}, false},
+		{"400 invalid value", apiErr(http.StatusBadRequest, codeInvalidValue), true},
+		{"400 invalid ID", apiErr(http.StatusBadRequest, codeInvalidID), true},
+		{"400 no code", apiErr(http.StatusBadRequest, 0), false},
+		{"400 bad app version", apiErr(http.StatusBadRequest, 5003), false},
+		{"401", apiErr(http.StatusUnauthorized, codeInvalidID), false},
+		{"404 not found", apiErr(http.StatusNotFound, codeNotFound), true},
+		{"404 no code", apiErr(http.StatusNotFound, 0), false},
+		{"422 invalid ID", apiErr(http.StatusUnprocessableEntity, codeInvalidID), true},
+		{"422 other code", apiErr(http.StatusUnprocessableEntity, 2011), false},
+		{"422 wrapped", fmt.Errorf("get event: %w", apiErr(http.StatusUnprocessableEntity, codeInvalidID)), true},
+		{"429", apiErr(http.StatusTooManyRequests, 2028), false},
+		{"500", apiErr(http.StatusInternalServerError, codeInvalidValue), false},
+		{"503", apiErr(http.StatusServiceUnavailable, 0), false},
 	}
 	for _, tt := range tests {
 		if got := refused(tt.err); got != tt.want {
@@ -466,6 +475,92 @@ func TestPollAnsweredWhenReceiverStops(t *testing.T) {
 		synctest.Wait()
 		if err := <-result; err != nil && !errors.Is(err, errStopped) {
 			t.Errorf("Poll = %v, want nil or %v", err, errStopped)
+		}
+	})
+}
+
+// The last channel of an account can leave while its receiver waits to
+// deliver a page to it. Removing it must not hold up Register for another
+// account: the reader of that page can be waiting, through go-imap's server
+// lock and the IMAP backend's lock, for exactly that Register (a login).
+func TestRemoveDoesNotBlockRegister(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := newTestManager()
+		srcA := &fakeSource{pages: map[string]*protonmail.Event{"a0": {ID: "a1"}}}
+		chA := make(chan *protonmail.Event) // not read yet
+		doneA := make(chan struct{})
+		m.Register(srcA, "alice", "a0", chA, doneA)
+		synctest.Wait() // the receiver waits to deliver a1
+		close(doneA)
+		synctest.Wait() // remove waits for the receiver
+
+		srcB := &fakeSource{pages: map[string]*protonmail.Event{"b0": {ID: "b1"}}}
+		chB := make(chan *protonmail.Event)
+		doneB := make(chan struct{})
+		idsB := receive(chB)
+		registered := make(chan struct{})
+		go func() {
+			m.Register(srcB, "carol", "b0", chB, doneB)
+			close(registered)
+		}()
+		synctest.Wait()
+		select {
+		case <-registered:
+		default:
+			t.Error("Register of carol waits for alice's page to be read")
+		}
+
+		idsA := receive(chA)
+		if got, want := <-idsA, []string{"a1"}; !slices.Equal(got, want) {
+			t.Errorf("alice got pages %v, want %v", got, want)
+		}
+		<-registered
+		close(doneB)
+		if got, want := <-idsB, []string{"b1"}; !slices.Equal(got, want) {
+			t.Errorf("carol got pages %v, want %v", got, want)
+		}
+	})
+}
+
+// Register after the last channel left, before remove dropped the stopped
+// receiver, starts a new one, and remove leaves that one in place. Both wait
+// for the manager here; the outcome is the same whichever gets it first.
+func TestRegisterWhileRemovePending(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := &fakeSource{pages: map[string]*protonmail.Event{"e5": {ID: "e6"}}}
+		m := newTestManager()
+		ch := make(chan *protonmail.Event)
+		done := make(chan struct{})
+		ids := receive(ch)
+		first := m.Register(src, "bob", "e0", ch, done)
+		synctest.Wait()
+
+		m.lock()
+		ch2 := make(chan *protonmail.Event)
+		done2 := make(chan struct{})
+		ids2 := receive(ch2)
+		second := make(chan *Receiver, 1)
+		go func() { second <- m.Register(src, "bob", "e5", ch2, done2) }()
+		synctest.Wait()
+		close(done) // remove stops first, then waits to drop it
+		<-ids
+		synctest.Wait()
+		m.unlock()
+		r := <-second
+		synctest.Wait()
+
+		if r == first {
+			t.Error("Register reused the stopped receiver")
+		}
+		m.lock()
+		kept := m.receivers["bob"]
+		m.unlock()
+		if kept != r {
+			t.Error("remove dropped the receiver registered after it stopped")
+		}
+		close(done2)
+		if got, want := <-ids2, []string{"e6"}; !slices.Equal(got, want) {
+			t.Errorf("sent pages %v, want %v", got, want)
 		}
 	})
 }
