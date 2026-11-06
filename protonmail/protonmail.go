@@ -99,7 +99,8 @@ func (c *Client) newRequest(method, path string, body io.Reader) (*http.Request,
 	}
 
 	if c.Debug {
-		log.Printf(">> %v %v\n", req.Method, req.URL.Path)
+		// RequestURI: the path and the query, such as ListMessages' filter.
+		log.Printf(">> %v %v\n", req.Method, req.URL.RequestURI())
 	}
 
 	req.Header.Set("X-Pm-Appversion", c.AppVersion)

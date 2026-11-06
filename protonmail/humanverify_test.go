@@ -3,6 +3,8 @@ package protonmail
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -395,5 +397,59 @@ func TestDebugWithholdsNonJSON(t *testing.T) {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("debug logs don't contain %v:\n%v", want, logs.String())
 		}
+	}
+}
+
+// Requests are logged with their query, and an attachment download, whose
+// body bypasses doJSON, still with its answer: never with its body.
+// evidence: witnesses
+func TestDebugLogsQueryAndAttachment(t *testing.T) {
+	const attachment = "attachment-data-packet"
+
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/attachments/") {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Write([]byte(attachment))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"Code":1000,"Total":0,"Messages":[]}`))
+	}))
+	defer srv.Close()
+	c.Debug = true
+
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	}()
+
+	if _, _, err := c.ListMessages(&MessageFilter{Page: 2, Label: "0"}); err != nil {
+		t.Fatalf("ListMessages() = %v", err)
+	}
+	rc, err := c.GetAttachment("att1")
+	if err != nil {
+		t.Fatalf("GetAttachment() = %v", err)
+	}
+	if b, err := io.ReadAll(rc); err != nil || string(b) != attachment {
+		t.Errorf("GetAttachment() body = %q, %v, want %q", b, err, attachment)
+	}
+	rc.Close()
+
+	for _, want := range []string{
+		">> GET /messages?Label=0&Page=2\n",
+		">> GET /attachments/att1\n",
+		fmt.Sprintf("<< GET /attachments/att1 200 OK (%v bytes)\n", len(attachment)),
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("debug logs don't contain %q:\n%v", want, logs.String())
+		}
+	}
+	if strings.Contains(logs.String(), attachment) {
+		t.Errorf("debug logs contain the attachment body:\n%v", logs.String())
 	}
 }

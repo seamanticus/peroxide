@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"strconv"
@@ -153,6 +154,12 @@ func (c *Client) GetAttachment(id string) (io.ReadCloser, error) {
 	resp, err := c.do(req)
 	if err != nil {
 		return nil, err
+	}
+
+	if c.Debug {
+		// The body is streamed to the caller, an OpenPGP data packet whose
+		// decrypted form the IMAP trace shows: log the answer and its size only.
+		log.Printf("<< %v %v %v (%v bytes)", req.Method, req.URL.Path, resp.Status, resp.ContentLength)
 	}
 
 	if resp.StatusCode/100 != 2 {
