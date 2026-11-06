@@ -14,8 +14,15 @@ import (
 var errNotYetImplemented = errors.New("not yet implemented")
 
 // appendLimit is the largest message APPEND accepts, in octets: Proton refuses
-// to import messages over 50 MB (go-proton-api ErrImportSizeExceeded).
+// messages over 50 MB (go-proton-api ErrImportSizeExceeded; APPEND makes a
+// draft today, TODO section 3 moves it to the import API).
 const appendLimit = 50 << 20
+
+// MaxLiteralSize is the largest literal the server must accept: an APPENDed
+// message, the largest there is. Set it as go-imap's Server.MaxLiteralSize,
+// which reads every literal whole into memory before any command sees it:
+// without the cap, a client could make peroxide allocate any size.
+const MaxLiteralSize = appendLimit
 
 // CreateMessageLimit makes go-imap announce APPENDLIMIT=appendLimit, the same
 // for every mailbox (RFC 7889 section 2).

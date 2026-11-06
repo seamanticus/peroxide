@@ -143,6 +143,9 @@ func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, even
 	be := imapbackend.New(authManager, eventsManager)
 	s := imapserver.New(be)
 	s.Enable(imapbackend.Extension{})
+	// A larger literal is refused before it is read: the client gets BAD, as
+	// go-imap gives no way to answer NO [TOOBIG] at that point.
+	s.MaxLiteralSize = imapbackend.MaxLiteralSize
 	s.Addr = addr
 	s.AllowInsecureAuth = tlsConfig == nil
 	s.TLSConfig = tlsConfigFor(tlsConfig, "imap")
