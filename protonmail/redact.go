@@ -29,6 +29,9 @@ var redactedJSONFields = map[string]bool{
 	"mailboxpassword":        true,
 	"twofactorcode":          true,
 	"cookie":                 true,
+	// The user's device recovery secret, which decrypts the recovery file a
+	// browser keeps. Peroxide doesn't decode it, but raw responses carry it.
+	"recoverysecret": true,
 	// Cleartext session keys, sent when mailing recipients outside Proton.
 	"key": true,
 }
@@ -57,15 +60,6 @@ func redactJSON(b []byte) []byte {
 		return []byte(`"` + RedactedValue + `"`)
 	}
 	return bytes.TrimSuffix(out.Bytes(), []byte("\n"))
-}
-
-// redactValueOf marshals v to JSON and redacts its sensitive fields.
-func redactValueOf(v interface{}) []byte {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return []byte(`"` + RedactedValue + `"`)
-	}
-	return redactJSON(b)
 }
 
 func redactValue(v interface{}) interface{} {

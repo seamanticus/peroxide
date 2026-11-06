@@ -317,19 +317,21 @@ func TestDebugDoesNotLogSecrets(t *testing.T) {
 	}
 }
 
-// TestDebugRawLogsUndecodedFields checks that raw debug logs show fields the
-// client doesn't decode, such as an event's More, but still no secrets.
-func TestDebugRawLogsUndecodedFields(t *testing.T) {
+// TestDebugLogsUndecodedFields checks that debug logs show fields the client
+// doesn't decode, such as an event's More, but still no secrets, including
+// undecoded ones such as a key's RecoverySecret.
+func TestDebugLogsUndecodedFields(t *testing.T) {
 	const accessToken = "super-secret-access-token"
+	const recoverySecret = "super-secret-recovery-secret"
 
 	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"Code":1000,"EventID":"ev1","More":1,"Order":6700620015701,` +
-			`"AccessToken":"` + accessToken + `","Subject":"a<b>&c"}`))
+			`"AccessToken":"` + accessToken + `","Subject":"a<b>&c",` +
+			`"User":{"Keys":[{"ID":"k1","RecoverySecret":"` + recoverySecret + `"}]}}`))
 	}))
 	defer srv.Close()
 	c.Debug = true
-	c.DebugRaw = true
 
 	var logs bytes.Buffer
 	oldWriter := log.Writer()
@@ -349,8 +351,10 @@ func TestDebugRawLogsUndecodedFields(t *testing.T) {
 		t.Errorf("GetEvent().ID = %q, want %q", event.ID, "ev1")
 	}
 
-	if strings.Contains(logs.String(), accessToken) {
-		t.Errorf("debug logs disclose the access token:\n%v", logs.String())
+	for _, secret := range []string{accessToken, recoverySecret} {
+		if strings.Contains(logs.String(), secret) {
+			t.Errorf("debug logs disclose %q:\n%v", secret, logs.String())
+		}
 	}
 	for _, want := range []string{`"More":1`, `"Order":6700620015701`, `"Subject":"a<b>&c"`, RedactedValue, "200 OK"} {
 		if !strings.Contains(logs.String(), want) {
@@ -360,7 +364,7 @@ func TestDebugRawLogsUndecodedFields(t *testing.T) {
 }
 
 // A body that isn't JSON can't be searched for secrets, so it is withheld.
-func TestDebugRawWithholdsNonJSON(t *testing.T) {
+func TestDebugWithholdsNonJSON(t *testing.T) {
 	const secret = "AccessToken=super-secret"
 
 	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -370,7 +374,6 @@ func TestDebugRawWithholdsNonJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 	c.Debug = true
-	c.DebugRaw = true
 
 	var logs bytes.Buffer
 	oldWriter := log.Writer()

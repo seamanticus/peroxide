@@ -42,7 +42,6 @@ const (
 
 var (
 	debug       bool
-	debugRaw    bool
 	apiEndpoint string
 	appVersion  string
 )
@@ -60,7 +59,6 @@ func newClient() *protonmail.Client {
 		RootURL:    apiEndpoint,
 		AppVersion: appVersion,
 		Debug:      debug,
-		DebugRaw:   debugRaw,
 		HTTPClient: &http.Client{Jar: jar},
 	}
 }
@@ -127,7 +125,7 @@ func listenAndServeSMTP(addr string, debug bool, authManager *auth.Manager, tlsC
 	s.AllowInsecureAuth = tlsConfig == nil
 	s.TLSConfig = tlsConfigFor(tlsConfig, "smtp")
 	if debug {
-		return serveSMTPDebug(s, os.Stdout)
+		return serveSMTPDebug(s, log.Writer())
 	}
 
 	if s.TLSConfig != nil {
@@ -150,7 +148,9 @@ func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, even
 	s.AllowInsecureAuth = tlsConfig == nil
 	s.TLSConfig = tlsConfigFor(tlsConfig, "imap")
 	if debug {
-		s.Enable(imapDebugExtension{w: os.Stdout})
+		// Traces go where API traffic is logged, so one stream holds the whole
+		// session in order.
+		s.Enable(imapDebugExtension{w: log.Writer()})
 	}
 
 	if s.TLSConfig != nil {
@@ -195,12 +195,10 @@ Commands:
 Global options:
 
 	-debug
-		Enable debug logs with decoded responses 
-		*UNSAFE* parses API keys in plain text
-
-	-debug-raw
-		Like -debug but with full API responses, instead of decoded.
-		*SAFE* all credentials are scrubbed, the best tool for troubleshooting
+		Log API requests and responses as received, and IMAP and SMTP
+		traffic, with credentials scrubbed. Everything goes to stdout,
+		except for export-secret-keys and export-messages, whose stdout
+		is their output: their logs stay on stderr
 	
 	-api-endpoint <url>
 		ProtonMail API endpoint
@@ -263,8 +261,7 @@ Environment variables:
 `
 
 func main() {
-	flag.BoolVar(&debug, "debug", false, "Enable debug logs")
-	flag.BoolVar(&debugRaw, "debug-raw", false, "Like -debug, but log API responses as received instead of as decoded")
+	flag.BoolVar(&debug, "debug", false, "Log API, IMAP and SMTP traffic to stdout, credentials scrubbed")
 	flag.StringVar(&apiEndpoint, "api-endpoint", defaultAPIEndpoint, "ProtonMail API endpoint")
 	flag.StringVar(&appVersion, "app-version", defaultAppVersion, "ProtonMail app version")
 
@@ -291,9 +288,6 @@ func main() {
 	}
 
 	flag.Parse()
-	if debugRaw {
-		debug = true
-	}
 
 	tlsConfig, err := config.TLS(*tlsCert, *tlsCertKey, *tlsClientCA)
 	if err != nil {
@@ -301,6 +295,15 @@ func main() {
 	}
 
 	cmd := flag.Arg(0)
+	switch cmd {
+	case "export-secret-keys", "export-messages":
+		// Their stdout is their output.
+	default:
+		if debug {
+			// One redirect then captures the whole session in order.
+			log.SetOutput(os.Stdout)
+		}
+	}
 	switch cmd {
 	case "auth":
 		var captchaMode, captchaListen string
