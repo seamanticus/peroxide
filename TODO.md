@@ -355,6 +355,29 @@ and a failed sync rewinds the events to that ID.
    request; an edited draft is fetched again; on 429 the downloader
    backs off and the parallelism drops (testing/synctest); a FETCH of a
    message being downloaded makes one request, not two.
+8. ENVELOPE from the original header (with the storage of step 1).
+   Since 49b614e `messageHeader` starts from the header Proton
+   received (`Message.Header`, sent only by `GET /messages/{id}`: the
+   metadata pages have neither it nor `ParsedHeaders`), so BODY[HEADER]
+   keeps References, In-Reply-To and the sent Date. `fetchEnvelope`
+   still reads the metadata only, as aerc asks ENVELOPE of every
+   listed message and a full message each would cost a request each:
+   - In-Reply-To is always NIL, so clients that thread by ENVELOPE (as
+     aerc does without the THREAD extension) can't link replies.
+   - Date is Proton's receive time (`Time`), not the header's Date.
+   - Sender is always From: a real `Sender` header (mailing lists,
+     sending on behalf) is lost.
+   - Message-Id is `<ExternalID>`; the original header's value could
+     differ in case or form.
+   proton-bridge builds ENVELOPE from the full header (gluon
+   imap/envelope.go, at sync, stored with the message), defaulting
+   Sender and Reply-To to From. Once full messages are stored, build it
+   from `messageHeader(full)` the same way: parse Date, In-Reply-To,
+   Message-Id and the address fields from it, keeping the metadata's
+   subject and addresses where the header has none, and fall back to the
+   metadata while a message isn't stored yet.
+   Tests: a stored message's ENVELOPE has the header's In-Reply-To,
+   Date and Sender; an unstored one the metadata's, without a request.
 
 ### 9.1 Keep UIDs across sessions (option b)
 
