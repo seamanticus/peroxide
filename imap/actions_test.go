@@ -21,13 +21,21 @@ import (
 )
 
 // fakeAPI answers message actions with a result per message: codes holds the
-// code of each message, 1000 when missing. It records the requests made.
+// code of each message, 1000 when missing. gets answers GET requests by path,
+// with a status and a body. It records the requests made.
 type fakeAPI struct {
 	t     *testing.T
 	codes map[string]int
+	gets  map[string]fakeResponse
 
 	mu       sync.Mutex
 	requests []string
+}
+
+type fakeResponse struct {
+	status      int
+	contentType string
+	body        string
 }
 
 func (api *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +43,12 @@ func (api *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	api.requests = append(api.requests, r.Method+" "+r.URL.Path)
 	api.mu.Unlock()
 
+	if res, ok := api.gets[r.URL.Path]; ok && r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", res.contentType)
+		w.WriteHeader(res.status)
+		io.WriteString(w, res.body)
+		return
+	}
 	if r.Method != http.MethodPut || !strings.HasPrefix(r.URL.Path, "/messages/") {
 		api.t.Errorf("unexpected request %v %v", r.Method, r.URL.Path)
 		http.NotFound(w, r)

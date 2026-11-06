@@ -440,7 +440,12 @@ func (mbox *mailbox) listMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fe
 
 		for i := start; i <= stop; i++ {
 			fetched, msg, err := mbox.fetchMessage(uid, i, items)
-			if err == database.ErrNotFound {
+			if errors.Is(err, errMessageGone) {
+				// Its delete event removes it, with an EXPUNGE, at the next
+				// poll: failing the FETCH would also drop the messages after it.
+				log.Printf("Message %v of %v skipped: %v", i, mbox.Name(), err)
+				continue
+			} else if errors.Is(err, database.ErrNotFound) {
 				continue
 			} else if err != nil {
 				return nil, err

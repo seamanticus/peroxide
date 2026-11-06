@@ -91,7 +91,7 @@ type Message struct {
 // openpgp/errors.ErrKeyIncorrect, as when the sender encrypted it end to end
 // to a key Proton doesn't have.
 func (msg *Message) Read(keyring openpgp.KeyRing, prompt openpgp.PromptFunction) (*openpgp.MessageDetails, error) {
-	if !strings.HasPrefix(strings.TrimLeft(msg.Body, " \t\r\n"), "-----BEGIN PGP MESSAGE-----") {
+	if !isPGPMessage(msg.Body) {
 		return &openpgp.MessageDetails{
 			IsEncrypted:    false,
 			IsSigned:       false,
@@ -104,6 +104,40 @@ func (msg *Message) Read(keyring openpgp.KeyRing, prompt openpgp.PromptFunction)
 		return nil, fmt.Errorf("cannot read armored body: %w", err)
 	}
 	return openpgp.ReadMessage(block.Body, keyring, prompt, nil)
+}
+
+func isPGPMessage(body string) bool {
+	return strings.HasPrefix(strings.TrimLeft(body, " \t\r\n"), "-----BEGIN PGP MESSAGE-----")
+}
+
+// EncryptedTo reads the key packets of the body of msg, and nothing after
+// them, and returns the IDs of the keys it is encrypted to, 0 for a hidden
+// recipient (RFC 9580 section 5.1). A body that isn't a PGP message has none.
+func (msg *Message) EncryptedTo() ([]uint64, error) {
+	if !isPGPMessage(msg.Body) {
+		return nil, nil
+	}
+	block, err := armor.Decode(strings.NewReader(msg.Body))
+	if err != nil {
+		return nil, fmt.Errorf("cannot read armored body: %w", err)
+	}
+	var keyIDs []uint64
+	packets := packet.NewReader(block.Body)
+	for {
+		p, err := packets.Next()
+		if err == io.EOF {
+			return keyIDs, nil
+		} else if err != nil {
+			return nil, fmt.Errorf("cannot read key packets: %w", err)
+		}
+		switch p := p.(type) {
+		case *packet.EncryptedKey:
+			keyIDs = append(keyIDs, p.KeyId)
+		case *packet.SymmetricKeyEncrypted:
+		default:
+			return keyIDs, nil
+		}
+	}
 }
 
 type messageWriter struct {

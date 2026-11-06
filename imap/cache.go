@@ -2,6 +2,8 @@ package imap
 
 import (
 	"container/list"
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/seamanticus/peroxide/protonmail"
@@ -82,6 +84,11 @@ func (c *messageCache) clear() {
 	clear(c.values)
 }
 
+// errMessageGone is the error of fullMessage for a message Proton no longer
+// has: deleted after the local database learnt of it, and still listed until
+// its delete event is applied.
+var errMessageGone = errors.New("message deleted in Proton")
+
 // fullMessage returns the message id with its body and attachments, from the
 // cache if possible.
 func (u *user) fullMessage(id string) (*protonmail.Message, error) {
@@ -89,7 +96,9 @@ func (u *user) fullMessage(id string) (*protonmail.Message, error) {
 		return msg, nil
 	}
 	msg, err := u.c.GetMessage(id)
-	if err != nil {
+	if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok && apiErr.Code == protonmail.CodeMessageDoesNotExist {
+		return nil, fmt.Errorf("%w: %v", errMessageGone, err)
+	} else if err != nil {
 		return nil, err
 	}
 	u.messages.put(msg)

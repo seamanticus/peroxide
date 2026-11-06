@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"slices"
 
+	"github.com/ProtonMail/go-crypto/openpgp"
 	pgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/backend/backendutil"
@@ -29,16 +31,73 @@ import (
 //
 // Clients (aerc's gpg and internal providers, Thunderbird, Evolution)
 // decrypt such a message with their own keys.
+//
+// Any other part that can't be decrypted is served as bridge does
+// (pkg/message/build_custom.go), so that nothing is lost and the client may
+// decrypt it: a body as an armored text part, an attachment as an armored
+// <name>.pgp file, each with an armor comment saying why.
 
-// passThrough reports whether the body of msg is a PGP message that none of
-// the account's keys opens, and must go to the client as it is. Read gives
+// passThrough reports whether msg goes to the client as PGP/MIME: its body is
+// a PGP message encrypted to no key of the account, unlocked or not, and it
+// has no attachments, which multipart/encrypted has no room for (bridge too
+// keeps PGP/MIME for messages without them, BuildRFC822Into). Read gives
 // ErrKeyIncorrect only for an armored PGP message, and before it reads any of
-// the encrypted data (go-crypto openpgp.ReadMessage), so the body itself is
-// left unread. Any other failure to decrypt is an error of its own, reported
-// when the body is read.
+// the encrypted data (go-crypto openpgp.ReadMessage). A body encrypted to an
+// account key that isn't unlocked isn't passed through: the user's own
+// client couldn't open it either.
 func (mbox *mailbox) passThrough(msg *protonmail.Message) bool {
+	if len(msg.Attachments) > 0 {
+		return false
+	}
 	_, err := msg.Read(mbox.u.privateKeys, nil)
-	return errors.Is(err, pgperrors.ErrKeyIncorrect)
+	if !errors.Is(err, pgperrors.ErrKeyIncorrect) {
+		return false
+	}
+	toAccount, err := mbox.encryptedToAccount(msg)
+	if err != nil {
+		log.Printf("cannot read the keys message %v is encrypted to: %v", msg.ID, err)
+		return false
+	}
+	return !toAccount
+}
+
+// encryptedToAccount reports whether the body of msg is encrypted to a key of
+// the account, unlocked or not. A hidden recipient (key ID 0) names no key.
+func (mbox *mailbox) encryptedToAccount(msg *protonmail.Message) (bool, error) {
+	keyIDs, err := msg.EncryptedTo()
+	if err != nil {
+		return false, err
+	}
+	account := mbox.u.accountKeys()
+	for _, id := range keyIDs {
+		if id != 0 && len(account.KeysById(id)) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// accountKeys returns every active key of the account and its addresses,
+// unlocked or not, as the API lists them: to tell mail encrypted to a key the
+// account has from mail encrypted to a key it doesn't.
+func (u *user) accountKeys() openpgp.EntityList {
+	keys := slices.Clone(u.u.Keys)
+	for _, addr := range u.addresses() {
+		keys = append(keys, addr.Keys...)
+	}
+	var entities openpgp.EntityList
+	for _, key := range keys {
+		if key.Active != 1 {
+			continue
+		}
+		e, err := key.Entity()
+		if err != nil {
+			log.Printf("cannot read key %v: %v", key.ID, err)
+			continue
+		}
+		entities = append(entities, e)
+	}
+	return entities
 }
 
 // passThroughBoundary is the boundary of the multipart/encrypted message:

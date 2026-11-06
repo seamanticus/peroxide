@@ -91,6 +91,45 @@ func (att *Attachment) Encrypt(ciphertext io.Writer, signed *openpgp.Entity) (cl
 	return symetricallyEncrypt(ciphertext, att.unencryptedKey, nil, hints, config)
 }
 
+// Decryptable reports whether a key of keyring opens the session key in the
+// key packets of att. Only those are read: nothing is downloaded. An
+// attachment that isn't encrypted is decryptable.
+func (att *Attachment) Decryptable(keyring openpgp.KeyRing) bool {
+	if len(att.KeyPackets) == 0 {
+		return true
+	}
+	packets := packet.NewReader(att.keyPackets())
+	for {
+		p, err := packets.Next()
+		if err != nil {
+			return false // io.EOF: no key opened any packet
+		}
+		ek, ok := p.(*packet.EncryptedKey)
+		if !ok {
+			continue
+		}
+		keys := keyring.KeysById(ek.KeyId)
+		if ek.KeyId == 0 {
+			keys = keyring.DecryptionKeys()
+		}
+		for _, k := range keys {
+			if k.PrivateKey != nil && !k.PrivateKey.Encrypted && ek.Decrypt(k.PrivateKey, nil) == nil {
+				return true
+			}
+		}
+	}
+}
+
+func (att *Attachment) keyPackets() io.Reader {
+	return base64.NewDecoder(base64.StdEncoding, strings.NewReader(att.KeyPackets))
+}
+
+// PGPMessage returns the attachment, with ciphertext its downloaded data, as
+// the PGP message it was received as: its key packets, then its data.
+func (att *Attachment) PGPMessage(ciphertext io.Reader) io.Reader {
+	return io.MultiReader(att.keyPackets(), ciphertext)
+}
+
 func (att *Attachment) Read(ciphertext io.Reader, keyring openpgp.KeyRing, prompt openpgp.PromptFunction) (*openpgp.MessageDetails, error) {
 	if len(att.KeyPackets) == 0 {
 		return &openpgp.MessageDetails{
@@ -99,9 +138,7 @@ func (att *Attachment) Read(ciphertext io.Reader, keyring openpgp.KeyRing, promp
 			UnverifiedBody: ciphertext,
 		}, nil
 	} else {
-		kpr := base64.NewDecoder(base64.StdEncoding, strings.NewReader(att.KeyPackets))
-		r := io.MultiReader(kpr, ciphertext)
-		return openpgp.ReadMessage(r, keyring, prompt, nil)
+		return openpgp.ReadMessage(att.PGPMessage(ciphertext), keyring, prompt, nil)
 	}
 }
 
