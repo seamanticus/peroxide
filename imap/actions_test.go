@@ -2,6 +2,7 @@ package imap
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -17,16 +18,20 @@ import (
 	"github.com/emersion/go-imap/responses"
 	imapserver "github.com/emersion/go-imap/server"
 
+	"github.com/seamanticus/peroxide/imap/database"
 	"github.com/seamanticus/peroxide/protonmail"
 )
 
 // fakeAPI answers message actions with a result per message: codes holds the
 // code of each message, 1000 when missing. gets answers GET requests by path,
-// with a status and a body. It records the requests made.
+// with a status and a body. labelIDs gives the labels of each message for the
+// metadata request (POST /mail/v4/messages overridden as GET). It records the
+// requests made.
 type fakeAPI struct {
-	t     *testing.T
-	codes map[string]int
-	gets  map[string]fakeResponse
+	t        *testing.T
+	codes    map[string]int
+	gets     map[string]fakeResponse
+	labelIDs map[string][]string
 
 	mu       sync.Mutex
 	requests []string
@@ -47,6 +52,10 @@ func (api *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", res.contentType)
 		w.WriteHeader(res.status)
 		io.WriteString(w, res.body)
+		return
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/mail/v4/messages" {
+		api.serveMetadata(w, r)
 		return
 	}
 	if r.Method != http.MethodPut || !strings.HasPrefix(r.URL.Path, "/messages/") {
@@ -79,6 +88,35 @@ func (api *fakeAPI) madeRequests() []string {
 	api.mu.Lock()
 	defer api.mu.Unlock()
 	return append([]string(nil), api.requests...)
+}
+
+// serveMetadata answers the metadata of the messages asked for by ID, those
+// in labelIDs.
+func (api *fakeAPI) serveMetadata(w http.ResponseWriter, r *http.Request) {
+	if got := r.Header.Get("X-HTTP-Method-Override"); got != http.MethodGet {
+		api.t.Errorf("metadata request overridden as %q, want GET", got)
+	}
+	var req struct{ ID []string }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.t.Errorf("decode metadata request: %v", err)
+	}
+	var msgs []*protonmail.Message
+	for _, id := range req.ID {
+		if labelIDs, ok := api.labelIDs[id]; ok {
+			msgs = append(msgs, &protonmail.Message{ID: id, LabelIDs: labelIDs})
+		}
+	}
+	b, err := json.Marshal(struct {
+		Code     int
+		Messages []*protonmail.Message
+	}{1000, msgs})
+	if err != nil {
+		api.t.Errorf("encode metadata response: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b)
 }
 
 // An update made before its folder is renamed in Proton names the mailbox as
@@ -239,6 +277,161 @@ func TestExpungeForgetsDeletedMessages(t *testing.T) {
 	}
 	if got := len(api.madeRequests()); got != 1 {
 		t.Errorf("made %v requests, want 1: the second EXPUNGE has nothing to delete", got)
+	}
+}
+
+// trashMessage is a read message in Trash.
+func trashMessage(id string) *protonmail.Message {
+	return &protonmail.Message{ID: id, LabelIDs: []string{protonmail.LabelTrash, protonmail.LabelAllMail}}
+}
+
+// addTestMailbox gives u a mailbox for labelID, synced with msgs.
+func addTestMailbox(t *testing.T, u *user, name, labelID string, msgs []*protonmail.Message) *mailbox {
+	t.Helper()
+	mboxDB := syncTestMailbox(t, u.db, labelID, msgs)
+	mbox := &mailbox{name: name, label: labelID, u: u, db: mboxDB, deleted: make(map[string]struct{}), initialized: true}
+	u.mailboxes[labelID] = mbox
+	return mbox
+}
+
+// EXPUNGE in Trash removes the message from Trash, then deletes it for good
+// only if no mailbox or label of the account still holds it.
+func TestExpungeFromTrash(t *testing.T) {
+	const (
+		unlabel  = "PUT /messages/unlabel"
+		metadata = "POST /mail/v4/messages"
+		labels   = "GET /labels"
+		del      = "PUT /messages/delete"
+	)
+	for _, tc := range []struct {
+		name string
+		// labelIDs are the message's labels in Proton after the unlabel; nil
+		// when Proton doesn't have it.
+		labelIDs     []string
+		listLabels   string // GET /labels body; empty when not expected
+		wantRequests []string
+		wantDeleted  bool
+	}{
+		{
+			name:         "only in All Mail",
+			labelIDs:     []string{protonmail.LabelAllMail, protonmail.LabelAllSent, protonmail.LabelAllDraft},
+			wantRequests: []string{unlabel, metadata, del},
+			wantDeleted:  true,
+		},
+		{
+			name:         "still in Trash",
+			labelIDs:     []string{protonmail.LabelTrash, protonmail.LabelAllMail},
+			wantRequests: []string{unlabel, metadata, del},
+			wantDeleted:  true,
+		},
+		{
+			name:         "in Inbox",
+			labelIDs:     []string{protonmail.LabelAllMail, protonmail.LabelInbox},
+			wantRequests: []string{unlabel, metadata},
+		},
+		{
+			name:         "in a label not known yet",
+			labelIDs:     []string{protonmail.LabelAllMail, "x"},
+			listLabels:   `{"Code":1000,"Labels":[{"ID":"x","Name":"x","Type":1}]}`,
+			wantRequests: []string{unlabel, metadata, labels},
+		},
+		{
+			name:         "in a label not listed",
+			labelIDs:     []string{protonmail.LabelAllMail, "x"},
+			listLabels:   `{"Code":1000,"Labels":[]}`,
+			wantRequests: []string{unlabel, metadata, labels, del},
+			wantDeleted:  true,
+		},
+		{
+			name:         "gone from Proton",
+			wantRequests: []string{unlabel, metadata},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeAPI{t: t, labelIDs: map[string][]string{}}
+			if tc.labelIDs != nil {
+				api.labelIDs["a"] = tc.labelIDs
+			}
+			if tc.listLabels != "" {
+				api.gets = map[string]fakeResponse{"/labels": {http.StatusOK, "application/json", tc.listLabels}}
+			}
+			inbox, sent := newActionTestMailbox(t, api, nil)
+			trash := addTestMailbox(t, inbox.u, "Trash", protonmail.LabelTrash, []*protonmail.Message{trashMessage("a")})
+
+			if err := trash.UpdateMessagesFlags(true, uidSet(1), imap.AddFlags, []string{imap.DeletedFlag}); err != nil {
+				t.Fatalf("UpdateMessagesFlags() = %v", err)
+			}
+			if err := trash.Expunge(); err != nil {
+				t.Fatalf("Expunge() = %v", err)
+			}
+			checkStatus(t, trash, 0, 0)
+			if got := api.madeRequests(); !slices.Equal(got, tc.wantRequests) {
+				t.Errorf("made requests %q, want %q", got, tc.wantRequests)
+			}
+			if updates := sent(); len(updates) != 1 {
+				t.Errorf("sent %v updates, want 1 EXPUNGE", len(updates))
+			} else if up, ok := updates[0].(*imapbackend.ExpungeUpdate); !ok || up.SeqNum != 1 {
+				t.Errorf("sent %#v, want EXPUNGE 1", updates[0])
+			}
+
+			_, err := inbox.u.db.Message("a")
+			if tc.wantDeleted && !errors.Is(err, database.ErrNotFound) {
+				t.Errorf("db.Message() = %v, want %v: deleted for good", err, database.ErrNotFound)
+			} else if !tc.wantDeleted && err != nil {
+				t.Errorf("db.Message() = %v, want the message kept", err)
+			}
+		})
+	}
+}
+
+// Every message is in All Mail, so EXPUNGE there could only delete them for
+// good: it is refused.
+func TestExpungeAllMailRefused(t *testing.T) {
+	api := &fakeAPI{t: t}
+	inbox, _ := newActionTestMailbox(t, api, nil)
+	all := addTestMailbox(t, inbox.u, "All Mail", protonmail.LabelAllMail, []*protonmail.Message{trashMessage("a")})
+
+	if err := all.UpdateMessagesFlags(true, uidSet(1), imap.AddFlags, []string{imap.DeletedFlag}); err != nil {
+		t.Fatalf("UpdateMessagesFlags() = %v", err)
+	}
+	if err := all.Expunge(); err == nil {
+		t.Error("Expunge() = nil, want an error")
+	}
+	checkStatus(t, all, 1, 0)
+	if got := api.madeRequests(); len(got) != 0 {
+		t.Errorf("made requests %q, want none", got)
+	}
+}
+
+func TestSearchMessages(t *testing.T) {
+	mbox, _ := newTestMailbox(t, []*protonmail.Message{inboxMessage("a", 1), inboxMessage("b", 0), inboxMessage("c", 1)})
+	if err := mbox.UpdateMessagesFlags(true, uidSet(3), imap.AddFlags, []string{imap.DeletedFlag}); err != nil {
+		t.Fatalf("UpdateMessagesFlags() = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		isUID    bool
+		criteria *imap.SearchCriteria
+		want     []uint32
+	}{
+		{"all", false, &imap.SearchCriteria{}, []uint32{1, 2, 3}},
+		{"unseen", false, &imap.SearchCriteria{WithoutFlags: []string{imap.SeenFlag}}, []uint32{1, 3}},
+		{"deleted by UID", true, &imap.SearchCriteria{WithFlags: []string{imap.DeletedFlag}}, []uint32{3}},
+		{"unseen, not deleted", false, &imap.SearchCriteria{
+			WithoutFlags: []string{imap.SeenFlag},
+			Not:          []*imap.SearchCriteria{{WithFlags: []string{imap.DeletedFlag}}},
+		}, []uint32{1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := mbox.SearchMessages(tc.isUID, tc.criteria)
+			if err != nil {
+				t.Fatalf("SearchMessages() = %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("SearchMessages() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

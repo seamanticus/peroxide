@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -774,7 +776,17 @@ func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string
 	return mbox.u.applyAction(apiIDs, failed, labelUpdate(mbox.label, false))
 }
 
+// Expunge removes the messages marked \Deleted from this mailbox, as
+// proton-bridge does (connector.go, removeMessagesFromMailboxWithUnlabelCall
+// OnFolders): it unlabels them, so they leave this mailbox and stay in the
+// others and in All Mail. Only from Trash and Drafts are they then deleted for
+// good, and only those that no other mailbox or label still shows
+// (expungeForGood). All Mail holds every message: nothing leaves it but by
+// leaving every other mailbox, so EXPUNGE there is refused.
 func (mbox *mailbox) Expunge() error {
+	if mbox.label == protonmail.LabelAllMail {
+		return errors.New("cannot expunge from All Mail: move the messages to Trash, or remove them from their mailboxes")
+	}
 	if err := mbox.init(); err != nil {
 		return err
 	}
@@ -784,29 +796,110 @@ func (mbox *mailbox) Expunge() error {
 		mbox.Unlock()
 		return nil // Nothing to do
 	}
-
-	apiIDs := make([]string, 0, len(mbox.deleted))
-
-	for apiID := range mbox.deleted {
-		apiIDs = append(apiIDs, apiID)
-	}
+	apiIDs := slices.Sorted(maps.Keys(mbox.deleted))
 	mbox.Unlock()
 
-	failed, err := mbox.u.c.DeleteMessages(apiIDs)
+	failed, err := mbox.u.c.UnlabelMessages(mbox.label, apiIDs)
 	if err != nil {
 		return err
 	}
 
-	// Deleted messages are gone: don't delete them again on the next EXPUNGE.
+	// Removed messages are gone from here: don't remove them again on the
+	// next EXPUNGE.
+	var removed []string
 	mbox.Lock()
 	for _, apiID := range apiIDs {
 		if err, ok := failed[apiID]; !ok || nothingToDo(err) {
 			delete(mbox.deleted, apiID)
+			removed = append(removed, apiID)
 		}
 	}
 	mbox.Unlock()
 
-	return mbox.u.applyDeleteAction(apiIDs, failed)
+	err = mbox.u.applyAction(apiIDs, failed, labelUpdate(mbox.label, false))
+	if mbox.label == protonmail.LabelTrash || mbox.label == protonmail.LabelDraft {
+		err = errors.Join(err, mbox.expungeForGood(removed))
+	}
+	return err
+}
+
+// expungeForGood deletes for good those of the messages apiIDs, just removed
+// from Trash or Drafts, that no mailbox or label of the account shows any
+// more. Labels Proton keeps for itself (All Mail, All Drafts, All Sent, All
+// Scheduled, and those peroxide shows nothing for) don't keep a message, as
+// in bridge; a label peroxide doesn't know yet is looked up (ListLabels) and
+// keeps it if it is a folder or a label. A message these requests fail for is
+// kept: it has left the mailbox, and stays in All Mail.
+func (mbox *mailbox) expungeForGood(apiIDs []string) error {
+	var forGood []string
+	var listed map[string]*protonmail.Label // labels from Proton, fetched once if needed
+	for chunk := range slices.Chunk(apiIDs, protonmail.MaxMessagesPerRequest) {
+		msgs, err := mbox.u.c.MessagesByID(chunk)
+		if err != nil {
+			return fmt.Errorf("cannot check what else holds the messages removed from %v, kept in All Mail: %w", mbox.Name(), err)
+		}
+		for _, msg := range msgs {
+			kept, err := mbox.u.keepsMessage(msg, mbox.label, &listed)
+			if err != nil {
+				return fmt.Errorf("cannot check what else holds the messages removed from %v, kept in All Mail: %w", mbox.Name(), err)
+			}
+			if kept == "" {
+				forGood = append(forGood, msg.ID)
+			} else {
+				log.Printf("Message %v left %v, not deleted: label %v still holds it", msg.ID, mbox.Name(), kept)
+			}
+		}
+	}
+	if len(forGood) == 0 {
+		return nil
+	}
+
+	log.Printf("Deleting %v messages for good, expunged from %v", len(forGood), mbox.Name())
+	failed, err := mbox.u.c.DeleteMessages(forGood)
+	if err != nil {
+		return fmt.Errorf("cannot delete the messages expunged from %v, kept in All Mail: %w", mbox.Name(), err)
+	}
+	return mbox.u.applyDeleteAction(forGood, failed)
+}
+
+// keepsMessage returns a label of msg, other than from, for which the message
+// must not be deleted for good, or "" if there is none. listed caches the
+// account's labels once fetched.
+func (u *user) keepsMessage(msg *protonmail.Message, from string, listed *map[string]*protonmail.Label) (string, error) {
+	for _, labelID := range msg.LabelIDs {
+		switch labelID {
+		case from, protonmail.LabelAllMail, protonmail.LabelAllDraft, protonmail.LabelAllSent, protonmail.LabelAllScheduled:
+			continue
+		}
+		if u.showsLabel(labelID) {
+			return labelID, nil
+		}
+		if *listed == nil {
+			labels, err := u.c.ListLabels()
+			if err != nil {
+				return "", fmt.Errorf("cannot list labels: %w", err)
+			}
+			*listed = make(map[string]*protonmail.Label, len(labels))
+			for _, label := range labels {
+				(*listed)[label.ID] = label
+			}
+		}
+		// GET /labels lists folders and labels, not Proton's own: a label
+		// missing from it is one of those, which keeps nothing.
+		if label, ok := (*listed)[labelID]; ok && label.Type == protonmail.LabelMessage {
+			return labelID, nil
+		}
+	}
+	return "", nil
+}
+
+// showsLabel reports whether labelID is a mailbox or a flag of the account.
+func (u *user) showsLabel(labelID string) bool {
+	u.Lock()
+	defer u.Unlock()
+	_, isMailbox := u.mailboxes[labelID]
+	_, isFlag := u.flags[labelID]
+	return isMailbox || isFlag
 }
 
 func (mbox *mailbox) Poll() error {
