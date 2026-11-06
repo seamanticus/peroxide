@@ -1,0 +1,19 @@
+version: "2"
+linters:
+  default: none
+  enable:
+    - exhaustive
+  settings:
+    exhaustive:
+      check:
+        - switch
+        - mapliteral
+      # Enum sentinels (unexported <type>Count) are not cases.
+      ignore-constants:
+        - '\.[a-z][A-Za-z0-9]*Count$'
+      # Flag sets are not enums.
+      ignore-types:
+        - 'Flags$'
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
