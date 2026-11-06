@@ -50,6 +50,12 @@ after it reconnects). go-imap can send an unsolicited LIST
      still reaches one label only. Sorting `getMailbox` the same way
      would make SELECT stable without removing the collision; the naming
      below removes it.
+   - A folder named "Inbox", "inbox" or any case of INBOX can't be
+     opened: go-imap rewrites that name to `INBOX` (RFC 3501 section
+     5.1, `imap.CanonicalMailboxName`) in SELECT, EXAMINE, STATUS, COPY,
+     APPEND, CREATE, DELETE and RENAME (go-imap commands/*.go) before the
+     backend sees it, so every one reaches the real INBOX. LIST still
+     shows the folder. The `Folders/` prefix below removes this too.
    - proton-bridge names folders `Folders/<Path>` and labels
      `Labels/<Path>`, labels being mailboxes there, not flags
      (`GetMailboxName`, internal/services/imapservice/imap_updates.go).
@@ -68,6 +74,16 @@ after it reconnects). go-imap can send an unsolicited LIST
    does, handle it as a delete then a create.
 3. A folder deleted while a client has it selected gives that client
    errors on its next command, instead of a BYE or a closed mailbox.
+   Updates still reach it: `mailboxUpdate.Mailbox` (imap/actions.go)
+   reads the deleted `*mailbox`'s name when go-imap delivers, so a
+   client with that name selected gets EXISTS or EXPUNGE for a mailbox
+   whose bucket is gone, and its next FETCH fails with "cannot find
+   mailbox bucket" (`database.Mailbox.bucket`). Fix with the BYE: on
+   delete, send the connections that have it selected an unsolicited
+   `BYE` (go-imap has no backend update for it; it needs the
+   `Extension` of imap/extension.go to keep each connection) or answer
+   their commands NO [NONEXISTENT] (RFC 5530). Test: an update made after
+   the delete reaches no client.
 4. Check live with a label (not a folder): create, rename and delete one
    while peroxide runs with `-debug`, and check the logs
    `Label ... created/renamed`. Folders were checked on 2026-11-04/05.
@@ -116,7 +132,16 @@ go-proton-api message_import.go), with:
    with BAD before it is read; one within it but whose encrypted import
    exceeds 50 MB still needs NO [TOOBIG] from CreateMessage.
 
-## 4. (done: `-debug` is the raw mode, to one stream)
+## 4. (done: `-debug` is the raw mode, to one stream; described in docs/debug.md)
+
+Left open: the request line logs `req.URL.RequestURI()`
+(protonmail/protonmail.go, `newRequest`) unredacted, so query values
+reach the log: `Email` of public-key lookups (protonmail/keys.go),
+`Address` of `/messages/count`, and `ListMessages` filters. Message and
+label IDs are in paths. None is a credential; docs/debug.md says so.
+If logs are ever to be shared without editing, redact query values
+whose key is `Email` or `Address`, as `redactedJSONFields` does for
+bodies. Test: a `GetPublicKeys` request logs `Email=<removed>`.
 
 ## 5. (done: import-messages and export-messages removed; clients use APPEND and FETCH)
 
@@ -596,6 +621,39 @@ Found in the 2026-11-06 audit; none is from branch `labels-events`.
    API counts current (`fetchCounts`, already done). Test: a create
    event for an unsynced mailbox sends no update; STATUS stays on API
    counts until SELECT.
+6. **go-imap does not keep the order of updates.** Its update loop
+   (go-imap server.go, `listenUpdates`) starts one goroutine per update
+   and connection and takes the next update at once, so two updates for
+   one connection race to its response channel. `sendUpdates`
+   (imap/actions.go) queues all of an action's updates before waiting
+   for any, and `receiveEvents` (imap/user.go) all of a page's. For
+   EXPUNGE the order is the meaning: messages 1 and 3 removed are sent
+   as `EXPUNGE 1` then `EXPUNGE 2` (each renumbers what follows, RFC
+   3501 section 7.4.1); reversed, the client removes 2 then 1, the
+   wrong message, and its view is off until it reselects. EXISTS before
+   FETCH, and FETCH FLAGS after the EXPUNGE that renumbered it, race the
+   same way. Fix: in both places wait for each update's `Done()` before
+   queueing the next (a few ms per update on a local client; one
+   connection blocked on writing then delays the next update for all, as
+   it already delays `Done`). Test: an action expunging seq 1 and 3 hands
+   go-imap the second only after the first is done (a fake updates
+   channel that does not close Done until told).
+7. **Untagged EXPUNGE during FETCH, STORE or SEARCH.** RFC 3501 section
+   7.4.1 forbids it while a command not using UIDs runs (sequence
+   numbers would shift under it), and section 5.5 asks the server to
+   wait for the end of such a command. go-imap sends updates whenever
+   they come, and event pages are applied at any time. Fix: hold
+   EXPUNGE (not EXISTS or FETCH) for a connection while it runs a
+   non-UID FETCH, STORE or SEARCH, in the `Extension` (which already
+   replaces FETCH) or in NOTIFY's per-connection state
+   (notify_design.md). Test: an EXPUNGE update during a FETCH reaches
+   the client after its tagged OK.
+8. **No UIDPLUS, no UNSEEN in SELECT.** COPY and MOVE answer without
+   `COPYUID` (RFC 4315, RFC 6851 section 4.3), so clients that cache by
+   UID look the copies up again; `Status` sets `UnseenSeqNum = 0 //
+   TODO` (imap/mailbox.go), so SELECT has no `[UNSEEN n]`. Both need
+   the UIDs to persist first (section 9.1): a COPYUID naming UIDs the
+   next session reassigns would mislead the client's cache.
 
 ## 12. Nits from the 2026-11-06 audit
 
@@ -663,3 +721,73 @@ Small, independent, found reviewing branch `labels-events`.
    correct the docs or move peroxide to the `core/v4` path, checking it
    with a `-debug` log first.
 9. (done: `go fix ./...` applied, `go fix -diff ./...` prints nothing)
+10. **What Proton answers for an expired event ID.** Since 5d1595f the
+    receiver restarts from the latest event (and rebuilds every mailbox)
+    only for a 400, 404 or 422 whose code is 2001, 2061 or 2501
+    (`refused`, events/events.go), the codes Proton's web client names
+    for an invalid value, ID or object; the answer for an ID Proton has
+    expired was never observed. Check: with peroxide stopped, set the
+    stored ID to one from weeks ago or to `AAAA` (bolt bucket `events`,
+    key `last`, of `<user>.db`), run `peroxide -debug serve`, log in, and
+    record the status and Code of `GET /events/...`. If it is none of
+    those, add it to `refused` and to `TestRefused`; if it is a 2xx with
+    `Refresh` set, nothing to do (`EventRefreshMail` is handled).
+11. **MOVE out of Starred still makes two requests.** `MoveMessages`
+    always labels then unlabels. Into a folder Proton has already moved
+    the message out of the source folder by the label, so the unlabel
+    answers "does not exist" for each message: a wasted 0.4 s round
+    trip. proton-bridge skips the unlabel when the destination is a
+    folder or system mailbox and the source is not a label
+    (`moveMessagesWithoutUnlabelCallOnFolders`, connector.go), and keeps
+    it behind a feature flag because removing it broke clients (its
+    BRIDGE-451 comment). Measure on a `-debug` log before changing it.
+
+## 13. Make error handling congruent across the code
+
+A sweep, when nothing else touches these files, so that every error is
+handled the one way AGENTS.md asks. Found in the 2026-11-07 audit; the
+files named are the ones the sweep starts from, not a complete list.
+
+1. **`errors.As` to `errors.AsType`.** captcha/captcha.go
+   (`IsHumanVerificationRequired` check) and imap/actions.go
+   (`nothingToDo`) still declare a target and call `errors.As`. `go
+   fix` rewrites only the `var x T; if errors.As(err, &x) {` statement
+   form, so these, in expressions, stay. Rewrite each as
+   `apiErr, ok := errors.AsType[*protonmail.APIError](err)`.
+2. **`%v` where `%w` belongs.** About 40 `fmt.Errorf` calls format the
+   cause with `%v` or `%s`, cutting the chain `errors.Is` and
+   `errors.AsType` follow: auth/auth.go (every auth file error),
+   protonmail/srp.go, protonmail/auth.go, protonmail/keys.go,
+   smtp/smtp.go, the draft path of imap/message.go (`createMessage`),
+   config/tls.go, captcha/server.go and captcha/browser.go. So a
+   `*protonmail.APIError` returned through `smtp.go`'s "cannot send
+   message" can't be told from any other failure, and the SMTP reply
+   can't depend on its code. Grep: `Errorf(.*%[sv]".*err)`.
+3. **Comparing errors with `==`.** `err == io.EOF`
+   (protonmail/messages.go, smtp/smtp.go, imap/message.go),
+   `err == ErrNotFound` (imap/database/user.go, and the imap tests),
+   `err == errUsedSession || err == errExpiredSession`
+   (captcha/server.go). Each works today because the error is returned
+   unwrapped; `errors.Is` keeps working once one is wrapped.
+4. **Messages.** Prefixes mix "cannot", "failed to" and "unable"
+   ("unable read CA file" lacks its "to"). Pick "cannot <verb> <what>:
+   %w", the most common form, and say what failed in the caller's
+   terms, as `fmt.Errorf("open config: %w", err)` in AGENTS.md.
+5. **Returned without context.** About 250 bare `return err` (and
+   `return nil, err`). Most are right (the callee already says what
+   failed), but those returning a database or HTTP error straight to
+   go-imap reach the client as "NO <bolt or net error>" with no
+   mailbox or message named: imap/mailbox.go (`fromSeqSet`,
+   `fetchMessage`, `SearchMessages`) and imap/database. Wrap those
+   with what was being done.
+6. **Logged and dropped.** Some failures are only logged: an address or
+   label event that can't be applied (imap/addresses.go,
+   imap/user.go `createLabel`, `deleteLabel`), a counts request after
+   an event, the delete for good after EXPUNGE (by design since
+   87d4da7: the command did what it said). List each with why it can't
+   propagate, in a comment at the site, so the next reader doesn't
+   "fix" it.
+
+Tests: none of this changes behaviour but item 2, whose test is one
+per changed path that a wrapped `*protonmail.APIError` is found with
+`errors.AsType` by the caller (e.g. SMTP send failing with code 2028).
