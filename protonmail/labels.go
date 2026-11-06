@@ -15,6 +15,9 @@ const (
 	LabelSent     = "7"
 	LabelDraft    = "8"
 	LabelStarred  = "10"
+	// LabelAllScheduled holds the messages scheduled to be sent. peroxide
+	// shows no mailbox for it.
+	LabelAllScheduled = "12"
 )
 
 type LabelType int

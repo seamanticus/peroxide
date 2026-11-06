@@ -418,6 +418,52 @@ func (c *Client) DeleteMessages(ids []string) (failed map[string]error, err erro
 	return c.doMessages("delete", ids)
 }
 
+// MaxMessagesPerRequest is the most message IDs one request should carry
+// (go-proton-api maxPageSize).
+const MaxMessagesPerRequest = 150
+
+// maxStaleRetries bounds how often MessagesByID asks again while Proton says
+// its answer is stale.
+const maxStaleRetries = 5
+
+// MessagesByID returns the metadata (labels, flags; no body) of the messages
+// ids, at most MaxMessagesPerRequest, as Proton has them now. Messages it
+// doesn't have are left out. The request is go-proton-api's
+// GetMessageMetadataPage: a POST overridden as GET with the filter as body.
+func (c *Client) MessagesByID(ids []string) ([]*Message, error) {
+	if len(ids) > MaxMessagesPerRequest {
+		return nil, fmt.Errorf("cannot get %v messages in one request, at most %v", len(ids), MaxMessagesPerRequest)
+	}
+	reqData := struct {
+		ID       []string
+		Desc     int
+		Page     int
+		PageSize int
+		Sort     string
+	}{ids, 0, 0, MaxMessagesPerRequest, "ID"}
+
+	for range maxStaleRetries {
+		req, err := c.newJSONRequest(http.MethodPost, "/mail/v4/messages", &reqData)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("X-HTTP-Method-Override", http.MethodGet)
+
+		var respData struct {
+			resp
+			Messages []*Message
+			Stale    int
+		}
+		if err := c.doJSON(req, &respData); err != nil {
+			return nil, err
+		}
+		if respData.Stale == 0 {
+			return respData.Messages, nil
+		}
+	}
+	return nil, fmt.Errorf("messages still stale after %v requests", maxStaleRetries)
+}
+
 // UndeleteMessages restores deleted messages, and returns the error of each
 // one it failed for.
 func (c *Client) UndeleteMessages(ids []string) (failed map[string]error, err error) {
