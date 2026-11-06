@@ -38,9 +38,18 @@ after it reconnects). go-imap can send an unsolicited LIST
      (go-proton-api splits it); peroxide decodes neither `Path` nor
      `ParentID`.
    - Two folders with the same name, at different levels or matching a
-     system mailbox ("Sent"), collide in `user.getMailbox`, which picks
-     one in map order. Two labels mapping to the same flag ("To do" and
-     "To_do") collide the same way in `user.getFlag`.
+     system mailbox ("Sent"), collide in `user.getMailbox`
+     (imap/user.go), which ranges over `u.mailboxes` and returns the
+     first match in map order: which one a SELECT opens can change from
+     one command to the next. `user.ListMailboxes` lists them in map
+     order too (LIST output order varies; harmless alone, but the
+     duplicate name appears twice). Two labels mapping to the same flag
+     ("To do" and "To_do", or since 1dfcddc "Work" and "work", as flags
+     now match without case) collide in `user.getFlag`, which since
+     1dfcddc tries labels in sorted ID order, so it is deterministic but
+     still reaches one label only. Sorting `getMailbox` the same way
+     would make SELECT stable without removing the collision; the naming
+     below removes it.
    - proton-bridge names folders `Folders/<Path>` and labels
      `Labels/<Path>`, labels being mailboxes there, not flags
      (`GetMailboxName`, internal/services/imapservice/imap_updates.go).
