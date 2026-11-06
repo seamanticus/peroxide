@@ -9,7 +9,6 @@ type EventRefresh int
 
 const (
 	EventRefreshMail EventRefresh = 1 << iota
-	EventRefreshContacts
 )
 
 type Event struct {
@@ -19,9 +18,7 @@ type Event struct {
 	More     int
 	Refresh  EventRefresh
 	Messages []*EventMessage
-	Contacts []*EventContact
-	//ContactEmails
-	Labels []*EventLabel
+	Labels   []*EventLabel
 	//User
 	Addresses []*EventAddress
 	//Members
@@ -162,12 +159,6 @@ func (em *EventMessage) UnmarshalJSON(b []byte) error {
 	}
 	// An action added by Proton since: kept for the caller to report.
 	return nil
-}
-
-type EventContact struct {
-	ID      string
-	Action  EventAction
-	Contact *Contact
 }
 
 // EventLabel is a folder or label created, updated or deleted. Label is nil

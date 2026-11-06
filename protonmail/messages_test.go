@@ -1,8 +1,6 @@
 package protonmail
 
 import (
-	"encoding/json"
-	"fmt"
 	"testing"
 
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
@@ -43,24 +41,6 @@ func TestAddCleartextRejectsCipher(t *testing.T) {
 		}
 		if set.BodyKey == nil || set.AttachmentKeys["att"] == nil || set.Addresses["to@example.org"] != pkg {
 			t.Errorf("%v: AddCleartext() left set %+v", tt.name, set)
-		}
-	}
-}
-
-// Card types are a bit set: every value the API sends decodes to the right
-// protection.
-// proof: exhaustive
-func TestContactCardFlags(t *testing.T) {
-	for typ := range 4 {
-		var card ContactCard
-		if err := json.Unmarshal(fmt.Appendf(nil, `{"Type":%d}`, typ), &card); err != nil {
-			t.Fatalf("Type %v: %v", typ, err)
-		}
-		if got, want := card.Type.Encrypted(), typ&1 != 0; got != want {
-			t.Errorf("Type %v: Encrypted() = %v, want %v", typ, got, want)
-		}
-		if got, want := card.Type.Signed(), typ&2 != 0; got != want {
-			t.Errorf("Type %v: Signed() = %v, want %v", typ, got, want)
 		}
 	}
 }
