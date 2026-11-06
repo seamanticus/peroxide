@@ -88,6 +88,25 @@ func checkStatus(t *testing.T, mbox *mailbox, wantMessages, wantUnseen uint32) {
 	}
 }
 
+// FLAGS and PERMANENTFLAGS list label flags by label ID, not in map order:
+// with this many labels, map order would differ between runs.
+// evidence: witnesses
+func TestStatusFlagsSorted(t *testing.T) {
+	mbox, _ := newTestMailbox(t, nil)
+	mbox.u.flags = map[string]string{"e": "E", "a": "A", "d": "D", "b": "B", "c": "C", "f": "F"}
+	status, err := mbox.Status([]imap.StatusItem{imap.StatusMessages})
+	if err != nil {
+		t.Fatalf("Status() = %v", err)
+	}
+	want := []string{imap.SeenFlag, imap.DeletedFlag, "A", "B", "C", "D", "E", "F"}
+	if !slices.Equal(status.Flags, want) {
+		t.Errorf("Flags = %v, want %v", status.Flags, want)
+	}
+	if !slices.Equal(status.PermanentFlags, want) {
+		t.Errorf("PermanentFlags = %v, want %v", status.PermanentFlags, want)
+	}
+}
+
 // Proton's events carry no message counts, so counts cached at login go stale:
 // STATUS must follow the local database, which events keep up to date.
 func TestStatusFollowsEvents(t *testing.T) {

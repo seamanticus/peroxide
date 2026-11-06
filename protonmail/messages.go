@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -654,7 +656,10 @@ func (set *MessagePackageSet) AddCleartext(addr string) (*MessagePackage, error)
 		}
 
 		attachmentKeys := make(map[string]*PackedKey, len(set.attachmentKeys))
-		for att, key := range set.attachmentKeys {
+		// In attachment ID order, so a failure names the same attachment
+		// every time.
+		for _, att := range slices.Sorted(maps.Keys(set.attachmentKeys)) {
+			key := set.attachmentKeys[att]
 			if attachmentKeys[att], err = packKey(key); err != nil {
 				return nil, fmt.Errorf("cannot pack key of attachment %v: %w", att, err)
 			}
@@ -701,7 +706,9 @@ func (set *MessagePackageSet) AddInternal(addr string, pub *openpgp.Entity) (*Me
 	}
 
 	attachmentKeys := make(map[string]string, len(set.attachmentKeys))
-	for att, key := range set.attachmentKeys {
+	// In attachment ID order, as AddCleartext.
+	for _, att := range slices.Sorted(maps.Keys(set.attachmentKeys)) {
+		key := set.attachmentKeys[att]
 		attKey, err := serializeEncryptedKey(key, encKey.PublicKey, config)
 		if err != nil {
 			return nil, err

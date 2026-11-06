@@ -99,9 +99,11 @@ func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error
 	mbox.u.Lock()
 	flags := []string{imap.SeenFlag, imap.DeletedFlag}
 	permFlags := []string{imap.SeenFlag, imap.DeletedFlag}
-	for _, flag := range mbox.u.flags {
-		flags = append(flags, flag)
-		permFlags = append(permFlags, flag)
+	for _, label := range slices.Sorted(maps.Keys(mbox.u.flags)) {
+		// By label ID, not map order: FLAGS and PERMANENTFLAGS read the same
+		// on every SELECT.
+		flags = append(flags, mbox.u.flags[label])
+		permFlags = append(permFlags, mbox.u.flags[label])
 	}
 	mbox.u.Unlock()
 
