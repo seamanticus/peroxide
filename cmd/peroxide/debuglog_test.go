@@ -6,13 +6,17 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/emersion/go-imap/backend/memory"
 	imapserver "github.com/emersion/go-imap/server"
+	"github.com/emersion/go-smtp"
 
 	"github.com/seamanticus/peroxide/protonmail"
 )
@@ -353,6 +357,140 @@ func (l *pipeListener) Close() error {
 }
 
 func (l *pipeListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+// testSMTPSession accepts nothing: the stream test only greets and quits.
+type testSMTPSession struct{}
+
+func (testSMTPSession) Reset()                               {}
+func (testSMTPSession) Logout() error                        { return nil }
+func (testSMTPSession) Mail(string, *smtp.MailOptions) error { return smtp.ErrAuthRequired }
+func (testSMTPSession) Rcpt(string, *smtp.RcptOptions) error { return smtp.ErrAuthRequired }
+func (testSMTPSession) Data(io.Reader) error                 { return smtp.ErrAuthRequired }
+
+// readReply reads one IMAP response up to its tagged line, or one SMTP reply
+// up to its last line, and returns that line.
+func readReply(t *testing.T, r *bufio.Reader, last func(string) bool) string {
+	t.Helper()
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read reply: %v", err)
+		}
+		if last(line) {
+			return line
+		}
+	}
+}
+
+// TestDebugSharesOneStream wires the API client, an IMAP server and an SMTP
+// server as main does with -debug: all three log through log.Writer(). Their
+// traffic, interleaved, must reach that one writer in the order it happened.
+func TestDebugSharesOneStream(t *testing.T) {
+	var logged lockedBuffer
+	oldWriter, oldFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logged)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	}()
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"Code":1000,"Labels":[]}`))
+	}))
+	defer api.Close()
+	c := &protonmail.Client{RootURL: api.URL, AppVersion: "Other", Debug: true}
+	callAPI := func() {
+		t.Helper()
+		if _, err := c.ListLabels(); err != nil {
+			t.Fatalf("ListLabels() = %v", err)
+		}
+	}
+
+	imapServer := imapserver.New(memory.New())
+	imapServer.AllowInsecureAuth = true
+	imapServer.Enable(imapDebugExtension{w: log.Writer()})
+	imapListener := &pipeListener{conns: make(chan net.Conn), done: make(chan struct{})}
+	imapServed := make(chan error, 1)
+	go func() { imapServed <- imapServer.Serve(imapListener) }()
+	defer func() {
+		if err := imapServer.Close(); err != nil {
+			t.Errorf("IMAP Close() = %v", err)
+		}
+		<-imapServed
+	}()
+
+	smtpServer := smtp.NewServer(smtp.BackendFunc(func(*smtp.Conn) (smtp.Session, error) {
+		return testSMTPSession{}, nil
+	}))
+	smtpServer.Domain = "localhost"
+	smtpListener := &pipeListener{conns: make(chan net.Conn), done: make(chan struct{})}
+	smtpServed := make(chan error, 1)
+	go func() { smtpServed <- smtpServer.Serve(smtpDebugListener{Listener: smtpListener, w: log.Writer()}) }()
+	defer func() {
+		if err := smtpServer.Close(); err != nil {
+			t.Errorf("SMTP Close() = %v", err)
+		}
+		<-smtpServed
+	}()
+
+	callAPI()
+
+	client, server := net.Pipe()
+	imapListener.conns <- server
+	br := bufio.NewReader(client)
+	if _, err := br.ReadString('\n'); err != nil {
+		t.Fatalf("read IMAP greeting: %v", err)
+	}
+	for _, cmd := range []string{"a1 LOGIN username password", "a2 SELECT INBOX"} {
+		if _, err := client.Write([]byte(cmd + "\r\n")); err != nil {
+			t.Fatalf("write %q: %v", cmd, err)
+		}
+		tag := cmd[:3]
+		line := readReply(t, br, func(l string) bool { return strings.HasPrefix(l, tag) })
+		// go-imap logs what it sends after sending it.
+		logged.waitFor(line)
+	}
+	client.Close()
+
+	callAPI()
+
+	client, server = net.Pipe()
+	smtpListener.conns <- server
+	br = bufio.NewReader(client)
+	smtpLast := func(l string) bool { return len(l) >= 4 && l[3] == ' ' }
+	readReply(t, br, smtpLast)
+	for _, cmd := range []string{"EHLO test", "QUIT"} {
+		if _, err := client.Write([]byte(cmd + "\r\n")); err != nil {
+			t.Fatalf("write %q: %v", cmd, err)
+		}
+		// smtpDebugConn logs each reply before sending it.
+		readReply(t, br, smtpLast)
+	}
+	client.Close()
+
+	callAPI()
+
+	got := logged.String()
+	pos := 0
+	for _, want := range []string{
+		">> GET /labels\n", "<< GET /labels 200 OK\n",
+		"* OK ", "a1 LOGIN " + r + "\r\n", "a1 OK ", "a2 SELECT INBOX\r\n", "a2 OK ",
+		">> GET /labels\n", "<< GET /labels 200 OK\n",
+		"220 localhost", "EHLO test\r\n", "250 ", "QUIT\r\n", "221 ",
+		">> GET /labels\n", "<< GET /labels 200 OK\n",
+	} {
+		i := strings.Index(got[pos:], want)
+		if i < 0 {
+			t.Fatalf("log has no %q after byte %v:\n%v", want, pos, got)
+		}
+		pos += i + len(want)
+	}
+	if strings.Contains(got, "username password") {
+		t.Errorf("log discloses the IMAP password:\n%v", got)
+	}
+}
 
 // TestIMAPDebugExtension runs a go-imap server with the extension, as
 // listenAndServeIMAP does, and logs in through it.
