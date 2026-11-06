@@ -132,15 +132,63 @@ go-proton-api message_import.go), with:
    APPENDs to Sent (aerc `copy-to`) would create a second copy.
 4. Tests (imap): the label IDs and flags sent for INBOX, Sent, a custom
    folder and Drafts; All Mail refused; a literal over APPENDLIMIT gets
-   TOOBIG before any request.
+   TOOBIG before any request. Since a882fe3 a literal over
+   `imap.MaxLiteralSize` (= APPENDLIMIT) is refused by go-imap's reader
+   with BAD before it is read; one within it but whose encrypted import
+   exceeds 50 MB still needs NO [TOOBIG] from CreateMessage.
 
 ## 4. Debug Raw
 
 Make an educated decision into droping `-debug` in favour of `-debug-raw`. The raw dump of debug with API keys scrubbed from the flag '-debug-raw' has proven invaluable to all previous implementations, whilst '-debug' only presents a security threat.
 
+**Goal.** Unwire `-debug`; `-debug-raw` takes its place (under that name
+or as the new meaning of `-debug`, to be decided), being the more
+comprehensive of the two and scrubbing credentials.
+
+**Facts (2026-11-06 audit).**
+
+- Both modes redact with the same key list (`redactedJSONFields`,
+  protonmail/redact.go): `-debug` logs the response as decoded into
+  peroxide's structs (`redactValueOf`), so it shows only what peroxide
+  decodes; `-debug-raw` logs it as received (`redactJSON`), every field,
+  and withholds any body that isn't JSON. So `-debug-raw` exposes a
+  superset of `-debug`: the security argument above is about coverage
+  of the key list, not the mode. Before dropping `-debug`, audit the
+  key list against fields only the raw mode shows (e.g. `Signature`,
+  `KeyPackets`, `Token` variants, `Body`: message bodies are armored
+  ciphertext, but drafts and contacts carry other material).
+- IMAP traffic goes to stdout (cmd/peroxide/main.go, `imapDebugExtension`
+  with `os.Stdout`; SMTP likewise), API traffic through `log`, so to
+  stderr. A capture needs `2>&1` today.
+- go-imap v1.2.1 reads AUTHENTICATE's SASL lines and IDLE's `DONE` from
+  the raw connection (`bufio.NewScanner(conn)`), past the debug tee: they
+  never reach the log (TestIMAPDebugExtension pins this).
+
+**Steps.**
+
+1. With `-debug-raw`, send the IMAP and SMTP traces and the `log`
+   output to one stream, stdout (`log.SetOutput(os.Stdout)` when the
+   flag is set, before any server starts), so one redirect captures the
+   whole session in order. Check line atomicity then: `log` writes
+   each entry in one Write, and the scrubbers write whole lines per
+   call, but a large literal logged in one Write could still be split
+   by the OS between other writers' lines; a shared mutex around both
+   writers removes the doubt.
+2. Remove `-debug` (or alias it to the raw mode) and its decoded-value
+   logging (`redactValueOf` in doJSON); update the usage text.
+3. Tests: with the flag, a request's `<<` line and an IMAP command reach
+   the same writer, in order.
+
 ## 5. Import / Export
 
 Perform an analysis of what schema is utilised in both procedures and verify if it is currently compliant with Proton API.
+
+**Direction.** This feature will probably be removed, leaving import and
+export to IMAP clients (APPEND, FETCH; see section 3). Noted on
+2026-11-06: `go vet` fails on exports/messages.go:30 (`mail.Header` and
+`message.Header` struct literals with unkeyed fields, from 2020), and
+`go fix -diff` reports old idioms across protonmail/, config/ and
+captcha/. Fix the vet failure only if the feature stays.
 
 ## 6. Captcha solution
 
@@ -158,6 +206,13 @@ unlocked when peroxide restarts" and stays locked until then: mail
 encrypted to it fails to decrypt, and drafts from that address fail with
 "sender address key hasn't been decrypted". The SMTP session's address
 list (smtp/smtp.go, `session.addrs`) isn't refreshed at all.
+
+Since d6657fd such mail is served, not failed: its body as an armored
+text part whose armor Comment says the key isn't unlocked, its
+attachments as `<name>.pgp`, and it is no longer passed through as
+PGP/MIME (it is encrypted to an account key the user's gpg lacks). A key
+that failed to unlock at login (`unlockKeyRing` logs "failed to unlock
+key" and skips it) gives the same.
 
 **Constraint.** Don't keep the mailbox password, or anything that
 unlocks keys, in memory for the session.
@@ -252,6 +307,34 @@ not in the 32-message memory cache (`messageCache`, imap/cache.go). The
 A folder of 500 messages opened for the first time in a session waits
 for 500 sequential requests, and again after every restart: the cache
 is in memory only.
+
+**More found in the 2026-11-06 audit.**
+
+- `BODY.PEEK[HEADER]` and `HEADER.FIELDS` cost a request too: since
+  f82e989 `fetchBodySection` gets the full message for every section,
+  as the top-level Content-Type depends on pass-through. Before, a
+  header fetch of a message without attachments needed none. So does
+  every section of a message that isn't a PGP message at all.
+- The cache holds 32 messages, fewer than one aerc list batch (the
+  default `aerc` window is 50 and more on a tall terminal): listing
+  evicts the messages just listed, and opening one downloads it again.
+- Each item of one FETCH decrypts again: `passThrough` (msg.Read, the
+  session key; since d6657fd also the key packets, and every account
+  key parsed from armor, `accountKeys`), then BODYSTRUCTURE decrypts and
+  quoted-printable-encodes the whole body to give its size and line
+  count (`encodedInlinePart`), then `BODY[]` decrypts it once more.
+  `BODYSTRUCTURE BODY.PEEK[]` of one message is three decryptions.
+- What would make header fetches and BODYSTRUCTURE DB-only again,
+  without storing bodies: on first full fetch, store in the message's
+  bolt record the pass-through decision, the inline part's header
+  (type, encoding: it differs for the armored fallback), its encoded
+  size and line count, and per attachment whether it is decryptable.
+  That is step 1's second option, narrowed; it must be invalidated as
+  step 5 says, and cleared when keys change (a restart unlocking a new
+  key turns an armored fallback into a decrypted body).
+- Attachment `Size` in BODYSTRUCTURE is the decrypted size from the
+  API, not the base64 size sent (RFC 3501 section 7.4.2, size "in its
+  transfer encoding"); the inline part does it right. Fix with step 1.
 
 **How proton-bridge does it** (internal/services/syncservice): one sync
 after login, as a pipeline of four stages, persisted and resumable:
@@ -399,6 +482,33 @@ marks connected clients' state invalid so they get BYE and reconnect).
    next UID; one removed is expunged; a Refresh changes UIDVALIDITY and
    restarts UIDs; STATUS UIDVALIDITY matches SELECT.
 
+**Found in the 2026-11-06 audit; both get worse once syncs stop.**
+
+- A message event that fails to apply is lost for good. In
+  `receiveEvents` (imap/user.go) a create, update or delete that fails
+  in the database (`cannot handle create event ...`) is only logged,
+  and the page's ID is stored anyway (`SetLastEventID` after the page),
+  so the next session resumes after it. Today the resync of every
+  mailbox at its first use each session repairs it. With step 5 it
+  stays wrong until a full listing. Step 7: count the messages a page
+  failed to apply and, if any, store the page ID but mark the mailboxes
+  they belong to (by label ID) as needing a listing (the stored "synced"
+  flag of step 1 cleared), so their next use relists them; test that
+  a failed create makes the next session list INBOX.
+- `user.syncSem` (commit c3dc632) is one slot for the whole account,
+  held for a whole `mailbox.sync`: one request per 150 messages, so
+  minutes for a first sync of All Mail. Meanwhile every event page
+  waits, and so does every STORE, COPY, MOVE and EXPUNGE, and even the
+  `\Seen` that a FETCH of `BODY[]` sets (`setsSeen` goes through
+  `applyAction`), in every mailbox of the account. It was chosen for
+  correctness: without it a page applied while a sync had emptied
+  INBOX gave its message UID 1. With steps 2 and 5, syncs no longer
+  empty buckets, so step 8: make the semaphore per mailbox (an event
+  page then takes those of the mailboxes it touches, in label-ID order
+  to avoid deadlocks), or hold it per page of the listing rather than
+  for the whole sync; test that a STORE in INBOX answers while All Mail
+  syncs (testing/synctest, the listing blocked).
+
 ## 10. CREATE, DELETE and RENAME are not implemented
 
 **Problem.** `user.CreateMailbox`, `DeleteMailbox` and `RenameMailbox`
@@ -464,3 +574,152 @@ renamed or deleted. Through go-proton-api (label.go):
    and lists the folder before its event; the later `Labels` create
    changes nothing; RENAME sends the color it read; DELETE of a system
    mailbox and of INBOX makes no request; a name with `/` is refused.
+
+## 11. Determinism and protocol correctness
+
+Found in the 2026-11-06 audit; none is from branch `labels-events`.
+
+1. **Map order reaches clients.** `ListMailboxes` (imap/user.go) ranges
+   over `u.mailboxes`, so LIST orders mailboxes differently each time;
+   `Status` (imap/mailbox.go) ranges over `u.flags`, so FLAGS and
+   PERMANENTFLAGS of SELECT reorder labels. AGENTS.md wants
+   `slices.Sorted(maps.Keys(m))`. Fix: LIST in a fixed order, system
+   mailboxes first in their protonmail label order (INBOX, Drafts,
+   Sent, Starred, Archive, Spam, Trash, All Mail) then folders by name;
+   flags sorted by label ID behind `\Seen \Deleted`. `getMailbox` also
+   picks the first of two folders with the same name in map order
+   (section 1 covers the collision). Tests: LIST and FLAGS equal across
+   repeated calls and two users built from the same labels in different
+   insertion orders.
+2. **RFC822.SIZE is Proton's size, not the size served.** `fetchMessage`
+   answers `msg.Size` (the API's, of the message as Proton stores it),
+   SEARCH LARGER/SMALLER uses it too, but `BODY[]` is what peroxide
+   builds: another header, quoted-printable, base64 attachments, or
+   PGP/MIME. RFC 3501 section 2.3.4 requires the size of what FETCH
+   `BODY[]` returns; clients size progress bars and partial fetches by
+   it. Fix: compute it as `len(BODY[])` the first time the full message
+   is built and store it in the message's bolt record with the facts of
+   section 9 ("more found"); until then answer the API size (no request
+   per message in a list fetch). Deterministic as long as the built
+   message is: multipart boundaries already derive from the message ID
+   (`messageHeader`, sha1), passThroughBoundary too; keep it so and test
+   that two builds of one message give equal bytes and RFC822.SIZE.
+3. **A Refresh rebuilds mailboxes under clients' feet.** On
+   `EventRefreshMail`, `receiveEvents` resets every mailbox, then
+   `initMailboxes` replaces `u.mailboxes` with new `*mailbox` values,
+   making requests (ListLabels) while holding `u.Lock` (every
+   `getMailbox`, STATUS and LIST waits on the network). Clients that
+   had a mailbox selected keep the old value, whose `db` bucket was
+   reset: their sequence numbers no longer match anything and no
+   EXPUNGE was sent. Fix: keep the `*mailbox` values (reset them in
+   place, as now), fetch the labels before taking `u.Lock`, then apply
+   them as `handleLabelEvent` does (create, rename, delete) rather than
+   rebuilding. Then tell each client that has a mailbox selected that
+   its contents changed: go-imap v1.2.1 has no update for that, so send
+   an `ExpungeUpdate` for every message, from the highest sequence
+   number down, before the reset, and let the new EXISTS follow.
+   Section 9.1's UIDVALIDITY bump
+   on Refresh then tells UID-caching clients too. Test: a selected
+   mailbox gets the expunges and its new EXISTS after a Refresh, and
+   `getMailbox` doesn't wait on ListLabels.
+4. **STATUS waits for a sync.** `Status` takes `mbox.Lock` for the whole
+   count, and `init` holds that lock (and `syncSem`) for the whole sync:
+   a STATUS of a mailbox being synced (aerc's check-mail) waits minutes,
+   though `apiCountsLock` exists so counts don't need the mailbox lock.
+   Fix: read `initialized` under `mbox.Lock` and release it before
+   counting; the bolt `Count` is its own transaction, and an unsynced
+   mailbox answers `apiCounts()`. A sync in progress then reports API
+   counts until it ends. Test (testing/synctest): STATUS answers while
+   `sync` blocks on its listing.
+5. **SELECT of an unsynced mailbox can make EXISTS go down.** SELECT
+   calls `init` first, so SELECT itself is exact; but STATUS (and the
+   EXISTS go-imap derives from a `MailboxUpdate` for a mailbox not yet
+   synced) uses `apiCounts()`, then the first event sends EXISTS with
+   the local sequence number of a database that only holds what events
+   added. A client that STATUSed 40 then gets `* 3 EXISTS`, which RFC
+   3501 section 7.3.1 forbids below the known count without EXPUNGE.
+   Fix: send no `MailboxUpdate` for an uninitialized mailbox (nobody
+   can have it selected, as SELECT initializes it), and keep only the
+   API counts current (`fetchCounts`, already done). Test: a create
+   event for an unsynced mailbox sends no update; STATUS stays on API
+   counts until SELECT.
+6. **SearchMessages nests bolt transactions.** It runs `u.db.Message`,
+   its own read transaction, inside `mbox.db.ForEach`'s, and takes
+   `mbox.Lock` inside it (`fetchFlags`). A write that grows the file
+   (more likely once section 9 stores bodies) remaps it under
+   `mmaplock`, which waits for every open read transaction, while the
+   outer one waits for the inner, behind the writer in RWMutex order:
+   deadlock. Fix: collect `(seqNum, uid, apiID)` in `ForEach`, end the
+   transaction, then read messages and flags outside it (or read both
+   buckets in one transaction, `database.Mailbox.ForEachMessage`).
+   Test: SEARCH while another goroutine writes enough to remap.
+
+## 12. Nits from the 2026-11-06 audit
+
+Small, independent, found reviewing branch `labels-events`.
+
+1. **One poll wakes one waiter.** After each page, `receiveEvents`
+   (imap/user.go) does a non-blocking send on the unbuffered
+   `u.eventSent`: only one goroutine waiting in `user.poll` (NOOP,
+   APPEND) is woken, and only if it is already waiting. With two or
+   more concurrent waiters (several clients NOOPing, aerc's two
+   connections) the others wait for the next page, a whole poll
+   interval (20-40 s) when nothing changes. Since 89f7997 a waiter also
+   returns when its poll fails, but a successful one still needs
+   `eventSent`. Fix: replace `eventSent` by a channel closed after each
+   page and swapped for a fresh one under `u.Lock` (a broadcast); `poll`
+   takes the current channel before asking for the poll. Test: three
+   concurrent `poll` calls all return after one page.
+2. **`More` with an unchanged ID would loop hot.** `receivePages`
+   (events/events.go) asks again at once while `event.More == 1`. A page
+   whose `ID` equals the `last` it was asked with, and `More` 1, would
+   repeat forever with no wait. The API is a trust boundary: break when
+   `event.ID == last` (log it) and wait for the next poll, as
+   go-proton-api's stream skips a page whose last ID is unchanged.
+   Test: a fakeSource page `{ID: last, More: 1}` is asked for once per
+   poll.
+3. **The event ID is written every poll.** `receiveEvents` calls
+   `u.db.SetLastEventID(event.ID)` after every page, a bolt write with
+   fsync, also when Proton answered "nothing new" (`ID` unchanged):
+   every 20-40 s per account while a client is logged in. Fix: skip the
+   write when the ID is the one last stored (keep it in `user`). Test:
+   two empty pages make one write (bolt `DB.Stats().TxStats`).
+4. **Locked-key log repeats.** `handleAddressEvent` (imap/addresses.go)
+   runs `reportLockedKeys` on every create and update of an address, so
+   any change to it (display name, signature, order) logs again "Key ...
+   is new: it is unlocked when peroxide restarts" for each locked key.
+   Fix: remember the fingerprints already reported in `user` and log
+   each once per session. Test: two updates of an address with one new
+   key log once.
+5. **Pass-through and fallbacks log at every FETCH.**
+   `passThroughBodyStructure` (imap/passthrough.go) logs "Message ... is
+   encrypted to a key Proton doesn't have: passed through as PGP/MIME"
+   every time BODYSTRUCTURE is fetched, so every list fetch of a folder
+   with such mail repeats it; `inlinePart` ("served encrypted") and
+   `attachmentBody` ("Attachment ... served encrypted") likewise. Fix:
+   log once per message per session (a set in `user`, or log only when
+   the full message is first fetched, in `fullMessage`).
+6. **Attachment size in BODYSTRUCTURE** is the API's decrypted size, not
+   the size of the base64 sent (RFC 3501 section 7.4.2); for an armored
+   fallback (`<name>.pgp`) it is further off, as armor and key packets
+   are added. Recorded under section 9 ("more found") with its fix.
+7. **No charset without a MIME type.** `inlineHeader` (imap/message.go)
+   sets no Content-Type when `msg.MIMEType` is empty (it logs "Sending an
+   inline header without its proper MIME type"), and so no charset.
+   Before d6657fd BODYSTRUCTURE still claimed `charset=utf-8`; it now
+   reads the part's header, so both agree on `text/plain` without a
+   charset, which RFC 2045 defaults to US-ASCII though the body is
+   UTF-8. Fix: default to `text/plain; charset=utf-8` in `inlineHeader`.
+   Test: a message without MIMEType gets that in BODYSTRUCTURE and in
+   `BODY[1.MIME]`.
+8. **The events path in the docs.** aerc_implementation.md section 1
+   and notify_design.md say peroxide polls `/core/v4/events`; it asks
+   for `/events/{id}` under its API root (protonmail/events.go,
+   `GetEvent`), `https://mail.proton.me/api/events/...` with the default
+   endpoint. Bridge and go-proton-api use `/core/v4/events`. Either
+   correct the docs or move peroxide to the `core/v4` path, checking it
+   with a `-debug-raw` log first.
+9. **Section 4's premise.** It says `-debug` "only presents a security
+   threat"; both modes redact with one key list and the raw mode
+   exposes more fields (section 4, facts). Reword when section 4 is
+   done.
