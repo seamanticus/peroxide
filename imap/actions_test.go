@@ -67,6 +67,22 @@ func (api *fakeAPI) madeRequests() []string {
 	return append([]string(nil), api.requests...)
 }
 
+// An update made before its folder is renamed in Proton names the mailbox as
+// it is when go-imap delivers it, which is when go-imap matches it to the
+// clients that have it selected: the EXISTS isn't lost to the rename.
+func TestUpdateFollowsRename(t *testing.T) {
+	mbox, _ := newTestMailbox(t, nil)
+	mbox.setName("Work")
+	up := newMailboxUpdate("bob", mbox)
+	mbox.setName("Projects")
+	if got := up.Mailbox(); got != "Projects" {
+		t.Errorf("Mailbox() = %q after the rename, want Projects", got)
+	}
+	if got := up.Username(); got != "bob" {
+		t.Errorf("Username() = %q, want bob", got)
+	}
+}
+
 // newActionTestMailbox returns a synchronized INBOX holding msgs, whose user
 // talks to api, and the updates sent to clients. Updates are acknowledged as
 // the IMAP server does once they are written.

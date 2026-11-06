@@ -454,7 +454,7 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 					for labelID, seqNum := range seqNums {
 						if mbox := u.getMailboxByLabel(labelID); mbox != nil {
 							update := new(imapbackend.MailboxUpdate)
-							update.Update = imapbackend.NewUpdate(u.u.Name, mbox.Name())
+							update.Update = newMailboxUpdate(u.u.Name, mbox)
 							update.MailboxStatus = imap.NewMailboxStatus(mbox.Name(), []imap.StatusItem{imap.StatusMessages})
 							update.MailboxStatus.Messages = seqNum
 							eventUpdates = append(eventUpdates, update)

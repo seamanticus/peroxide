@@ -11,6 +11,29 @@ import (
 	"github.com/seamanticus/peroxide/protonmail"
 )
 
+// mailboxUpdate is the target of an update for mbox. go-imap matches it to
+// the clients that have the mailbox selected by name, when it delivers it
+// (Server.listenUpdates), so the name is read then: an update made just
+// before the folder is renamed in Proton would otherwise reach no client,
+// and its EXISTS or EXPUNGE be lost.
+type mailboxUpdate struct {
+	username string
+	mbox     *mailbox
+	done     chan struct{}
+}
+
+var _ imapbackend.Update = (*mailboxUpdate)(nil) // proof: compile-time
+
+func newMailboxUpdate(username string, mbox *mailbox) *mailboxUpdate {
+	return &mailboxUpdate{username: username, mbox: mbox, done: make(chan struct{})}
+}
+
+func (up *mailboxUpdate) Username() string { return up.username }
+
+func (up *mailboxUpdate) Mailbox() string { return up.mbox.Name() }
+
+func (up *mailboxUpdate) Done() chan struct{} { return up.done }
+
 // applyUpdate applies update to the stored message apiID, and returns the
 // updates telling clients about it.
 func (u *user) applyUpdate(apiID string, update *protonmail.EventMessageUpdate) ([]imapbackend.Update, error) {
@@ -23,7 +46,7 @@ func (u *user) applyUpdate(apiID string, update *protonmail.EventMessageUpdate) 
 	for labelID, seqNum := range createdSeqNums {
 		if mbox := u.getMailboxByLabel(labelID); mbox != nil {
 			up := new(imapbackend.MailboxUpdate)
-			up.Update = imapbackend.NewUpdate(u.u.Name, mbox.Name())
+			up.Update = newMailboxUpdate(u.u.Name, mbox)
 			up.MailboxStatus = imap.NewMailboxStatus(mbox.Name(), []imap.StatusItem{imap.StatusMessages})
 			up.MailboxStatus.Messages = seqNum
 			updates = append(updates, up)
@@ -32,7 +55,7 @@ func (u *user) applyUpdate(apiID string, update *protonmail.EventMessageUpdate) 
 	for labelID, seqNum := range deletedSeqNums {
 		if mbox := u.getMailboxByLabel(labelID); mbox != nil {
 			up := new(imapbackend.ExpungeUpdate)
-			up.Update = imapbackend.NewUpdate(u.u.Name, mbox.Name())
+			up.Update = newMailboxUpdate(u.u.Name, mbox)
 			up.SeqNum = seqNum
 			updates = append(updates, up)
 		}
@@ -58,7 +81,7 @@ func (u *user) applyUpdate(apiID string, update *protonmail.EventMessageUpdate) 
 		}
 
 		up := new(imapbackend.MessageUpdate)
-		up.Update = imapbackend.NewUpdate(u.u.Name, mbox.Name())
+		up.Update = newMailboxUpdate(u.u.Name, mbox)
 		// Clients may have asked for this with a UID command, and then only
 		// take responses bearing the UID (RFC 3501 section 6.4.8).
 		up.Message = imap.NewMessage(seqNum, []imap.FetchItem{imap.FetchFlags, imap.FetchUid})
@@ -83,7 +106,7 @@ func (u *user) applyDelete(apiID string) ([]imapbackend.Update, error) {
 	for labelID, seqNum := range seqNums {
 		if mbox := u.getMailboxByLabel(labelID); mbox != nil {
 			up := new(imapbackend.ExpungeUpdate)
-			up.Update = imapbackend.NewUpdate(u.u.Name, mbox.Name())
+			up.Update = newMailboxUpdate(u.u.Name, mbox)
 			up.SeqNum = seqNum
 			updates = append(updates, up)
 		}
