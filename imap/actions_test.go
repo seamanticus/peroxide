@@ -37,6 +37,14 @@ type fakeAPI struct {
 	codes    map[string]int
 	gets     map[string]fakeResponse
 	labelIDs map[string][]string
+	// actionCodes and actionStatus override codes for one action, keyed by
+	// path and label ID, e.g. "/messages/unlabel 0" (the label ID is empty
+	// for actions without one): the code per message, or an HTTP status that
+	// fails the whole request.
+	actionCodes  map[string]map[string]int
+	actionStatus map[string]int
+	// metadataStatus, if set, fails the metadata request with that status.
+	metadataStatus int
 
 	mu       sync.Mutex
 	requests []string
@@ -68,14 +76,27 @@ func (api *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	var req struct{ IDs []string }
+	var req struct {
+		IDs     []string
+		LabelID string
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.t.Errorf("decode request: %v", err)
+	}
+	action := r.URL.Path + " " + req.LabelID
+	if status, ok := api.actionStatus[action]; ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		io.WriteString(w, `{"Code":2001,"Error":"failed"}`)
+		return
 	}
 
 	var results []string
 	for _, id := range req.IDs {
-		code, ok := api.codes[id]
+		code, ok := api.actionCodes[action][id]
+		if !ok {
+			code, ok = api.codes[id]
+		}
 		if !ok {
 			code = 1000
 		}
@@ -98,6 +119,12 @@ func (api *fakeAPI) madeRequests() []string {
 // serveMetadata answers the metadata of the messages asked for by ID, those
 // in labelIDs.
 func (api *fakeAPI) serveMetadata(w http.ResponseWriter, r *http.Request) {
+	if api.metadataStatus != 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(api.metadataStatus)
+		io.WriteString(w, `{"Code":2001,"Error":"failed"}`)
+		return
+	}
 	if got := r.Header.Get("X-HTTP-Method-Override"); got != http.MethodGet {
 		api.t.Errorf("metadata request overridden as %q, want GET", got)
 	}
@@ -368,6 +395,197 @@ func TestMoveAppliedWithoutEvent(t *testing.T) {
 	checkStatus(t, archive, 1, 1)
 	if got := len(api.madeRequests()); got != 2 {
 		t.Errorf("made %v requests, want 2: label and unlabel", got)
+	}
+}
+
+// inMailbox reports whether mbox's local database holds apiID.
+func inMailbox(mbox *mailbox, apiID string) bool {
+	_, _, err := mbox.db.FromApiID(apiID)
+	return err == nil
+}
+
+// A MOVE that fails partway leaves no message in both mailboxes nor in
+// neither (RFC 6851 section 3.3). A message the label failed for isn't
+// unlabelled; one the unlabel failed for is looked up: if Proton shows it out
+// of the source already (a folder move does that), it is moved; otherwise it
+// is taken out of the destination again.
+// evidence: witnesses
+func TestMovePartialFailure(t *testing.T) {
+	var (
+		labelArchive   = "/messages/label " + protonmail.LabelArchive
+		unlabelInbox   = "/messages/unlabel " + protonmail.LabelInbox
+		unlabelArchive = "/messages/unlabel " + protonmail.LabelArchive
+	)
+	const (
+		label    = "PUT /messages/label"
+		unlabel  = "PUT /messages/unlabel"
+		metadata = "POST /mail/v4/messages"
+	)
+	for _, tc := range []struct {
+		name         string
+		api          *fakeAPI
+		wantErr      bool
+		wantRequests []string
+		wantInbox    bool
+		wantArchive  bool
+	}{
+		{
+			name:         "label fails",
+			api:          &fakeAPI{actionCodes: map[string]map[string]int{labelArchive: {"a": 2011}}},
+			wantErr:      true,
+			wantRequests: []string{label},
+			wantInbox:    true,
+		},
+		{
+			name: "unlabel fails, still in source",
+			api: &fakeAPI{
+				actionCodes: map[string]map[string]int{unlabelInbox: {"a": 2011}},
+				labelIDs:    map[string][]string{"a": {protonmail.LabelInbox, protonmail.LabelArchive, protonmail.LabelAllMail}},
+			},
+			wantErr:      true,
+			wantRequests: []string{label, unlabel, metadata, unlabel},
+			wantInbox:    true,
+		},
+		{
+			name: "unlabel request fails, still in source",
+			api: &fakeAPI{
+				actionStatus: map[string]int{unlabelInbox: http.StatusUnprocessableEntity},
+				labelIDs:     map[string][]string{"a": {protonmail.LabelInbox, protonmail.LabelArchive, protonmail.LabelAllMail}},
+			},
+			wantErr:      true,
+			wantRequests: []string{label, unlabel, metadata, unlabel},
+			wantInbox:    true,
+		},
+		{
+			name: "unlabel fails, moved by the label",
+			api: &fakeAPI{
+				actionCodes: map[string]map[string]int{unlabelInbox: {"a": 2011}},
+				labelIDs:    map[string][]string{"a": {protonmail.LabelArchive, protonmail.LabelAllMail}},
+			},
+			wantRequests: []string{label, unlabel, metadata},
+			wantArchive:  true,
+		},
+		{
+			name: "undo fails",
+			api: &fakeAPI{
+				actionCodes: map[string]map[string]int{unlabelInbox: {"a": 2011}, unlabelArchive: {"a": 2011}},
+				labelIDs:    map[string][]string{"a": {protonmail.LabelInbox, protonmail.LabelArchive, protonmail.LabelAllMail}},
+			},
+			wantErr:      true,
+			wantRequests: []string{label, unlabel, metadata, unlabel},
+			// Left in both locally, as in Proton, until the next event.
+			wantInbox:   true,
+			wantArchive: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := tc.api
+			api.t = t
+			inbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{inboxMessage("a", 0)})
+			archive := addTestMailbox(t, inbox.u, "Archive", protonmail.LabelArchive, nil)
+
+			err := inbox.MoveMessages(true, uidSet(1), "Archive")
+			if (err != nil) != tc.wantErr {
+				t.Errorf("MoveMessages() = %v, want error %v", err, tc.wantErr)
+			}
+			if got := api.madeRequests(); !slices.Equal(got, tc.wantRequests) {
+				t.Errorf("made requests %q, want %q", got, tc.wantRequests)
+			}
+			if got := inMailbox(inbox, "a"); got != tc.wantInbox {
+				t.Errorf("in INBOX = %v, want %v", got, tc.wantInbox)
+			}
+			if got := inMailbox(archive, "a"); got != tc.wantArchive {
+				t.Errorf("in Archive = %v, want %v", got, tc.wantArchive)
+			}
+		})
+	}
+}
+
+// COPY labels the messages with the destination and keeps them in the source.
+// One the label failed for is left out, and the command fails; one already
+// labelled ("does not exist") counts as copied.
+// evidence: witnesses
+func TestCopyMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		codes       map[string]int
+		wantErr     bool
+		wantArchive []string
+	}{
+		{"copied", nil, false, []string{"a", "b"}},
+		{"already there", map[string]int{"b": protonmail.CodeMessageDoesNotExist}, false, []string{"a", "b"}},
+		{"one fails", map[string]int{"b": 2011}, true, []string{"a"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeAPI{t: t, actionCodes: map[string]map[string]int{"/messages/label " + protonmail.LabelArchive: tc.codes}}
+			inbox, sent := newActionTestMailbox(t, api, []*protonmail.Message{inboxMessage("a", 1), inboxMessage("b", 0)})
+			archive := addTestMailbox(t, inbox.u, "Archive", protonmail.LabelArchive, nil)
+
+			err := inbox.CopyMessages(true, uidSet(1, 2), "Archive")
+			if (err != nil) != tc.wantErr {
+				t.Errorf("CopyMessages() = %v, want error %v", err, tc.wantErr)
+			}
+			if got, want := api.madeRequests(), []string{"PUT /messages/label"}; !slices.Equal(got, want) {
+				t.Errorf("made requests %q, want %q", got, want)
+			}
+			checkStatus(t, inbox, 2, 1)
+			for _, id := range []string{"a", "b"} {
+				if got, want := inMailbox(archive, id), slices.Contains(tc.wantArchive, id); got != want {
+					t.Errorf("%v in Archive = %v, want %v", id, got, want)
+				}
+			}
+			var exists int
+			for _, up := range sent() {
+				if mu, ok := up.(*imapbackend.MailboxUpdate); ok && mu.Mailbox() == "Archive" {
+					exists++
+				}
+			}
+			if exists != len(tc.wantArchive) {
+				t.Errorf("sent %v EXISTS for Archive, want %v", exists, len(tc.wantArchive))
+			}
+		})
+	}
+}
+
+// A message expunged from Trash whose delete for good fails has left Trash
+// all the same, and clients were told: EXPUNGE answers OK, not NO. It stays
+// in All Mail.
+func TestExpungeFromTrashDeleteFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		api  *fakeAPI
+	}{
+		{"refused for the message", &fakeAPI{
+			actionCodes: map[string]map[string]int{"/messages/delete ": {"a": 2011}},
+			labelIDs:    map[string][]string{"a": {protonmail.LabelAllMail}},
+		}},
+		{"request fails", &fakeAPI{
+			actionStatus: map[string]int{"/messages/delete ": http.StatusUnprocessableEntity},
+			labelIDs:     map[string][]string{"a": {protonmail.LabelAllMail}},
+		}},
+		{"labels unknown", &fakeAPI{metadataStatus: http.StatusBadGateway}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := tc.api
+			api.t = t
+			inbox, sent := newActionTestMailbox(t, api, nil)
+			trash := addTestMailbox(t, inbox.u, "Trash", protonmail.LabelTrash, []*protonmail.Message{trashMessage("a")})
+
+			if err := trash.UpdateMessagesFlags(true, uidSet(1), imap.AddFlags, []string{imap.DeletedFlag}); err != nil {
+				t.Fatalf("UpdateMessagesFlags() = %v", err)
+			}
+			stored := len(sent())
+			if err := trash.Expunge(); err != nil {
+				t.Errorf("Expunge() = %v, want nil: the messages left Trash", err)
+			}
+			checkStatus(t, trash, 0, 0)
+			if updates := sent()[stored:]; len(updates) != 1 {
+				t.Errorf("sent %v updates, want 1 EXPUNGE", len(updates))
+			}
+			if _, err := inbox.u.db.Message("a"); err != nil {
+				t.Errorf("db.Message() = %v, want the message kept", err)
+			}
+		})
 	}
 }
 

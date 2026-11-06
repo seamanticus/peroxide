@@ -847,6 +847,11 @@ func (mbox *mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string
 	return mbox.u.applyAction(apiIDs, failed, labelUpdate(dest.label, true))
 }
 
+// MoveMessages labels the messages with dest, then unlabels them from mbox. Each
+// message must end in one of the two, and should not end in both, even when
+// the command fails (RFC 6851 section 3.3): one dest's label failed for is
+// left alone, and one the unlabel failed for is checked and taken out of dest
+// again (undoMove).
 func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) error {
 	if err := mbox.init(); err != nil {
 		return err
@@ -866,15 +871,88 @@ func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string
 	if err != nil {
 		return err
 	}
-	if err := mbox.u.applyAction(apiIDs, failed, labelUpdate(dest.label, true)); err != nil {
-		return err
+	labelErr := mbox.u.applyAction(apiIDs, failed, labelUpdate(dest.label, true))
+	labelled := succeeded(apiIDs, failed)
+	if len(labelled) == 0 {
+		return labelErr
 	}
 
-	failed, err = mbox.u.c.UnlabelMessages(mbox.label, apiIDs)
+	var unlabelErr error
+	failed, err = mbox.u.c.UnlabelMessages(mbox.label, labelled)
 	if err != nil {
-		return err
+		unlabelErr = fmt.Errorf("cannot remove the messages from %v: %w", mbox.Name(), err)
+		failed = make(map[string]error, len(labelled))
+		for _, apiID := range labelled {
+			failed[apiID] = err
+		}
+	} else {
+		unlabelErr = mbox.u.applyAction(labelled, failed, labelUpdate(mbox.label, false))
 	}
-	return mbox.u.applyAction(apiIDs, failed, labelUpdate(mbox.label, false))
+	inBoth := slices.DeleteFunc(slices.Clone(labelled), func(apiID string) bool {
+		err, isFailed := failed[apiID]
+		return !isFailed || nothingToDo(err)
+	})
+	if len(inBoth) == 0 {
+		return labelErr
+	}
+
+	allMoved, err := mbox.undoMove(dest, inBoth)
+	if err == nil && allMoved {
+		// Proton had moved them all already: the unlabel failed for nothing.
+		unlabelErr = nil
+	}
+	return errors.Join(labelErr, unlabelErr, err)
+}
+
+// succeeded returns the messages of apiIDs that an action's failures don't
+// name, or name as nothing to do.
+func succeeded(apiIDs []string, failed map[string]error) []string {
+	var ok []string
+	for _, apiID := range apiIDs {
+		if err, isFailed := failed[apiID]; !isFailed || nothingToDo(err) {
+			ok = append(ok, apiID)
+		}
+	}
+	return ok
+}
+
+// undoMove settles the messages apiIDs, labelled with dest but not unlabelled
+// from mbox, so that none stays in both. Labelling into a folder can have
+// moved one out of mbox in Proton already: that one is moved, and only the
+// local copy leaves mbox. One Proton still shows in mbox is unlabelled from
+// dest, as if never moved. Never the other way round: unlabelling from dest a
+// message mbox no longer holds would leave it in neither. allMoved reports
+// whether every one turned out moved.
+func (mbox *mailbox) undoMove(dest *mailbox, apiIDs []string) (allMoved bool, err error) {
+	var moved, undo []string
+	for chunk := range slices.Chunk(apiIDs, protonmail.MaxMessagesPerRequest) {
+		msgs, err := mbox.u.c.MessagesByID(chunk)
+		if err != nil {
+			return false, fmt.Errorf("cannot check the messages left in both %v and %v until the next event: %w", mbox.Name(), dest.Name(), err)
+		}
+		for _, msg := range msgs {
+			if slices.Contains(msg.LabelIDs, mbox.label) {
+				undo = append(undo, msg.ID)
+			} else {
+				moved = append(moved, msg.ID)
+			}
+		}
+	}
+
+	var errs []error
+	if len(moved) > 0 {
+		errs = append(errs, mbox.u.applyAction(moved, nil, labelUpdate(mbox.label, false)))
+	}
+	if len(undo) > 0 {
+		log.Printf("Taking %v messages out of %v again: they couldn't leave %v", len(undo), dest.Name(), mbox.Name())
+		failed, err := mbox.u.c.UnlabelMessages(dest.label, undo)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("cannot take the messages out of %v again, left in both until the next event: %w", dest.Name(), err))
+		} else {
+			errs = append(errs, mbox.u.applyAction(undo, failed, labelUpdate(dest.label, false)))
+		}
+	}
+	return len(moved) == len(apiIDs), errors.Join(errs...)
 }
 
 // Expunge removes the messages marked \Deleted from this mailbox, as
@@ -883,7 +961,9 @@ func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string
 // others and in All Mail. Only from Trash and Drafts are they then deleted for
 // good, and only those that no other mailbox or label still shows
 // (expungeForGood). All Mail holds every message: nothing leaves it but by
-// leaving every other mailbox, so EXPUNGE there is refused.
+// leaving every other mailbox, so EXPUNGE there is refused. The answer is
+// that of the unlabel: deleting for good is peroxide's own step after it,
+// whose failure is logged.
 func (mbox *mailbox) Expunge() error {
 	if mbox.label == protonmail.LabelAllMail {
 		return errors.New("cannot expunge from All Mail: move the messages to Trash, or remove them from their mailboxes")
@@ -919,7 +999,12 @@ func (mbox *mailbox) Expunge() error {
 
 	err = mbox.u.applyAction(apiIDs, failed, labelUpdate(mbox.label, false))
 	if mbox.label == protonmail.LabelTrash || mbox.label == protonmail.LabelDraft {
-		err = errors.Join(err, mbox.expungeForGood(removed))
+		// The messages left the mailbox, as asked, and clients were told
+		// (EXPUNGE): NO would contradict that. One not deleted for good stays
+		// in All Mail, where the user can delete it again.
+		if forGoodErr := mbox.expungeForGood(removed); forGoodErr != nil {
+			log.Printf("Messages expunged from %v, not all deleted for good: %v", mbox.Name(), forGoodErr)
+		}
 	}
 	return err
 }
