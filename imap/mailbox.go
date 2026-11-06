@@ -575,27 +575,41 @@ func (mbox *mailbox) SearchMessages(isUID bool, c *imap.SearchCriteria) ([]uint3
 		return nil, err
 	}
 
-	var results []uint32
+	// The entries are collected in one read transaction, and the messages
+	// read and matched after it ends. matchMessage takes locks (fetchFlags),
+	// and a bolt write that grows the file waits for every open read
+	// transaction: matching inside one deadlocked against a writer holding,
+	// or waiting for, those locks. A nested read transaction did as well.
+	type entry struct {
+		seqNum, uid uint32
+		apiID       string
+	}
+	var entries []entry
 	err := mbox.db.ForEach(func(seqNum, uid uint32, apiID string) error {
-		// TODO: fetch message from local DB only if needed
-		msg, err := mbox.u.db.Message(apiID)
-		if err != nil {
-			return err
-		}
-
-		if mbox.matchMessage(seqNum, uid, msg, c) {
-			if isUID {
-				results = append(results, uid)
-			} else {
-				results = append(results, seqNum)
-			}
-		}
-
+		entries = append(entries, entry{seqNum, uid, apiID})
 		return nil
 	})
-
 	if err != nil {
 		return nil, err
+	}
+
+	var results []uint32
+	for _, e := range entries {
+		// TODO: fetch message from local DB only if needed
+		msg, err := mbox.u.db.Message(e.apiID)
+		if errors.Is(err, database.ErrNotFound) {
+			continue // deleted by an event since the entries were read
+		} else if err != nil {
+			return nil, err
+		}
+
+		if mbox.matchMessage(e.seqNum, e.uid, msg, c) {
+			if isUID {
+				results = append(results, e.uid)
+			} else {
+				results = append(results, e.seqNum)
+			}
+		}
 	}
 	return results, nil
 }
