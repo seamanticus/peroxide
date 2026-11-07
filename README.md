@@ -159,9 +159,13 @@ For SMTP:
 * Username: `your ProtonMail username`
 * Password: `bridge password` (*NOT YOUR PROTONMAIL PASSWORD*)
 
-*Note on TLS*: by default peroxide listens on `127.0.0.1` without TLS, and the password never leaves your machine. Given `-tls-cert` and `-tls-key`, both servers speak TLS from the first byte (implicit TLS, the way ports 993 and 465 do) on the same ports, and refuse plain connections: pick "SSL/TLS" in the client, never "STARTTLS", which peroxide doesn't offer. In aerc that is `imaps://` and `smtps://` instead of `imap+insecure://` and `smtp+insecure://`. A self-signed certificate must be trusted by the client. See `docs/commands.md`.
+*Note*: by default peroxide listens on `127.0.0.1` without TLS. The password never leaves your machine, and no one is watching... until they are.
 
-*Note*: some clients store your *bridge password* in plain text, which is an aberration!!! Like leaving your house key under the mat with a sign pointing at it. An elegant solution is presented below: encrypted and on demand.
+*Notes on TLS*: if you handle peroxide `-tls-cert` and `-tls-key`, the whole thing changes. both servers speak TLS from the first byte (implicit TLS, the way ports 993 and 465 do) on the same ports 1143 and 1025. Plain connections get refused. in your client, pick "SSL/TLS" but never "STARTTLS", peroxide doesn't have that in the menu, don't ask. A self-signed certificate must be trusted by the client. See `docs/commands.md`.
+
+*More notes on aerc*: use `imap+insecure://` and `smtp+insecure://` for plain connection. For TLS use `imaps://` and `smtps://`.
+
+*Even more notes*: some clients store your *bridge password* in plain text, which is an aberration!!! Like leaving your house key under the mat with a sign pointing at it. An elegant solution is presented below: encrypted and on demand.
 
 ### aerc + gpg encryption
 
@@ -181,20 +185,12 @@ stored in `peroxide-username.gpg`
 
 ## Why the name peroxide?
 
-after a night on the piss, not recalling how you got back home, peroxide is what will be poured on cuts on forehead for disenfection, ain't it? it's also what you will use to write a very melodramatical and lame excuse to your boss for not showing up to work that day, but that's not today.
-
-don't worry mate, we are not alcoholics.
-
-we just code...
-
-after the pub...
-
-like a good sailor.
+hmmm... things you learn from strangers, at a road-side pub, on a monday night: in chemical nomenclature, the peroxide group can only accept two external connections. apparently electrons are also quite fond of IMAP and SMTP to get their point across without friction. if you wanna complain, I will listen, if you shout the next round.
 
 ## License
 
 MIT
 
-## Disclosure
+## Credits
 
 This project started as a fork of [hydroxide](https://codeberg.org/emersion/hydroxide) , thanks to emersion, all upstream contributors and patches performed. peroxide diverges from its premises: the long-term goal is a minimal SMTP/IMAP-only bridge to ProtonMail. One job, done well, and then the pub closes, too soon.
