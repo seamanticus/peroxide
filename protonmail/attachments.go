@@ -2,6 +2,7 @@ package protonmail
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
@@ -144,12 +146,14 @@ func (att *Attachment) Read(ciphertext io.Reader, keyring openpgp.KeyRing, promp
 }
 
 // GetAttachment downloads an attachment's payload. The returned io.ReadCloser
-// may be encrypted, use Attachment.Read to decrypt it.
-func (c *Client) GetAttachment(id string) (io.ReadCloser, error) {
+// may be encrypted, use Attachment.Read to decrypt it. Cancelling ctx aborts
+// the request.
+func (c *Client) GetAttachment(ctx context.Context, id string) (io.ReadCloser, error) {
 	req, err := c.newRequest(http.MethodGet, "/attachments/"+id, nil)
 	if err != nil {
 		return nil, err
 	}
+	req = req.WithContext(ctx)
 
 	resp, err := c.do(req)
 	if err != nil {
@@ -167,7 +171,8 @@ func (c *Client) GetAttachment(id string) (io.ReadCloser, error) {
 		// An APIError, so callers can tell a rate limit or a server error,
 		// worth retrying, from the rest. The body isn't read: on success
 		// it is the attachment, which isn't JSON.
-		return nil, fmt.Errorf("cannot get attachment %q: %w", id, &APIError{Status: resp.StatusCode, Message: resp.Status})
+		apiErr := &APIError{Status: resp.StatusCode, Message: resp.Status, RetryAfter: retryAfter(resp.Header, time.Now())}
+		return nil, fmt.Errorf("cannot get attachment %q: %w", id, apiErr)
 	}
 
 	return resp.Body, nil

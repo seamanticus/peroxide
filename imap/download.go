@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
 
@@ -24,16 +25,17 @@ import (
 // asking again, as proton-bridge's sync (syncservice DefaultRetryCoolDown).
 const downloadRetryDelay = 20 * time.Second
 
-// startDownload starts downloading the metadata of every message of the
-// account, unless the database has it all, as proton-bridge syncs at login.
-// The download stops when it is done, when the last client logs out (u.done)
-// or when stopDownload is called. Called by newUser and by the events
+// startDownload starts downloading every message of the account, its
+// metadata and then its body, unless the database has it all, as
+// proton-bridge syncs at login. The download stops when it is done, when the
+// last client logs out (u.done) or when stopDownload is called. Messages in
+// the failed set aren't tried again. Called by newUser and by the events
 // goroutine only, which own u.downloadStop.
 func (u *user) startDownload() {
 	stop := make(chan struct{})
 	u.downloadStop = stop
 	deliver := func(ups []imapbackend.Update) { u.sendOn(u.backend.updates, ups) }
-	u.downloads.Go(func() { u.download(stop, deliver) })
+	u.downloads.Go(func() { u.download(stop, deliver, false) })
 }
 
 // stopDownload stops the download, aborting the request it is making, and
@@ -55,9 +57,11 @@ func (u *user) stopDownload() {
 // between the request and the storing can be undone by the page (a message
 // deleted comes back, flags go back): so, as bridge does, the event ID of
 // when the download began is kept (SetSyncStart), and once every message is
-// stored the events after it are applied again. It reports whether every
-// message is stored.
-func (u *user) download(stop <-chan struct{}, deliver func([]imapbackend.Update)) (done bool) {
+// stored the events after it are applied again. Then it downloads the
+// bodies (downloadBodies), trying failed messages again if retryFailed. It
+// reports whether every message, metadata and body, is stored, failed ones
+// aside unless retried.
+func (u *user) download(stop <-chan struct{}, deliver func([]imapbackend.Update), retryFailed bool) (done bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -73,7 +77,10 @@ func (u *user) download(stop <-chan struct{}, deliver func([]imapbackend.Update)
 		pageStored, finished := u.downloadPage(ctx, stop, deliver)
 		if finished {
 			s, err := u.db.SyncState()
-			return err == nil && s.Done
+			if err != nil || !s.Done {
+				return false
+			}
+			return u.downloadBodies(ctx, retryFailed)
 		}
 		if pageStored {
 			continue
@@ -220,10 +227,16 @@ func (u *user) downloadUpdates(changes []database.MessageChange) []imapbackend.U
 // and the next download or login resumes. The events received meanwhile are
 // applied at the next login: the download sets the stored event ID back to
 // where it began. storeKey seals the stored messages.
-func DownloadAccount(c *protonmail.Client, storeKey auth.StoreKey, discard bool) error {
+// privateKeys decrypt the bodies; messages that failed before are tried
+// again.
+func DownloadAccount(c *protonmail.Client, privateKeys openpgp.EntityList, storeKey auth.StoreKey, discard bool) error {
 	pu, err := c.GetCurrentUser()
 	if err != nil {
 		return fmt.Errorf("cannot get the account: %w", err)
+	}
+	addrs, err := c.ListAddresses()
+	if err != nil {
+		return fmt.Errorf("cannot list the addresses: %w", err)
 	}
 	db, keyChanged, err := database.Open(pu.Name, storeKey)
 	if err != nil {
@@ -234,13 +247,15 @@ func DownloadAccount(c *protonmail.Client, storeKey auth.StoreKey, discard bool)
 	}
 
 	u := &user{
-		c:        c,
-		u:        pu,
-		username: pu.Name,
-		db:       db,
-		syncSem:  make(chan struct{}, 1),
-		sendSem:  make(chan struct{}, 1),
-		done:     make(chan struct{}),
+		c:           c,
+		u:           pu,
+		username:    pu.Name,
+		privateKeys: privateKeys,
+		addrs:       addrs,
+		db:          db,
+		syncSem:     make(chan struct{}, 1),
+		sendSem:     make(chan struct{}, 1),
+		done:        make(chan struct{}),
 	}
 	if discard {
 		log.Printf("Discarding the local copy of %q", pu.Name)
@@ -269,13 +284,13 @@ func DownloadAccount(c *protonmail.Client, storeKey auth.StoreKey, discard bool)
 	}()
 
 	// No client is connected: the updates are for no one.
-	done := u.download(stop, func([]imapbackend.Update) {})
+	done := u.download(stop, func([]imapbackend.Update) {}, true)
 	close(finished)
 	if err := db.Close(); err != nil {
 		return fmt.Errorf("cannot close the database: %w", err)
 	}
 	if !done {
-		return errors.New("the download was stopped before every message was stored")
+		return errors.New("not every message was stored: stopped, or some failed (logged above); run again to resume")
 	}
 	return nil
 }

@@ -261,11 +261,14 @@ type MessageCount struct {
 	Unread  int
 }
 
-func (c *Client) GetMessage(id string) (*Message, error) {
+// GetMessage returns the message id, body and attachment keys included.
+// Cancelling ctx aborts the request.
+func (c *Client) GetMessage(ctx context.Context, id string) (*Message, error) {
 	req, err := c.newRequest(http.MethodGet, "/messages/"+id, nil)
 	if err != nil {
 		return nil, err
 	}
+	req = req.WithContext(ctx)
 
 	var respData struct {
 		resp

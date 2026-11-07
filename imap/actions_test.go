@@ -1031,7 +1031,7 @@ func TestNoSender(t *testing.T) {
 func builtEnvelope(t *testing.T, msg *protonmail.Message) *imap.Envelope {
 	t.Helper()
 	mbox, _ := newTestMailbox(t, []*protonmail.Message{msg})
-	built, err := mbox.u.buildMessage(msg)
+	built, err := mbox.u.buildMessage(t.Context(), msg)
 	if err != nil {
 		t.Fatalf("buildMessage() = %v", err)
 	}
@@ -1228,7 +1228,7 @@ func TestFetchHeaderFields(t *testing.T) {
 func cacheFull(t *testing.T, mbox *mailbox, msgs ...*protonmail.Message) {
 	t.Helper()
 	for _, msg := range msgs {
-		built, err := mbox.u.buildMessage(msg)
+		built, err := mbox.u.buildMessage(t.Context(), msg)
 		if err != nil {
 			t.Fatalf("buildMessage(%v) = %v", msg.ID, err)
 		}

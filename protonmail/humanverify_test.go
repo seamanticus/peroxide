@@ -431,7 +431,7 @@ func TestDebugLogsQueryAndAttachment(t *testing.T) {
 	if _, _, err := c.ListMessages(&MessageFilter{Page: 2, Label: "0"}); err != nil {
 		t.Fatalf("ListMessages() = %v", err)
 	}
-	rc, err := c.GetAttachment("att1")
+	rc, err := c.GetAttachment(t.Context(), "att1")
 	if err != nil {
 		t.Fatalf("GetAttachment() = %v", err)
 	}

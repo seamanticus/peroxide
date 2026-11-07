@@ -55,10 +55,33 @@ type APIError struct {
 	Code    int
 	Message string
 	Details json.RawMessage
+	// RetryAfter is how long the response's Retry-After asks to wait before
+	// the next request (RFC 9110 section 10.2.3), 0 if it gives none.
+	RetryAfter time.Duration
 }
 
 func (err *APIError) Error() string {
 	return fmt.Sprintf("[%v] %v", err.Code, err.Message)
+}
+
+// retryAfter reads the Retry-After of h: a number of seconds or an HTTP
+// date, relative to now. One missing, malformed or in the past is 0.
+func retryAfter(h http.Header, now time.Time) time.Duration {
+	v := h.Get("Retry-After")
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.ParseUint(v, 10, 32); err == nil {
+		return time.Duration(secs) * time.Second
+	}
+	t, err := http.ParseTime(v)
+	if err != nil {
+		return 0
+	}
+	if d := t.Sub(now); d > 0 {
+		return d
+	}
+	return 0
 }
 
 type Timestamp int64
@@ -207,8 +230,9 @@ func (c *Client) doJSON(req *http.Request, respData any) error {
 			// A gateway's HTML page, say: the status is what callers can
 			// act on (a 502 is worth retrying).
 			return &APIError{
-				Status:  resp.StatusCode,
-				Message: fmt.Sprintf("%v, with a body that isn't an API response: %v", resp.Status, decodeErr),
+				Status:     resp.StatusCode,
+				Message:    fmt.Sprintf("%v, with a body that isn't an API response: %v", resp.Status, decodeErr),
+				RetryAfter: retryAfter(resp.Header, time.Now()),
 			}
 		}
 		return decodeErr
@@ -218,6 +242,7 @@ func (c *Client) doJSON(req *http.Request, respData any) error {
 		if err := maybeError.Err(); err != nil {
 			if apiErr, ok := err.(*APIError); ok {
 				apiErr.Status = resp.StatusCode
+				apiErr.RetryAfter = retryAfter(resp.Header, time.Now())
 			}
 			log.Printf("request failed: %v %v: %v", req.Method, req.URL.String(), err)
 			return err

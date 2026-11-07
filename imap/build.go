@@ -3,6 +3,7 @@ package imap
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -36,8 +37,8 @@ type builtMessage struct {
 }
 
 // buildMessage builds full, downloading its attachments.
-func (u *user) buildMessage(full *protonmail.Message) (builtMessage, error) {
-	literal, fallback, err := u.buildLiteral(full)
+func (u *user) buildMessage(ctx context.Context, full *protonmail.Message) (builtMessage, error) {
+	literal, fallback, err := u.buildLiteral(ctx, full)
 	if err != nil {
 		return builtMessage{}, err
 	}
@@ -63,10 +64,10 @@ func (u *user) buildMessage(full *protonmail.Message) (builtMessage, error) {
 // is that message; a body encrypted to no key of the account is passed
 // through as PGP/MIME. Other bodies are a multipart/mixed of one part, as
 // peroxide always served them.
-func (u *user) buildLiteral(full *protonmail.Message) ([]byte, bool, error) {
+func (u *user) buildLiteral(ctx context.Context, full *protonmail.Message) ([]byte, bool, error) {
 	switch {
 	case len(full.Attachments) > 0:
-		return u.buildMultipart(full)
+		return u.buildMultipart(ctx, full)
 	case full.MIMEType == "multipart/mixed":
 		return u.buildPGPMIME(full)
 	case u.passThrough(full):
@@ -74,11 +75,11 @@ func (u *user) buildLiteral(full *protonmail.Message) ([]byte, bool, error) {
 		literal, err := passThroughMessage(full)
 		return literal, true, err
 	default:
-		return u.buildMultipart(full)
+		return u.buildMultipart(ctx, full)
 	}
 }
 
-func (u *user) buildMultipart(full *protonmail.Message) ([]byte, bool, error) {
+func (u *user) buildMultipart(ctx context.Context, full *protonmail.Message) ([]byte, bool, error) {
 	var b bytes.Buffer
 	w, err := message.CreateWriter(&b, messageHeader(full))
 	if err != nil {
@@ -89,7 +90,7 @@ func (u *user) buildMultipart(full *protonmail.Message) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	for _, att := range full.Attachments {
-		h, body, attFallback, err := u.attachmentPart(att)
+		h, body, attFallback, err := u.attachmentPart(ctx, att)
 		if err != nil {
 			return nil, false, err
 		}
@@ -168,8 +169,8 @@ func (u *user) decryptBody(msg *protonmail.Message) ([]byte, []*packet.Signature
 // whole first, so that a failure at its end still gives the armored part. An
 // attached message (message/rfc822) has no transfer encoding, as in bridge,
 // so that its structure can be described. Only a failed download is an error.
-func (u *user) attachmentPart(att *protonmail.Attachment) (h message.Header, body []byte, fallback bool, err error) {
-	rc, err := u.c.GetAttachment(att.ID)
+func (u *user) attachmentPart(ctx context.Context, att *protonmail.Attachment) (h message.Header, body []byte, fallback bool, err error) {
+	rc, err := u.c.GetAttachment(ctx, att.ID)
 	if err != nil {
 		return h, nil, false, err
 	}

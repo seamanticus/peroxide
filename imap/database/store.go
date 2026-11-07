@@ -1,6 +1,7 @@
 package database
 
 import (
+	"cmp"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -14,6 +15,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/emersion/go-imap"
 	bolt "go.etcd.io/bbolt"
@@ -307,6 +309,52 @@ func (u *User) dropLostRecord(apiID, file string) error {
 		}
 		return tx.Bucket(bodiesBucket).Delete([]byte(apiID))
 	})
+}
+
+// MissingBody is a message whose body isn't stored.
+type MissingBody struct {
+	ID   string
+	Size int64 // Proton's, an estimate of what downloading it takes
+}
+
+// MissingBodies returns the messages whose body isn't stored, newest first
+// (Proton's time, then ID), as the body download takes them.
+func (u *User) MissingBodies() ([]MissingBody, error) {
+	type missing struct {
+		MissingBody
+		time int64
+	}
+	var all []missing
+	err := u.db.View(func(tx *bolt.Tx) error {
+		messages := tx.Bucket(messagesBucket)
+		if messages == nil {
+			return nil
+		}
+		bodies := tx.Bucket(bodiesBucket)
+		return messages.ForEach(func(k, _ []byte) error {
+			if bodies != nil && bodies.Get(k) != nil {
+				return nil
+			}
+			// userMessage: the metadata is encoding/json, not v2.
+			msg, err := userMessage(messages, string(k))
+			if err != nil {
+				return fmt.Errorf("cannot read message %s: %w", k, err)
+			}
+			all = append(all, missing{MissingBody{msg.ID, msg.Size}, int64(msg.Time)})
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(all, func(a, b missing) int {
+		return cmp.Or(cmp.Compare(b.time, a.time), cmp.Compare(a.ID, b.ID))
+	})
+	out := make([]MissingBody, len(all))
+	for i, m := range all {
+		out[i] = m.MissingBody
+	}
+	return out, nil
 }
 
 // DeleteBody removes what is stored of apiID, if anything; its metadata

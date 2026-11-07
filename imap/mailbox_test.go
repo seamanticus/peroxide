@@ -666,19 +666,26 @@ func TestLogoutWhileApplyingEvents(t *testing.T) {
 // number of the page (from 1), so that a test can block it. Requests for
 // specific IDs (MessagesByID) are refused with status (500 if 0), an error
 // only if not quiet. A request whose context is cancelled fails, as a real
-// transport's does.
+// transport's does. The full message of one of msgs (GET /messages/{id}) is
+// its metadata with a text body, unless full answers it; fulls counts them.
 type fakeMetadata struct {
 	t      *testing.T
 	msgs   []*protonmail.Message
 	hook   func(page int)
 	quiet  bool
 	status int
+	// full, if set, answers GET /messages/{id} instead.
+	full func(r *http.Request, id string) (*http.Response, error)
 
 	mu    sync.Mutex
 	pages int
+	fulls int
 }
 
 func (f *fakeMetadata) RoundTrip(r *http.Request) (*http.Response, error) {
+	if id, ok := strings.CutPrefix(r.URL.Path, "/messages/"); ok && r.Method == http.MethodGet {
+		return f.fullMessage(r, id)
+	}
 	if r.Method != http.MethodPost || r.URL.Path != "/mail/v4/messages" || r.Header.Get("X-HTTP-Method-Override") != http.MethodGet {
 		f.t.Errorf("unexpected request %v %v", r.Method, r.URL.Path)
 		return nil, errors.New("unexpected request")
@@ -745,6 +752,42 @@ func (f *fakeMetadata) RoundTrip(r *http.Request) (*http.Response, error) {
 		Body:       io.NopCloser(bytes.NewReader(b)),
 		Request:    r,
 	}, nil
+}
+
+func (f *fakeMetadata) fullMessage(r *http.Request, id string) (*http.Response, error) {
+	f.mu.Lock()
+	f.fulls++
+	f.mu.Unlock()
+	if err := r.Context().Err(); err != nil {
+		return nil, err
+	}
+	if f.full != nil {
+		return f.full(r, id)
+	}
+	i := slices.IndexFunc(f.msgs, func(m *protonmail.Message) bool { return m.ID == id })
+	if i < 0 {
+		return jsonResponse(r, http.StatusUnprocessableEntity, `{"Code":2501,"Error":"Message does not exist"}`), nil
+	}
+	full := *f.msgs[i]
+	full.MIMEType, full.Body = "text/plain", "body of "+id+"\r\n"
+	b, err := json.Marshal(struct {
+		Code    int
+		Message *protonmail.Message
+	}{1000, &full})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResponse(r, http.StatusOK, string(b)), nil
+}
+
+// jsonResponse is an API response to r.
+func jsonResponse(r *http.Request, status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    r,
+	}
 }
 
 // newDownloadTestUser returns a user with INBOX whose client answers the

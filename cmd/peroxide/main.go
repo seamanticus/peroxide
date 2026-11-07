@@ -500,14 +500,12 @@ func main() {
 			log.Fatal(err)
 		}
 
-		// Auth unlocks the keys too, as every command does; the download
-		// uses only the session and the store key, as metadata isn't
-		// decrypted.
-		c, _, storeKey, err := auth.NewManager(newClient).Auth(username, bridgePassword)
+		// The keys decrypt the bodies, which are stored built, as served.
+		c, privateKeys, storeKey, err := auth.NewManager(newClient).Auth(username, bridgePassword)
 		if err != nil {
 			log.Fatal(err)
 		}
-		if err := imapbackend.DownloadAccount(c, storeKey, *discard); err != nil {
+		if err := imapbackend.DownloadAccount(c, privateKeys, storeKey, *discard); err != nil {
 			log.Fatal(err)
 		}
 	case "sendmail":

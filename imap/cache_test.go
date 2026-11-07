@@ -105,7 +105,7 @@ func TestFailedMessagesRecorded(t *testing.T) {
 	}
 
 	setStatus(http.StatusTooManyRequests)
-	if _, _, err := u.storedMessage("a"); err == nil {
+	if _, _, err := u.storedMessage(t.Context(), "a"); err == nil {
 		t.Fatal("storedMessage() on 429 succeeded")
 	}
 	if failed() {
@@ -113,7 +113,7 @@ func TestFailedMessagesRecorded(t *testing.T) {
 	}
 
 	setStatus(http.StatusBadRequest)
-	if _, _, err := u.storedMessage("a"); err == nil {
+	if _, _, err := u.storedMessage(t.Context(), "a"); err == nil {
 		t.Fatal("storedMessage() on 400 succeeded")
 	}
 	if !failed() {
@@ -121,7 +121,7 @@ func TestFailedMessagesRecorded(t *testing.T) {
 	}
 
 	setStatus(http.StatusOK)
-	if _, _, err := u.storedMessage("a"); err != nil {
+	if _, _, err := u.storedMessage(t.Context(), "a"); err != nil {
 		t.Fatalf("storedMessage() = %v", err)
 	}
 	if failed() {
@@ -159,7 +159,7 @@ func TestStoredMessageBuiltOnce(t *testing.T) {
 	u.c = &protonmail.Client{RootURL: srv.URL}
 
 	for range 2 {
-		rec, literal, err := u.storedMessage("a")
+		rec, literal, err := u.storedMessage(t.Context(), "a")
 		if err != nil {
 			t.Fatalf("storedMessage() = %v", err)
 		}
@@ -180,7 +180,7 @@ func TestStoredMessageBuiltOnce(t *testing.T) {
 	if _, _, err := u.db.Body("a"); !errors.Is(err, database.ErrNotFound) {
 		t.Errorf("Body() after delete = %v, want ErrNotFound", err)
 	}
-	if _, _, err := u.storedMessage("a"); err != nil {
+	if _, _, err := u.storedMessage(t.Context(), "a"); err != nil {
 		t.Fatalf("storedMessage() after delete = %v", err)
 	}
 	if n := fetched(); n != 2 {

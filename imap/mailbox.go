@@ -182,7 +182,8 @@ func (mbox *mailbox) fetchMessage(seqNum, uid uint32, apiID string, items []imap
 	var rec *database.BodyRecord
 	var literal []byte
 	if needsContent(items) {
-		if rec, literal, err = mbox.u.storedMessage(apiID); err != nil {
+		// go-imap v1 gives a backend no context: the request runs to its end.
+		if rec, literal, err = mbox.u.storedMessage(context.Background(), apiID); err != nil {
 			return nil, nil, err
 		}
 	}

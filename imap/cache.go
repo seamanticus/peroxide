@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -77,7 +78,7 @@ func (b *builds) drop(db *database.User, apiID string) error {
 // storedMessage returns the message apiID as served, from the store, building
 // and storing it first if it isn't stored. A message Proton no longer has is
 // errMessageGone.
-func (u *user) storedMessage(apiID string) (*database.BodyRecord, []byte, error) {
+func (u *user) storedMessage(ctx context.Context, apiID string) (*database.BodyRecord, []byte, error) {
 	for {
 		rec, literal, err := u.db.Body(apiID)
 		if !errors.Is(err, database.ErrNotFound) {
@@ -88,7 +89,7 @@ func (u *user) storedMessage(apiID string) (*database.BodyRecord, []byte, error)
 			<-bd.done
 			continue
 		}
-		rec, literal, err = u.buildAndStore(apiID, bd)
+		rec, literal, err = u.buildAndStore(ctx, apiID, bd)
 		u.builds.finish(apiID)
 		return rec, literal, err
 	}
@@ -99,14 +100,14 @@ func (u *user) storedMessage(apiID string) (*database.BodyRecord, []byte, error)
 // the network, a rate limit or a server error, retryable) puts the message
 // in the failed set, which the background download skips; storing takes it
 // out again.
-func (u *user) buildAndStore(apiID string, bd *build) (*database.BodyRecord, []byte, error) {
-	full, err := u.c.GetMessage(apiID)
+func (u *user) buildAndStore(ctx context.Context, apiID string, bd *build) (*database.BodyRecord, []byte, error) {
+	full, err := u.c.GetMessage(ctx, apiID)
 	if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok && apiErr.Code == protonmail.CodeMessageDoesNotExist {
 		return nil, nil, fmt.Errorf("%w: %v", errMessageGone, err)
 	} else if err != nil {
 		return nil, nil, u.recordFailure(apiID, err)
 	}
-	built, err := u.buildMessage(full)
+	built, err := u.buildMessage(ctx, full)
 	if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok && apiErr.Code == protonmail.CodeMessageDoesNotExist {
 		// An attachment gone with its message.
 		return nil, nil, fmt.Errorf("%w: %v", errMessageGone, err)
