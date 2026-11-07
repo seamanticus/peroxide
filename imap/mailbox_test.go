@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
@@ -19,6 +20,15 @@ import (
 	"github.com/seamanticus/peroxide/imap/database"
 	"github.com/seamanticus/peroxide/protonmail"
 )
+
+// setBubbleClock moves the fake clock of the testing/synctest bubble it is
+// called in, which starts at 2000-01-01, to 2026-11-01: the database refuses
+// to make a mailbox while the clock reads a date before the UIDVALIDITY epoch
+// (2023-02-01). Call it first in the bubble, while nothing else runs: the
+// sleep then returns at once, the clock moved.
+func setBubbleClock() {
+	time.Sleep(time.Until(time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)))
+}
 
 // openTestDB opens a database in a temporary directory.
 func openTestDB(t *testing.T) *database.User {
@@ -401,12 +411,12 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 // The last Logout can come while the events goroutine is still applying a
 // page, blocked sending its updates: go-imap calls Logout with its server
 // lock held, and its update loop needs that lock to take more, so Logout must
-// not wait. The page then finishes with the session intact (its counts
-// request needs the client), and only then is the database closed and the
-// account removed from the backend; a login meanwhile finds the session
-// closing (getUser waits for it).
+// not wait. The page then finishes with the session intact, and only then is
+// the database closed and the account removed from the backend; a login
+// meanwhile finds the session closing (getUser waits for it).
 func TestLogoutWhileApplyingEvents(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
+		setBubbleClock()
 		inbox, db := newTestMailbox(t, nil)
 		// Unbuffered and unread: the page blocks on its first update, as when
 		// go-imap's update loop waits for the server lock Logout runs under.
@@ -418,26 +428,17 @@ func TestLogoutWhileApplyingEvents(t *testing.T) {
 		u.flags = map[string]string{}
 		u.numClients = 1
 		u.done = make(chan struct{})
-		var countRequests int // only the events goroutine writes it
+		// A delete page makes no request.
 		u.c = &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{
 			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				if r.URL.Path != "/messages/count" {
-					t.Errorf("unexpected request %v %v", r.Method, r.URL.Path)
-				}
-				countRequests++
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     http.Header{"Content-Type": {"application/json"}},
-					Body:       io.NopCloser(strings.NewReader(`{"Code":1000,"Counts":[{"LabelID":"0","Total":0,"Unread":0}]}`)),
-					Request:    r,
-				}, nil
+				t.Errorf("unexpected request %v %v", r.Method, r.URL.Path)
+				return nil, errors.New("unexpected request")
 			}),
 		}}
 		be.users["bob"] = u
 		syncTestMailbox(t, db, protonmail.LabelInbox, []*protonmail.Message{inboxMessage("a", 0)})
 
-		// A message deleted: its EXPUNGE is the page's one update, and once it
-		// is taken the page asks the API for message counts.
+		// A message deleted: its EXPUNGE is the page's one update.
 		events := make(chan *protonmail.Event)
 		u.startEvents(be.updates, events)
 		events <- &protonmail.Event{ID: "e1", Messages: []*protonmail.EventMessage{{
@@ -466,10 +467,6 @@ func TestLogoutWhileApplyingEvents(t *testing.T) {
 		close((<-be.updates).Done())
 		u.eventLoop.Wait()
 
-		if countRequests != 1 {
-			t.Errorf("made %v counts requests after Logout, want 1: the page finishes with the session", countRequests)
-		}
-
 		be.Lock()
 		_, still := be.users["bob"]
 		be.Unlock()
@@ -480,7 +477,7 @@ func TestLogoutWhileApplyingEvents(t *testing.T) {
 			t.Error("the session was kept after its events stopped")
 		}
 		if _, _, err := db.LastEventID(); err == nil {
-			// Reopening below would wait forever on bolt's file lock.
+			// Reopening below would fail on bolt's file lock (ErrInUse).
 			t.Fatal("the database is still open after its events stopped")
 		}
 
@@ -622,6 +619,7 @@ func uidsByID(t *testing.T, mbox *mailbox) map[string]uint32 {
 // counts match.
 func TestDownloadAndEventsInterleave(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
+		setBubbleClock()
 		fetching, release := make(chan struct{}), make(chan struct{})
 		api := &fakeMetadata{t: t, msgs: []*protonmail.Message{
 			inboxMessage("m5", 0), inboxMessage("m4", 0), inboxMessage("m3", 1),
@@ -678,6 +676,7 @@ func TestDownloadAndEventsInterleave(t *testing.T) {
 // resumes from the page after it, with no message listed twice and UIDs kept.
 func TestDownloadResumes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
+		setBubbleClock()
 		msgs := []*protonmail.Message{inboxMessage("m4", 0), inboxMessage("m3", 0), inboxMessage("m2", 0), inboxMessage("m1", 0)}
 		stopped := make(chan struct{})
 		api := &fakeMetadata{t: t, msgs: msgs}
@@ -728,6 +727,7 @@ func TestEventsAskForRebuild(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
+				setBubbleClock()
 				api := &fakeMetadata{t: t, quiet: true}
 				u, inbox, _ := newDownloadTestUser(t, api)
 				if err := u.db.SetSyncDone(); err != nil {
