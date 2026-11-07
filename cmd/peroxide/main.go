@@ -521,9 +521,10 @@ func main() {
 			log.Fatal("usage: peroxide sendmail <username> -- <args...>")
 		}
 
-		// TODO: other sendmail flags
-		var dotEOF bool
-		sendmailCmd.BoolVar(&dotEOF, "i", false, "don't treat a line with only a . character as the end of input")
+		// git send-email always passes -i ("a line holding only . doesn't end
+		// the input"), and the FlagSet exits on a flag it doesn't define. stdin
+		// is read to its end anyway, so -i is accepted and changes nothing.
+		sendmailCmd.Bool("i", false, "accepted for sendmail(1) compatibility; stdin is always read to its end")
 		sendmailCmd.Parse(flag.Args()[3:])
 		rcpt := sendmailCmd.Args()
 

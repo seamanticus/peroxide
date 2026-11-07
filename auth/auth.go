@@ -18,6 +18,9 @@ import (
 	"github.com/seamanticus/peroxide/protonmail"
 )
 
+// authFileMode lets only its owner read and write auth.json.
+const authFileMode = 0o600
+
 func authFilePath() (string, error) {
 	return config.Path("auth.json")
 }
@@ -57,11 +60,17 @@ func saveAuths(auths map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get auth file path: %v", err)
 	}
-	f, err := os.Create(p)
+	// Usernames are in clear and the records are only as safe as the bridge
+	// password: no one else may read them. Chmod too, as OpenFile's mode
+	// applies only to a new file and older peroxides created it 0644.
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, authFileMode)
 	if err != nil {
 		return fmt.Errorf("failed to create cached auth file: %v", err)
 	}
 	defer f.Close()
+	if err := f.Chmod(authFileMode); err != nil {
+		return fmt.Errorf("cannot restrict cached auth file to its owner: %w", err)
+	}
 
 	if err := json.NewEncoder(f).Encode(auths); err != nil {
 		return fmt.Errorf("failed to write cached auth file: %v", err)
