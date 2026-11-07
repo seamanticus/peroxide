@@ -8,29 +8,75 @@ Each account has a bolt database, `~/.config/peroxide/<username>.db`
 | Bucket | Content |
 |---|---|
 | `messages` | Each message's metadata as Proton lists it, JSON, keyed by Proton's message ID: subject, addresses, date, size, flags, label IDs, attachment list. No body |
-| `mailboxes/<label ID>` | One bucket per mailbox: its messages in order, each with its sequence number and UID |
+| `mailboxes/<label ID>` | One bucket per mailbox: its UIDVALIDITY, and its messages by UID and by message ID |
 | `counts` | Total and unread per mailbox, kept as messages change, so STATUS doesn't count |
 | `events` | `last`: the ID of the last Proton event applied |
+| `meta` | The schema version, the last UIDVALIDITY given, where the download stands, and whether a rebuild was asked for |
 
 It is not encrypted. See [../accounts.md](../accounts.md#files-on-disk).
 
-## When a mailbox is filled
+A database left by an older peroxide (another schema version) is
+wiped when opened, and downloaded again: it is only a copy of what
+Proton has.
 
-A mailbox is **synchronized** (`mailbox.sync`) the first time a client
-uses it in this session: FETCH, SEARCH, STORE, COPY, MOVE, EXPUNGE or
-APPEND. SELECT and STATUS don't: they use Proton's counts until then.
-Synchronizing:
+## The download
 
-1. empties the mailbox's bucket (its UIDs start again from 1);
-2. lists the mailbox from Proton, 150 messages per request, oldest
-   first (`GET /messages?Desc=0&Label=<ID>&PageSize=150&Sort=ID`, then
-   `&Page=1`, ...);
-3. stores each message's metadata and gives it the next UID.
+At login, peroxide **downloads the metadata of every message of the
+account** in the background, as proton-bridge syncs, and only once per
+database: later logins rely on events.
 
-A folder of 2000 messages takes 14 requests, about 0.4 s each from a
-distant location; aerc waits for them before its first list. Then the
-mailbox is current, and stays so through events, until peroxide
-restarts. `TODO.md` sections 9 and 9.1.
+1. It lists the account **newest first**, 128 messages per request,
+   every label at once: `POST /mail/v4/messages` with
+   `X-HTTP-Method-Override: GET` and `{Desc: 1, PageSize: 128, Sort:
+   "ID"}`, then `EndID` = the oldest message of the page before (which
+   Proton lists again first, and peroxide skips).
+2. Each message is filed in the mailbox of each of its labels, with the
+   next UID there. So **the newest message has UID 1**: UIDs of
+   downloaded mail run in reverse arrival order, as with proton-bridge.
+   Sort by date in the client (aerc: `sort = -r date`) rather than by
+   UID. Mail that arrives later counts up from there.
+3. Each page and the point reached are stored in one transaction, so a
+   download stopped at any point (peroxide stopped, the last client
+   logged out) resumes from there at the next login.
+4. A failed request is retried after 20 s, as proton-bridge does.
+
+Clients can use their mailboxes while they fill: each page sends EXISTS
+to the clients that have a mailbox selected, and STATUS counts grow as
+the download goes. An account of 20000 messages takes about 160
+requests, around a minute from a distant location.
+
+Events keep being applied meanwhile. Each page is requested and stored
+while holding the account's lock (`user.syncSem`), and events and
+actions take it between pages, so they wait one page at most. A message
+that arrives during the download gets the next UID when its event is
+applied, possibly below older ones listed later, and the page that lists
+it again leaves it alone: no UID is ever given twice.
+
+For a large account, run the download before the first client connects,
+with peroxide serve stopped (see
+[../commands.md](../commands.md#download-mailbox)):
+
+    peroxide download-mailbox <username>
+
+## Rebuilding the database
+
+The database is rebuilt from scratch, never repaired in place: Proton is
+the source of truth. A rebuild wipes the database and downloads the
+account again; every mailbox gets a new UIDVALIDITY, so clients drop
+what they cached and fetch again. Nothing in Proton changes, and you stay
+logged in (`auth.json` is a separate file). The `\Deleted` flags set in
+this session are lost.
+
+A rebuild happens:
+
+- when Proton sends a **Refresh** event, or when an event **can't be
+  applied** (see below);
+- with `peroxide download-mailbox -discard-local-copy <username>`;
+- when the database is from an older peroxide.
+
+The first two mark the database for a rebuild: its clients get
+`* BYE` and are disconnected, and the next login (theirs, as they
+reconnect, or after a restart) wipes it and starts the download.
 
 ## Proton's events
 
@@ -52,35 +98,37 @@ peroxide (package `events`):
   [changes.md](changes.md));
 - stops polling when the account's last client logs out.
 
-Each page is applied whole, in order, while no mailbox synchronizes
-(`user.syncSem`): a sync and an event never interleave. Then:
+Each page is applied whole, in order, between two pages of the download
+(`user.syncSem`). Then:
 
 - **Messages**: created ones are added to every mailbox their labels
-  name; updates change flags and labels (a message given a folder's
-  label appears there; one losing a label leaves it); deletes remove it
-  everywhere. Clients with an affected mailbox selected get `EXISTS`,
-  `EXPUNGE` or `FETCH (FLAGS)`. A mailbox not synchronized yet gets no
-  `FETCH (FLAGS)`: no client knows its sequence numbers. All Mail is
-  the usual case, as aerc STATUSes it without opening it.
+  name (one the download already stored keeps its UIDs); updates change
+  flags and labels (a message given a folder's label appears there; one
+  losing a label leaves it); deletes remove it everywhere. Clients with
+  an affected mailbox selected get `EXISTS`, `EXPUNGE` or `FETCH
+  (FLAGS)`. An update for a message the database lacks is left to the
+  download while it runs; after, the message is fetched and stored.
 - **Labels**: see [mailboxes.md](mailboxes.md#when-protons-folders-and-labels-change).
 - **Addresses**: the address list is updated (see
   [../accounts.md](../accounts.md#keys-that-change-while-peroxide-runs)).
-- **Refresh**: Proton says "start over". Every mailbox is emptied, and
-  folders, labels and counts are listed again; mailboxes fill again when
-  next used.
+- **Refresh**: Proton says "start over": a rebuild.
 
 After each page, peroxide stores its event ID. The next session resumes
 from there, so what changed while peroxide was stopped is applied at
-the next login, rather than lost.
+the next login, rather than lost. A page with a message event that
+fails (the database can't store it, or a missing message can't be
+fetched) is not stored as applied: the database is marked for a
+rebuild instead, so that it never silently differs from Proton.
 
 If Proton refuses the stored ID (HTTP 400, 404 or 422 with an API code
 for an invalid value or ID), peroxide starts again from the latest
-event and rebuilds every mailbox, as for a Refresh. Network errors, 401,
+event and rebuilds, as for a Refresh. Network errors, 401,
 429 and 5xx are retried with the same ID at the next poll.
 
 On the very first login of an account (no ID stored), peroxide asks for
-the latest event ID **before** listing folders and counts, so a change
-made in between comes as an event instead of being missed.
+the latest event ID **before** listing folders and starting the
+download, so a change made meanwhile comes as an event instead of being
+missed (proton-bridge's `StartSyncEventID`).
 
 ### What this means in practice
 
@@ -89,36 +137,47 @@ made in between comes as an event instead of being missed.
   connected, or at once on a NOOP sent with a mailbox selected. aerc's
   check-mail sends STATUS for the folders it knows, which reads the
   counts peroxide already has and polls nothing.
-- With no client connected, peroxide makes no requests at all.
+- With no client connected, peroxide makes no requests at all: the
+  download, like polling, runs only while a client is logged in.
 - IDLE works, but adds nothing over polling: updates arrive at the
   poll, not at the moment Proton gets the mail.
 
 ## UIDs
 
 RFC 3501 requires that a UID, under one UIDVALIDITY, always names the
-same message. **peroxide does not keep that promise across restarts**:
-UIDVALIDITY is always 1, and each session's first sync of a mailbox
-gives its messages new UIDs from 1. Within one run of peroxide, UIDs are
-stable.
+same message. peroxide keeps each mailbox's UIDs and UIDVALIDITY in the
+database, across sessions and restarts; only a rebuild changes them,
+and then UIDVALIDITY changes too, so clients that cache by UID
+(Thunderbird, mbsync, aerc's header cache) know to drop their cache.
 
-A client that caches by UID (Thunderbird, mbsync, offlineimap, aerc's
-header cache) can show the wrong message for a cached UID after
-peroxide restarts, or flag the wrong one. Clear the client's cache after
-restarting peroxide, or use a client that doesn't cache. `TODO.md`
-section 9.1 plans keeping UIDs across sessions.
+UIDVALIDITY is the time the mailbox was made, in seconds since
+2023-02-01, as gluon (proton-bridge's IMAP library) gives it, and always
+above any given before by that database. If the system clock reads a
+date before 2023-02-01 (a dead CMOS battery resets it to the BIOS date),
+peroxide refuses to make a mailbox, saying so, rather than give a
+UIDVALIDITY that may repeat: set the clock right.
+
+Deleting `<username>.db` with peroxide stopped is a rebuild too, but
+then the last UIDVALIDITY given is forgotten: if the clock went back
+meanwhile, a value may repeat. Prefer `download-mailbox
+-discard-local-copy`.
 
 `\Deleted` is kept in memory only (Proton has no such flag), per
 mailbox: it is lost when peroxide restarts, which RFC 3501 allows.
 
 ## How proton-bridge does it
 
-proton-bridge syncs the whole account in the background after login:
-every message's metadata, then every body, into Gluon's encrypted
-store. Its UIDs persist and its UIDVALIDITY changes only when it must.
-It polls events at the same 20 + 0..20 s, and on an event it can't
-apply it reports a "bad event" and offers a full resync.
+proton-bridge syncs the whole account in the background after login,
+newest first (`GetMessageMetadataPage` with `Desc` and `EndID`, 128 per
+page): every message's metadata, then every body, into Gluon's
+encrypted store. Events received meanwhile are applied as they come.
+Its UIDs persist, and UIDVALIDITY comes from the same epoch. On a
+Refresh it deletes the account's data and syncs again; on an event it
+can't apply it reports a "bad event" and offers a resync, its `repair`
+command does the same, and a resync asked for is remembered
+(`ShouldResync`) until the next login.
 
-peroxide syncs nothing until a client asks, and keeps no bodies, so
-its first use of a mailbox costs a full listing each session, and the
-UID guarantee is lost on restart. In return its disk and memory use
-stay small, and an account no client opens costs nothing.
+peroxide downloads the same metadata the same way, but no bodies: each
+FETCH of a body still makes a request (`TODO.md` section 9). An event
+it can't apply rebuilds at once rather than waiting for you to choose,
+as there is no window to ask in.

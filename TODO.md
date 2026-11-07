@@ -236,26 +236,20 @@ opened yet, Starred included.
 
 **Steps.**
 
-1. (done) `applyUpdate` skips mailboxes not synced yet
-   (`mbox.initialized` false): no lookup, no warning, no FETCH; they
-   get their counts from the API until synced.
+1. (done, superseded by 1476ca8) `applyUpdate` skipped mailboxes not
+   synced yet. Every mailbox is now filled by the account download, so
+   none is skipped.
 2. (done) All Mail is shown unless `serve -show-all-mail=false`, as
    bridge's `ShowAllMail` (on by default): off, it is left out of LIST
    only (`user.ListMailboxes`), and SELECT/STATUS still open it by name,
    as gluon does. Open: Almost All Mail (`"15"`) has no mailbox, and
    bridge shows none either (`WantLabel`); add one only if asked.
-3. (decided 2026-11-07) With `-show-all-mail=true`, All Mail syncs in
-   the background after login, as proton-bridge syncs every message at
-   login (internal/services/syncservice). Built on section 9.1, so it
-   runs once per database and resumes, not once per session: see 9.1
-   step 6. Not before: today's sync holds `syncSem` for the whole
-   listing (events, actions and other syncs wait), and would list the
-   whole account at every login. Holding `syncSem` per page instead
-   brings back the 2026-11-05 out-of-order UIDs
-   (`TestEventDuringSyncKeepsOrder`) unless events for All Mail are
-   held until the sync ends.
-4. (done) Tests: `TestStoreSkipsUnsyncedMailbox` (no log, one FETCH for
-   INBOX only) and `TestListShowAllMail` (imap/actions_test.go).
+3. (done, 1476ca8) One background download of the whole account after
+   login, newest first, as bridge's sync (section 9.1), whatever
+   `-show-all-mail` says: like `ShowAllMail`, it only changes LIST.
+   `syncSem` is held per page; events interleave (decided 2026-11-08).
+4. (done) Tests: `TestStoreTellsEveryMailbox` (was
+   `TestStoreSkipsUnsyncedMailbox`) and `TestListShowAllMail`.
 
 ## 9. Fetch full messages in the background (BODYSTRUCTURE cost)
 
@@ -392,6 +386,23 @@ and a failed sync rewinds the events to that ID.
    Date and Sender; an unstored one the metadata's, without a request.
 
 ### 9.1 Keep UIDs across sessions (option b)
+
+**Done (1476ca8), as proton-bridge v3 does it** (decisions of
+2026-11-08): one background download of the whole account at login,
+newest first (`POST /mail/v4/messages` `{Desc, EndID}`, 128 per page,
+cursor stored with each page, so it resumes), so synced mail gets UIDs
+in reverse arrival order as with bridge, left to clients to sort;
+`syncSem` per page with events applied between pages, creates
+idempotent; UIDVALIDITY per mailbox from gluon's epoch, refused before
+2023-02-01; a schema version that wipes older databases; counts kept;
+a UID index per mailbox. Repairs are rebuilds from a wiped database,
+never prunes: a Refresh, or a message event that fails, stores no event
+ID, marks the database (`meta/rebuild`, bridge's `ShouldResync`), sends
+BYE and disconnects the account's clients; the next login wipes and
+downloads again. `peroxide download-mailbox [-discard-local-copy]` runs
+the download from the command line. docs/imap/sync.md has the details.
+Still open: the bodies (section 9 steps 1-4, 7, 8). What follows is the
+plan as written before, kept for the record.
 
 **Problem.** `mailbox.init` syncs a mailbox on its first use in every
 session (FETCH, SEARCH, STORE, COPY, MOVE, EXPUNGE, APPEND; not SELECT
@@ -602,7 +613,12 @@ Found in the 2026-11-06 audit; none is from branch `labels-events`.
    message is: multipart boundaries already derive from the message ID
    (`messageHeader`, sha1), passThroughBoundary too; keep it so and test
    that two builds of one message give equal bytes and RFC822.SIZE.
-3. **A Refresh rebuilds mailboxes under clients' feet.** On
+3. (done, 1476ca8) **A Refresh rebuilds mailboxes under clients' feet.**
+   A Refresh now marks the database for a rebuild, sends BYE and
+   disconnects the account's clients, as proton-bridge removes its IMAP
+   user; the next login wipes and downloads again with new UIDVALIDITY
+   values, so no client keeps stale sequence numbers. What was written:
+   On
    `EventRefreshMail`, `receiveEvents` resets every mailbox, then
    `initMailboxes` replaces `u.mailboxes` with new `*mailbox` values,
    making requests (ListLabels) while holding `u.Lock` (every
@@ -620,7 +636,8 @@ Found in the 2026-11-06 audit; none is from branch `labels-events`.
    on Refresh then tells UID-caching clients too. Test: a selected
    mailbox gets the expunges and its new EXISTS after a Refresh, and
    `getMailbox` doesn't wait on ListLabels.
-4. **STATUS waits for a sync.** `Status` takes `mbox.Lock` for the whole
+4. (done, 1476ca8: no sync holds the mailbox lock; STATUS takes none and
+   reads the stored counts) **STATUS waits for a sync.** `Status` takes `mbox.Lock` for the whole
    count, and `init` holds that lock (and `syncSem`) for the whole sync:
    a STATUS of a mailbox being synced (aerc's check-mail) waits minutes,
    though `apiCountsLock` exists so counts don't need the mailbox lock.
@@ -629,7 +646,8 @@ Found in the 2026-11-06 audit; none is from branch `labels-events`.
    mailbox answers `apiCounts()`. A sync in progress then reports API
    counts until it ends. Test (testing/synctest): STATUS answers while
    `sync` blocks on its listing.
-5. **SELECT of an unsynced mailbox can make EXISTS go down.** SELECT
+5. (done, 1476ca8: no API counts; every mailbox is counted locally and
+   only grows as the download goes) **SELECT of an unsynced mailbox can make EXISTS go down.** SELECT
    calls `init` first, so SELECT itself is exact; but STATUS (and the
    EXISTS go-imap derives from a `MailboxUpdate` for a mailbox not yet
    synced) uses `apiCounts()`, then the first event sends EXISTS with

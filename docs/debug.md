@@ -30,9 +30,9 @@ client line is half received lands after it, not inside it.
 
 ## What a log looks like
 
-    >> GET /messages?Desc=0&Label=0&PageSize=150&Sort=ID
-    << GET /messages 200 OK
-    {"Code":1000,"Total":2,"Messages":[{"ID":"...","Subject":"Hello",...}]}
+    >> GET /messages/kPAWhk...
+    << GET /messages/kPAWhk... 200 OK
+    {"Code":1000,"Message":{"ID":"kPAWhk...","Subject":"Hello",...}}
     a3 UID FETCH 1:* (UID FLAGS BODYSTRUCTURE)
     * 1 FETCH (UID 1 FLAGS (\Seen) BODYSTRUCTURE (...))
     a3 OK UID FETCH completed

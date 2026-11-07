@@ -73,14 +73,12 @@ all.
 
 ## STATUS and SELECT counts
 
-Until a mailbox has been used in this session (see
-[sync.md](sync.md)), its counts are Proton's: listed at login
-(`/messages/count`) and fetched again after every event page that
-changed a message. Once used, they are counted from the local database,
-which events keep current.
+Counted from the local database, which the download fills and events
+keep current: while the first download runs, they grow with it (see
+[sync.md](sync.md#the-download)).
 
-`UIDVALIDITY` is always 1, `RECENT` always 0, and SELECT gives no
-`[UNSEEN n]`. See [sync.md](sync.md#uids) for what that means.
+`UIDVALIDITY` is the mailbox's own, kept across restarts; `RECENT` is
+always 0, and SELECT gives no `[UNSEEN n]`. See [sync.md](sync.md#uids).
 
 ## When Proton's folders and labels change
 

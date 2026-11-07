@@ -56,10 +56,11 @@ in memory for as long as the process runs: a second login, from any
 client, only checks the password against a bcrypt hash and reuses them.
 
 **The IMAP account opens.** peroxide lists your Proton folders and
-labels and the message counts, opens `~/.config/peroxide/<user>.db`,
-and starts polling Proton's events every 20 to 40 seconds. A mailbox is
-filled from Proton (its message list, metadata only) the first time a
-client uses it in this session. See [imap/sync.md](imap/sync.md).
+labels, opens `~/.config/peroxide/<user>.db`, and starts polling
+Proton's events every 20 to 40 seconds. The first time, it also starts
+downloading every message's metadata into the database, newest first,
+in the background; mailboxes fill as it goes, and later logins only
+apply events. See [imap/sync.md](imap/sync.md).
 
 **The client fetches a message.** Flags, envelope and size come from
 the local database. Anything that needs the body (BODYSTRUCTURE, a body

@@ -62,6 +62,30 @@ session; `serve` does it once.
 Lists the usernames that have stored credentials. It reads only the
 names in `auth.json` (they are not encrypted) and makes no request.
 
+### `download-mailbox [-discard-local-copy] <username>`
+
+Downloads the account's mail into peroxide's local copy now and exits
+once it is complete: the same download `serve` runs in the background
+after a client logs in (see [imap/sync.md](imap/sync.md#the-download)),
+metadata only, newest first. Use it before the first client connects to
+a large account, so the client finds every mailbox full. It asks for the
+bridge password or reads `PEROXIDE_BRIDGE_PASS`, as `sendmail` does.
+
+Interrupted (Ctrl-C) or failed, it exits with status 1, and the next
+run, or the next login, resumes where it stopped. A local copy already
+complete makes it exit at once.
+
+`-discard-local-copy` first wipes the local copy, then downloads the
+account from scratch: for a copy that went wrong. Every mailbox gets a
+new UIDVALIDITY, so clients drop their caches and fetch again. Nothing
+in Proton changes. It is what peroxide does by itself on a Refresh
+event or an event it can't apply (see
+[imap/sync.md](imap/sync.md#rebuilding-the-database)).
+
+Not while `serve` runs: the database file takes one process at a time,
+and the command fails with "the database is in use by another peroxide
+process". Stop `serve` first.
+
 ### `sendmail <username> -- <recipients...>`
 
 A `sendmail(1)` replacement for programs such as `git send-email`. It
