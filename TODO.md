@@ -352,6 +352,69 @@ again (service.go:463-525). peroxide does this for the metadata since
   `auth.json` would not (whoever read the old entry kept that key).
   Details in step 1.
 
+**Decided 2026-11-09** (fourth round, after a review of every check
+the FETCH path makes today):
+
+- Key hand-over: `auth.Manager.Auth` returns a third value, the
+  store key (`[32]byte`), derived inside `auth` from the secret key and
+  the account's `UserID`; the cached session keeps the `UserID`. SMTP
+  and `sendmail` ignore it.
+- Where: one sealed file per message (AES-256-GCM, one shot, the
+  message ID as additional data, no compression), named by the hex of
+  the message ID, under `$XDG_DATA_HOME/peroxide/<user>/` when that is
+  set and absolute, else `~/.local/share/peroxide/<user>/`
+  (`config.DataPath`): mail is data, not cache, and is backed up as
+  such. `<user>.db` stays in `~/.config/peroxide/`. Linux only. The
+  per-message record (size, BODYSTRUCTURE, envelope, fallback flag)
+  goes in a bolt bucket, sealed under the same key.
+- One serving path: the message is built once, stored, and every FETCH
+  item that depends on content (ENVELOPE, BODYSTRUCTURE, RFC822.SIZE,
+  `BODY[...]`) is served from the stored bytes through go-imap's
+  `backendutil`. A message not stored yet is built and stored first
+  (one request, as aerc's list FETCH costs today); only FLAGS, UID and
+  INTERNALDATE stay metadata-only. Content never changes under a UID.
+  This retires the hand-built BODYSTRUCTURE and sections in
+  imap/message.go and the memory cache, and fixes 11.2 (RFC822.SIZE)
+  and 12.6 (attachment size); 12.5's logs happen once, at build.
+- Unlocked keys change: messages stored as a fallback (armored body,
+  `.pgp` attachment, PGP/MIME pass-through) are built again and, when
+  their bytes differ, get new UIDs, by the same path as an edited
+  draft.
+- Edited drafts and sent messages (`EventUpdate`): as gluon
+  (`applyMessageUpdated`): fetch, build, compare with the stored bytes,
+  new UIDs only when they differ. A message not stored keeps its UIDs.
+- Last resort: built bytes that `backendutil` can't parse are replaced
+  by a safe message, a text part saying why and the content as an
+  `application/octet-stream` attachment.
+- Received PGP/MIME (`MIMEType` multipart/mixed: the decrypted body is
+  a whole MIME entity): bridge's `buildPGPRFC822`, its header merged
+  into the message's, `multipart/signed` when signatures are extracted.
+  Today it is wrapped in a `multipart/mixed` part without a boundary.
+- Attached messages (`message/rfc822`): no transfer encoding, as
+  bridge, so their BODYSTRUCTURE carries the envelope and structure
+  RFC 3501 requires.
+- An attachment that fails to decrypt after its key packets opened is
+  served as `<name>.pgp`, as bridge, instead of failing the FETCH.
+- A section that doesn't exist answers an empty string, as Dovecot and
+  gluon, instead of failing the FETCH.
+- SEARCH: on stored messages HEADER, SENTBEFORE/SENTSINCE (the
+  header's Date), LARGER/SMALLER and BODY/TEXT (the decoded text parts)
+  read the stored message; unstored ones answer from the metadata, so
+  results may change as the download goes. Today BODY and TEXT read the
+  metadata's empty `Body` and never match.
+- Failed messages: as bridge, a set of message IDs that failed to
+  build or download (other than 2501, 429, 5xx, network), in bolt
+  under `meta`, cleared by `Wipe`. The background download skips them;
+  an interactive FETCH, an event or `download-mailbox` retries them,
+  and success removes them. Unlike bridge, the message stays listed
+  (its metadata is stored).
+- Commits, each building alone: (1) `auth` derives the key; (2) sealed
+  store, records, key check in `meta`, Wipe removes the files; (3)
+  FETCH from the store, single-flight per message, deletes, ENVELOPE
+  from the header, SEARCH; (4) body downloader with AIMD
+  (`APIError` gets `Retry-After`), `download-mailbox` too; (5) edited
+  drafts and key changes; (6) docs and TODO. Then 9.1's step 8.
+
 **Found in the 2026-11-08 audit of uid-persist, to settle first or
 with it.**
 
