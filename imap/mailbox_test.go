@@ -616,8 +616,10 @@ func uidsByID(t *testing.T, mbox *mailbox) map[string]uint32 {
 // the newest gets UID 1; it pages with EndID and skips the message each page
 // starts with. An event page arriving while a page is being fetched waits for
 // that page only (option A of the 2026-11 decisions, as bridge applies events
-// during its sync): a message it creates gets the next UID, and the page that
-// later lists it again leaves that UID alone. No UID is given twice.
+// during its sync), then gets in before the download ends: which of the
+// remaining pages goes first is up to the scheduler, so only what holds either
+// way is checked. Every message has one UID, none is given twice, and the
+// counts match.
 func TestDownloadAndEventsInterleave(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fetching, release := make(chan struct{}), make(chan struct{})
@@ -654,9 +656,16 @@ func TestDownloadAndEventsInterleave(t *testing.T) {
 		<-applied
 		u.downloads.Wait()
 
-		want := map[string]uint32{"m5": 1, "m4": 2, "m6": 3, "m3": 4, "m2": 5, "m1": 6}
-		if got := uidsByID(t, inbox); !maps.Equal(got, want) {
-			t.Errorf("UIDs = %v, want %v", got, want)
+		got := uidsByID(t, inbox)
+		// Pages 1 and 2 were stored before the event could be applied.
+		for id, uid := range map[string]uint32{"m5": 1, "m4": 2, "m3": 3} {
+			if got[id] != uid {
+				t.Errorf("message %v has UID %v, want %v", id, got[id], uid)
+			}
+		}
+		uids := slices.Sorted(maps.Values(got))
+		if len(got) != 6 || !slices.Equal(uids, []uint32{1, 2, 3, 4, 5, 6}) {
+			t.Errorf("UIDs = %v, want each of m1..m6 once with UIDs 1..6", got)
 		}
 		checkStatus(t, inbox, 6, 2)
 		if _, done, err := u.db.SyncState(); err != nil || !done {
@@ -694,8 +703,9 @@ func TestDownloadResumes(t *testing.T) {
 		if got := uidsByID(t, inbox); !maps.Equal(got, want) {
 			t.Errorf("UIDs = %v after resuming (%v before), want %v", got, first, want)
 		}
-		if !maps.Equal(first, map[string]uint32{"m4": 1, "m3": 2}) && len(first) != 0 {
-			t.Errorf("UIDs before resuming = %v, want the first page or none", first)
+		// The page being fetched when the client left is still stored.
+		if wantFirst := map[string]uint32{"m4": 1, "m3": 2, "m2": 3}; !maps.Equal(first, wantFirst) {
+			t.Errorf("UIDs before resuming = %v, want %v", first, wantFirst)
 		}
 	})
 }
