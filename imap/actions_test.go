@@ -381,9 +381,9 @@ func TestStoreSeenFailure(t *testing.T) {
 	checkStatus(t, mbox, 2, 1)
 }
 
-// Between two folders MOVE is one label call, as in proton-bridge: Proton
-// takes the message out of the source folder itself. Locally it is in the
-// destination and out of the source at once.
+// MOVE labels with the destination, then unlabels from the source, as
+// proton-bridge does by default, and applies both without waiting for an
+// event.
 func TestMoveAppliedWithoutEvent(t *testing.T) {
 	api := &fakeAPI{t: t}
 	mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{inboxMessage("a", 1), inboxMessage("b", 0)})
@@ -394,19 +394,20 @@ func TestMoveAppliedWithoutEvent(t *testing.T) {
 	}
 	checkStatus(t, mbox, 1, 0)
 	checkStatus(t, archive, 1, 1)
-	if got, want := api.madeRequests(), []string{"PUT /messages/label"}; !slices.Equal(got, want) {
+	if got, want := api.madeRequests(), []string{"PUT /messages/label", "PUT /messages/unlabel"}; !slices.Equal(got, want) {
 		t.Errorf("made requests %q, want %q", got, want)
 	}
 }
 
-// MOVE refuses what proton-bridge refuses, before any request: out of or into
-// All Mail, and between INBOX and Sent. A MOVE into the mailbox itself does
-// nothing.
+// MOVE refuses, before any request, moves into or out of All Mail and
+// Starred, views of messages kept in their folders, and between INBOX and
+// Sent. A MOVE into the mailbox itself does nothing.
 // evidence: witnesses
 func TestMoveRefused(t *testing.T) {
 	name := map[string]string{
 		protonmail.LabelInbox:   imap.InboxName,
 		protonmail.LabelAllMail: "All Mail",
+		protonmail.LabelStarred: "Starred",
 		protonmail.LabelSent:    "Sent",
 		protonmail.LabelArchive: "Archive",
 	}
@@ -417,6 +418,10 @@ func TestMoveRefused(t *testing.T) {
 	}{
 		{"out of All Mail", protonmail.LabelAllMail, protonmail.LabelArchive, true},
 		{"into All Mail", protonmail.LabelArchive, protonmail.LabelAllMail, true},
+		{"out of Starred", protonmail.LabelStarred, protonmail.LabelArchive, true},
+		{"into Starred", protonmail.LabelInbox, protonmail.LabelStarred, true},
+		{"Starred to All Mail", protonmail.LabelStarred, protonmail.LabelAllMail, true},
+		{"All Mail to Starred", protonmail.LabelAllMail, protonmail.LabelStarred, true},
 		{"INBOX to Sent", protonmail.LabelInbox, protonmail.LabelSent, true},
 		{"Sent to INBOX", protonmail.LabelSent, protonmail.LabelInbox, true},
 		{"into itself", protonmail.LabelArchive, protonmail.LabelArchive, false},
@@ -451,19 +456,18 @@ func inMailbox(mbox *mailbox, apiID string) bool {
 }
 
 // A MOVE that fails partway leaves no message in both mailboxes nor in
-// neither (RFC 6851 section 3.3). Between folders it is one label call, so a
-// failure leaves the message where it was. Out of Starred, not a folder, it
-// is a label then an unlabel: a message the label failed for isn't
-// unlabelled; one the unlabel failed for is looked up: if Proton shows it out
-// of the source already, it is moved; otherwise it is taken out of the
-// destination again.
+// neither (RFC 6851 section 3.3). A message the label failed for isn't
+// unlabelled. One the unlabel answers "does not exist" for (labelling into a
+// folder took it out of the source already) is moved. One the unlabel failed
+// for is looked up: if Proton shows it out of the source, it is moved;
+// otherwise it is taken out of the destination again.
 // evidence: witnesses
 func TestMovePartialFailure(t *testing.T) {
 	var (
 		labelArchive   = "/messages/label " + protonmail.LabelArchive
-		unlabelStarred = "/messages/unlabel " + protonmail.LabelStarred
+		unlabelInbox   = "/messages/unlabel " + protonmail.LabelInbox
 		unlabelArchive = "/messages/unlabel " + protonmail.LabelArchive
-		inBoth         = []string{protonmail.LabelStarred, protonmail.LabelArchive, protonmail.LabelAllMail}
+		inBoth         = []string{protonmail.LabelInbox, protonmail.LabelArchive, protonmail.LabelAllMail}
 	)
 	const (
 		label    = "PUT /messages/label"
@@ -472,7 +476,6 @@ func TestMovePartialFailure(t *testing.T) {
 	)
 	for _, tc := range []struct {
 		name         string
-		from         string // the source: INBOX, a folder, or Starred
 		api          *fakeAPI
 		wantErr      bool
 		wantRequests []string
@@ -480,48 +483,41 @@ func TestMovePartialFailure(t *testing.T) {
 		wantArchive  bool
 	}{
 		{
-			name:         "folder: label fails",
-			from:         protonmail.LabelInbox,
+			name:         "moved",
+			api:          &fakeAPI{},
+			wantRequests: []string{label, unlabel},
+			wantArchive:  true,
+		},
+		{
+			name:         "label fails",
 			api:          &fakeAPI{actionCodes: map[string]map[string]int{labelArchive: {"a": 2011}}},
 			wantErr:      true,
 			wantRequests: []string{label},
 			wantSource:   true,
 		},
 		{
-			name:         "folder: label request fails",
-			from:         protonmail.LabelInbox,
+			name:         "label request fails",
 			api:          &fakeAPI{actionStatus: map[string]int{labelArchive: http.StatusUnprocessableEntity}},
 			wantErr:      true,
 			wantRequests: []string{label},
 			wantSource:   true,
 		},
 		{
-			name:         "folder: already there",
-			from:         protonmail.LabelInbox,
+			name:         "already in the destination",
 			api:          &fakeAPI{actionCodes: map[string]map[string]int{labelArchive: {"a": protonmail.CodeMessageDoesNotExist}}},
-			wantRequests: []string{label},
-			wantArchive:  true,
-		},
-		{
-			name:         "Starred: moved",
-			from:         protonmail.LabelStarred,
-			api:          &fakeAPI{},
 			wantRequests: []string{label, unlabel},
 			wantArchive:  true,
 		},
 		{
-			name:         "Starred: label fails",
-			from:         protonmail.LabelStarred,
-			api:          &fakeAPI{actionCodes: map[string]map[string]int{labelArchive: {"a": 2011}}},
-			wantErr:      true,
-			wantRequests: []string{label},
-			wantSource:   true,
+			name:         "label moved it out of the source",
+			api:          &fakeAPI{actionCodes: map[string]map[string]int{unlabelInbox: {"a": protonmail.CodeMessageDoesNotExist}}},
+			wantRequests: []string{label, unlabel},
+			wantArchive:  true,
 		},
 		{
-			name: "Starred: unlabel fails, still in source",
-			from: protonmail.LabelStarred,
+			name: "unlabel fails, still in source",
 			api: &fakeAPI{
-				actionCodes: map[string]map[string]int{unlabelStarred: {"a": 2011}},
+				actionCodes: map[string]map[string]int{unlabelInbox: {"a": 2011}},
 				labelIDs:    map[string][]string{"a": inBoth},
 			},
 			wantErr:      true,
@@ -529,10 +525,9 @@ func TestMovePartialFailure(t *testing.T) {
 			wantSource:   true,
 		},
 		{
-			name: "Starred: unlabel request fails, still in source",
-			from: protonmail.LabelStarred,
+			name: "unlabel request fails, still in source",
 			api: &fakeAPI{
-				actionStatus: map[string]int{unlabelStarred: http.StatusUnprocessableEntity},
+				actionStatus: map[string]int{unlabelInbox: http.StatusUnprocessableEntity},
 				labelIDs:     map[string][]string{"a": inBoth},
 			},
 			wantErr:      true,
@@ -540,20 +535,18 @@ func TestMovePartialFailure(t *testing.T) {
 			wantSource:   true,
 		},
 		{
-			name: "Starred: unlabel fails, out of source anyway",
-			from: protonmail.LabelStarred,
+			name: "unlabel fails, out of source anyway",
 			api: &fakeAPI{
-				actionCodes: map[string]map[string]int{unlabelStarred: {"a": 2011}},
+				actionCodes: map[string]map[string]int{unlabelInbox: {"a": 2011}},
 				labelIDs:    map[string][]string{"a": {protonmail.LabelArchive, protonmail.LabelAllMail}},
 			},
 			wantRequests: []string{label, unlabel, metadata},
 			wantArchive:  true,
 		},
 		{
-			name: "Starred: undo fails",
-			from: protonmail.LabelStarred,
+			name: "undo fails",
 			api: &fakeAPI{
-				actionCodes: map[string]map[string]int{unlabelStarred: {"a": 2011}, unlabelArchive: {"a": 2011}},
+				actionCodes: map[string]map[string]int{unlabelInbox: {"a": 2011}, unlabelArchive: {"a": 2011}},
 				labelIDs:    map[string][]string{"a": inBoth},
 			},
 			wantErr:      true,
@@ -567,10 +560,6 @@ func TestMovePartialFailure(t *testing.T) {
 			api := tc.api
 			api.t = t
 			source, _ := newActionTestMailbox(t, api, []*protonmail.Message{inboxMessage("a", 0)})
-			if tc.from == protonmail.LabelStarred {
-				source = addTestMailbox(t, source.u, "Starred", protonmail.LabelStarred,
-					[]*protonmail.Message{{ID: "a", LabelIDs: []string{protonmail.LabelStarred, protonmail.LabelAllMail}}})
-			}
 			archive := addTestMailbox(t, source.u, "Archive", protonmail.LabelArchive, nil)
 
 			err := source.MoveMessages(true, uidSet(1), "Archive")

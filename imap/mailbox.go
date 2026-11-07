@@ -850,15 +850,16 @@ func (mbox *mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string
 	return mbox.u.applyAction(apiIDs, failed, labelUpdate(dest.label, true))
 }
 
-// MoveMessages moves the messages to dest. Between two folders it is one call,
-// as proton-bridge's (connector.go, moveMessagesWithoutUnlabelCallOnFolders):
-// Proton keeps a message in at most one folder, so labelling it with dest
-// takes it out of mbox, and an unlabel call would only answer "does not
-// exist". Otherwise (Starred, All Mail) it labels with dest, then unlabels
-// from mbox. Each message must end in one of the two, and should not end in
-// both, even when the command fails (RFC 6851 section 3.3): one dest's label
-// failed for is left alone, and one the unlabel failed for is checked and
-// taken out of dest again (undoMove).
+// MoveMessages moves the messages to dest as proton-bridge does by default
+// (connector.go, moveMessagesWithUnlabelCallOnFolders): label with dest, then
+// unlabel from mbox. Labelling into a folder already takes a message out of
+// the folder it was in, and bridge once dropped the unlabel for that
+// (BRIDGE-451), but put it back after clients broke (BRIDGE-522); a message
+// the unlabel finds already gone answers "does not exist", which counts as
+// done. Each message must end in one of the two, and should not end in both,
+// even when the command fails (RFC 6851 section 3.3): one dest's label failed
+// for is left alone, and one the unlabel failed for is checked and taken out
+// of dest again (undoMove).
 func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) error {
 	if err := mbox.init(); err != nil {
 		return err
@@ -885,14 +886,6 @@ func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string
 	failed, err := mbox.u.c.LabelMessages(dest.label, apiIDs)
 	if err != nil {
 		return err
-	}
-	if mbox.isFolder() && dest.isFolder() {
-		// Applied as Proton did it: in dest, out of mbox, in one update. The
-		// events after it confirm.
-		return mbox.u.applyAction(apiIDs, failed, &protonmail.EventMessageUpdate{
-			LabelIDsAdded:   []string{dest.label},
-			LabelIDsRemoved: []string{mbox.label},
-		})
 	}
 	labelErr := mbox.u.applyAction(apiIDs, failed, labelUpdate(dest.label, true))
 	labelled := succeeded(apiIDs, failed)
@@ -927,34 +920,29 @@ func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string
 	return errors.Join(labelErr, unlabelErr, err)
 }
 
-// moveAllowed refuses the moves proton-bridge refuses
-// (moveMessagesWithoutUnlabelCallOnFolders): out of All Mail, which no message
-// leaves but by being deleted, so the unlabel always fails; into it, where a
-// message already is, so the move would only take it out of the source; and
-// between INBOX and Sent, which bridge refuses without saying why (Proton
-// files a message there by whether it was received or sent).
+// moveAllowed refuses, before any request, moves into or out of a mailbox
+// that is a view of messages kept in their folders, and those between INBOX
+// and Sent. All Mail and INBOX/Sent proton-bridge refuses too
+// (moveMessagesWithUnlabelCallOnFolders). Starred is the same kind of view as
+// All Mail, though bridge lets it be moved into and out of: a move into it
+// would unlabel the message from its folder, leaving it in All Mail only, and
+// one out of it would file it in the destination for what is, in Proton, an
+// unstar. Starring is the \Flagged flag, or COPY to Starred.
 func moveAllowed(from, to string) error {
 	switch {
 	case from == protonmail.LabelAllMail:
 		return errors.New("cannot move out of All Mail: move the message from its own mailbox")
 	case to == protonmail.LabelAllMail:
 		return errors.New("cannot move into All Mail: every message is there already")
+	case from == protonmail.LabelStarred:
+		return errors.New(`cannot move out of Starred: unstar with STORE -FLAGS (\Flagged), or move the message from its own mailbox`)
+	case to == protonmail.LabelStarred:
+		return errors.New(`cannot move into Starred: star with STORE +FLAGS (\Flagged), or COPY to Starred`)
 	case from == protonmail.LabelInbox && to == protonmail.LabelSent,
 		from == protonmail.LabelSent && to == protonmail.LabelInbox:
 		return errors.New("cannot move between INBOX and Sent")
 	}
 	return nil
-}
-
-// isFolder reports whether mbox is a Proton folder, which holds a message only
-// if no other folder does: every mailbox but All Mail and Starred, as only
-// exclusive labels become mailboxes (initMailboxes).
-func (mbox *mailbox) isFolder() bool {
-	switch mbox.label {
-	case protonmail.LabelAllMail, protonmail.LabelStarred:
-		return false
-	}
-	return true
 }
 
 // succeeded returns the messages of apiIDs that an action's failures don't
