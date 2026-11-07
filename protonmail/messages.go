@@ -2,6 +2,7 @@ package protonmail
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -432,7 +433,8 @@ const maxStaleRetries = 5
 // ids, at most MaxMessagesPerRequest, as Proton has them now. Messages it
 // doesn't have are left out. The request is go-proton-api's
 // GetMessageMetadataPage: a POST overridden as GET with the filter as body.
-func (c *Client) MessagesByID(ids []string) ([]*Message, error) {
+// Cancelling ctx aborts the request.
+func (c *Client) MessagesByID(ctx context.Context, ids []string) ([]*Message, error) {
 	if len(ids) > MaxMessagesPerRequest {
 		return nil, fmt.Errorf("cannot get %v messages in one request, at most %v", len(ids), MaxMessagesPerRequest)
 	}
@@ -449,6 +451,7 @@ func (c *Client) MessagesByID(ids []string) ([]*Message, error) {
 		if err != nil {
 			return nil, err
 		}
+		req = req.WithContext(ctx)
 		req.Header.Set("X-HTTP-Method-Override", http.MethodGet)
 
 		var respData struct {
@@ -474,8 +477,9 @@ const MetadataPageSize = 128
 // label included, newest first: the pageSize newest if endID is empty, else
 // the pageSize newest up to endID, which Proton lists first if it still has
 // it. It is go-proton-api's GetMessageMetadataPage with {Desc: true, EndID},
-// as proton-bridge's sync pages through every message.
-func (c *Client) MessageMetadataPage(endID string, pageSize int) ([]*Message, error) {
+// as proton-bridge's sync pages through every message. Cancelling ctx aborts
+// the request.
+func (c *Client) MessageMetadataPage(ctx context.Context, endID string, pageSize int) ([]*Message, error) {
 	reqData := struct {
 		EndID    string `json:",omitempty"`
 		Desc     int
@@ -489,6 +493,7 @@ func (c *Client) MessageMetadataPage(endID string, pageSize int) ([]*Message, er
 		if err != nil {
 			return nil, err
 		}
+		req = req.WithContext(ctx)
 		req.Header.Set("X-HTTP-Method-Override", http.MethodGet)
 
 		var respData struct {

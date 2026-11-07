@@ -116,6 +116,40 @@ func TestReceiverFollowsMore(t *testing.T) {
 	})
 }
 
+// Rewind makes the next poll ask for the events after the ID given, so the
+// pages after it are delivered again, each with the ID it was asked after.
+func TestReceiverRewind(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		src := &fakeSource{pages: map[string]*protonmail.Event{
+			"e0": {ID: "e1", More: 1},
+			"e1": {ID: "e2"},
+		}}
+		m := newTestManager()
+		ch := make(chan *protonmail.Event)
+		done := make(chan struct{})
+		got := make(chan []string, 1)
+		go func() {
+			var pages []string
+			for event := range ch {
+				pages = append(pages, event.After+">"+event.ID)
+			}
+			got <- pages
+		}()
+		r := m.Register(src, "bob", "e0", ch, done)
+		synctest.Wait()
+
+		r.Rewind("e0")
+		r.Poll()
+		synctest.Wait()
+		close(done)
+
+		want := []string{"e0>e1", "e1>e2", "e0>e1", "e1>e2"}
+		if pages := <-got; !slices.Equal(pages, want) {
+			t.Errorf("delivered %v, want %v", pages, want)
+		}
+	})
+}
+
 // Polls happen every pollInterval while a channel is registered, and stop
 // with the last one: nothing is polled while no client is logged in.
 func TestReceiverStopsWithLastChannel(t *testing.T) {

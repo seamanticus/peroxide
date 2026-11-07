@@ -70,6 +70,29 @@ type Receiver struct {
 	waitersMu sync.Mutex
 	waiters   []chan<- error
 	stopped   bool // set, under waitersMu, once r answers no more waiters
+	// The event ID the next page is asked after, set by Rewind and taken,
+	// under waitersMu, before each page.
+	rewindTo      string
+	rewindPending bool
+}
+
+// Rewind makes r ask next for the events after id, as proton-bridge's
+// RewindEventID: the pages after id are delivered again, from the next poll
+// (a poll delivering pages ends after the page being delivered). The latest
+// Rewind wins. It doesn't poll: call Poll for the replay to start now.
+func (r *Receiver) Rewind(id string) {
+	r.waitersMu.Lock()
+	defer r.waitersMu.Unlock()
+	r.rewindTo, r.rewindPending = id, true
+}
+
+// takeRewind returns the ID a Rewind asked for, if one is pending.
+func (r *Receiver) takeRewind() (string, bool) {
+	r.waitersMu.Lock()
+	defer r.waitersMu.Unlock()
+	id, ok := r.rewindTo, r.rewindPending
+	r.rewindTo, r.rewindPending = "", false
+	return id, ok
 }
 
 func (r *Receiver) lock() {
@@ -127,6 +150,9 @@ func (r *Receiver) answerWaiters(err error, stop bool) {
 // spanning many pages is thus applied at once, not one page per poll. err is
 // why it stopped early; last is then where the next poll starts again.
 func (r *Receiver) receivePages(last string) (string, error) {
+	if id, ok := r.takeRewind(); ok {
+		last = id
+	}
 	for {
 		select {
 		case <-r.stop:
@@ -143,17 +169,29 @@ func (r *Receiver) receivePages(last string) (string, error) {
 			return last, err
 		}
 
+		// A copy: the source may hand out the same page again.
+		page := *event
+		page.After = last
 		r.lock()
 		for _, ch := range r.channels {
-			ch <- event
+			ch <- &page
 		}
 		r.unlock()
 		last = event.ID
 
-		if event.More != 1 {
+		// A rewind asked for while delivering ends this poll: the next one
+		// starts from it, so a page to retry is asked for after a delay.
+		if r.rewindAsked() || event.More != 1 {
 			return last, nil
 		}
 	}
+}
+
+// rewindAsked reports whether a Rewind is pending.
+func (r *Receiver) rewindAsked() bool {
+	r.waitersMu.Lock()
+	defer r.waitersMu.Unlock()
+	return r.rewindPending
 }
 
 // Proton's codes, beside the HTTP status, for a value it rejects

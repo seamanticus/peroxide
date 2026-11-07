@@ -1,13 +1,19 @@
 package imap
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"maps"
+	"net"
+	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/emersion/go-imap"
@@ -48,7 +54,7 @@ type user struct {
 	privateKeys openpgp.EntityList
 
 	db             *database.User
-	eventsReceiver *events.Receiver
+	eventsReceiver eventsReceiver
 	messages       *messageCache // full messages, safe for concurrent use
 
 	done      chan struct{} // closed by the last Logout
@@ -61,15 +67,24 @@ type user struct {
 	// goroutine use.
 	downloads    sync.WaitGroup
 	downloadStop chan struct{}
-	// syncSem serializes what changes the stored messages and mailboxes: a
-	// page of the download (asked for and stored), an event page, an action
-	// applied without waiting for its event, a rebuild (lockSync,
-	// unlockSync). A page of the download fetched before an event and stored
-	// after it would undo it. A 1-slot channel rather than a sync.Mutex, so
-	// that a goroutine waiting on it is durably blocked for testing/synctest.
-	// Taken before u's and the mailboxes' locks, and never inside a database
-	// transaction.
+	// syncSem serializes what changes the stored messages and mailboxes: the
+	// storing of a download page, an event page, an action applied without
+	// waiting for its event (lockSync, unlockSync). No request is made while
+	// holding it, but MessagesByID for a message an update finds missing. A
+	// 1-slot channel rather than a sync.Mutex, so that a goroutine waiting on
+	// it is durably blocked for testing/synctest. Taken before u's and the
+	// mailboxes' locks, and never inside a database transaction.
 	syncSem chan struct{}
+	// sendSem orders what clients are told: a writer takes it while it still
+	// holds syncSem and keeps it while its updates are delivered
+	// (unlockSyncAndSend), so updates reach clients in the order the changes
+	// were made. A 1-slot channel, as syncSem.
+	sendSem chan struct{}
+	// Set, under syncSem, when the events were rewound (download done, or a
+	// page to retry): pages delivered before the rewind took effect are
+	// dropped until the one asked after replayFrom comes (Event.After).
+	replayPending bool
+	replayFrom    string
 
 	sync.Mutex // protects everything below
 
@@ -140,6 +155,7 @@ func newUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 		addrs:       addrs,
 		eventSent:   make(chan struct{}),
 		syncSem:     make(chan struct{}, 1),
+		sendSem:     make(chan struct{}, 1),
 		numClients:  1,
 		messages:    newMessageCache(),
 	}
@@ -161,11 +177,13 @@ func newUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 	}
 
 	uu.done = make(chan struct{})
-	// Before the events goroutine, which owns downloadStop from then on.
-	uu.startDownload()
 	ch := make(chan *protonmail.Event)
-	uu.startEvents(be.updates, ch)
+	// The receiver blocks on ch until the events goroutine reads it. Both
+	// fields are set before the goroutines that read them start: the
+	// download rewinds the receiver, the events goroutine owns downloadStop.
 	uu.eventsReceiver = be.eventsManager.Register(c, u.Name, lastEventID, ch, uu.done)
+	uu.startDownload()
+	uu.startEvents(be.updates, ch)
 
 	log.Printf("User %q logged in via IMAP", u.Name)
 	return uu, nil
@@ -431,6 +449,66 @@ func (u *user) unlockSync() {
 	<-u.syncSem
 }
 
+// eventsReceiver is what a user asks of the account's events receiver
+// (events.Receiver): polls and rewinds.
+type eventsReceiver interface {
+	Poll() <-chan error
+	Rewind(id string)
+}
+
+var _ eventsReceiver = (*events.Receiver)(nil) // proof: compile-time
+
+// unlockSyncAndSend releases syncSem and has deliver hand updates to the
+// clients. sendSem is taken before syncSem is released, so that the next
+// writer, which can only change things after this one, also tells clients
+// after it: an EXISTS or EXPUNGE delivered out of order shows a client a
+// wrong count, or makes it drop the wrong message.
+func (u *user) unlockSyncAndSend(updates []imapbackend.Update, deliver func([]imapbackend.Update)) {
+	if u.sendSem == nil {
+		panic("invariant: newUser makes user.sendSem")
+	}
+	u.sendSem <- struct{}{}
+	u.unlockSync()
+	deliver(updates)
+	<-u.sendSem
+}
+
+// deliverTimeout bounds how long sendOn waits for go-imap to write one update.
+// go-imap v1 hands an update to each connection in a goroutine of its own,
+// and never writes it to a connection that ends meanwhile (the goroutine
+// blocks on a channel no one reads), so its Done is never closed; without a
+// bound, that would hold sendSem, and every later change of the account,
+// forever.
+const deliverTimeout = time.Minute
+
+// sendOn hands updates to the IMAP server on ch one at a time, each once the
+// one before was written to every client concerned: go-imap writes the
+// updates it is given at once in no fixed order.
+func (u *user) sendOn(ch chan<- imapbackend.Update, updates []imapbackend.Update) {
+	for _, update := range updates {
+		// go-imap creates Done's channel lazily without synchronization:
+		// create it first.
+		done := update.Done()
+		ch <- update
+		select {
+		case <-done:
+		case <-time.After(deliverTimeout):
+			log.Printf("go-imap didn't deliver an update for %q within %v: going on", u.username, deliverTimeout)
+		}
+	}
+}
+
+// rewindEvents makes the events receiver deliver again the pages after id,
+// as proton-bridge's RewindEventID. Called under syncSem, which guards
+// replayPending and replayFrom: the pages delivered before the rewind takes
+// effect are dropped (receiveEvents), as they come again.
+func (u *user) rewindEvents(id string) {
+	u.replayPending, u.replayFrom = true, id
+	if u.eventsReceiver != nil {
+		u.eventsReceiver.Rewind(id)
+	}
+}
+
 // lockSyncUnless takes syncSem, as lockSync, unless stop or u.done is closed
 // first: then it reports false, without it.
 func (u *user) lockSyncUnless(stop <-chan struct{}) bool {
@@ -483,16 +561,25 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 	// Set once a rebuild is asked for: the pages that follow, until the
 	// clients have gone, are drained unapplied, and their IDs not stored.
 	rebuilding := false
+	deliver := func(ups []imapbackend.Update) { u.sendOn(updates, ups) }
 	for event := range events {
 		if rebuilding {
 			continue
 		}
 		var eventUpdates []imapbackend.Update
-		var failed int
+		var failed, retry int
 
-		// Applied whole while no download page is stored, but sent after:
-		// sending waits for go-imap, which mustn't wait for the download.
+		// Applied whole while no download page is stored, and sent in turn
+		// (unlockSyncAndSend).
 		u.lockSync()
+		if u.replayPending {
+			if event.After != u.replayFrom {
+				// Asked for before the rewind: it comes again in the replay.
+				u.unlockSync()
+				continue
+			}
+			u.replayPending = false
+		}
 		refresh := event.Refresh&protonmail.EventRefreshMail != 0
 		if !refresh {
 			// First, so that messages moved into a new folder find its mailbox.
@@ -506,30 +593,41 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			for _, eventMessage := range event.Messages {
 				ups, err := u.applyMessageEvent(eventMessage)
 				eventUpdates = append(eventUpdates, ups...)
-				if err != nil {
+				switch {
+				case err == nil:
+				case retryable(err):
+					log.Printf("cannot handle event for message %s now: %v (retrying at the next poll)", eventMessage.ID, err)
+					retry++
+				default:
 					log.Printf("cannot handle event for message %s: %v", eventMessage.ID, err)
 					failed++
 				}
 			}
 		}
-		u.unlockSync()
-
-		for _, update := range eventUpdates {
-			// go-imap creates Done's channel lazily without synchronization, and
-			// both the server and the goroutine below call it: create it first.
-			update.Done()
-			updates <- update
+		switch {
+		case refresh || failed > 0:
+			// The event ID isn't stored: the rebuild below starts over.
+		case retry > 0:
+			// As proton-bridge retries an event failed on the network, a
+			// rate limit or a server error: the page comes again at the
+			// next poll, and what it did is applied again, which is
+			// idempotent. Its ID isn't stored, so a restart retries it too.
+			u.rewindEvents(event.After)
+		default:
+			// Under syncSem, before the next writer: the download, once
+			// done, sets it back to where it started (replay), which this
+			// must not overwrite. A page stopped halfway is applied again
+			// by the next session: creates, deletes and label changes are
+			// idempotent.
+			if err := u.db.SetLastEventID(event.ID); err != nil {
+				log.Printf("cannot store last event ID %v: %v", event.ID, err)
+			}
 		}
-		go func() {
-			for _, update := range eventUpdates {
-				<-update.Done()
-			}
-
-			select {
-			case u.eventSent <- struct{}{}:
-			default:
-			}
-		}()
+		u.unlockSyncAndSend(eventUpdates, deliver)
+		select {
+		case u.eventSent <- struct{}{}:
+		default:
+		}
 
 		if refresh || failed > 0 {
 			if refresh {
@@ -539,15 +637,25 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			}
 			u.rebuild(updates)
 			rebuilding = true
-			continue
-		}
-
-		// Once applied, so that a page stopped halfway is applied again by the
-		// next session: creates, deletes and label changes are idempotent.
-		if err := u.db.SetLastEventID(event.ID); err != nil {
-			log.Printf("cannot store last event ID %v: %v", event.ID, err)
 		}
 	}
+}
+
+// retryable reports whether err, from applying an event, may not happen
+// again: a network error, a rate limit (429) or a server error (5xx), which
+// proton-bridge retries rather than treating the event as bad
+// (userevents.Service.handleEventError).
+func retryable(err error) bool {
+	if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok {
+		return apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= http.StatusInternalServerError
+	}
+	if _, ok := errors.AsType[*url.Error](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[net.Error](err); ok {
+		return true
+	}
+	return errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // applyMessageEvent applies one message event to the database, and returns
@@ -571,7 +679,8 @@ func (u *user) applyMessageEvent(eventMessage *protonmail.EventMessage) ([]imapb
 		}
 		ups, err := u.applyUpdate(eventMessage.ID, eventMessage.Updated)
 		if errors.Is(err, database.ErrNotFound) {
-			return ups, u.updateUnknownMessage(eventMessage.ID)
+			created, err := u.updateUnknownMessage(eventMessage.ID)
+			return append(ups, created...), err
 		}
 		return ups, err
 	case protonmail.EventDelete:
@@ -585,28 +694,38 @@ func (u *user) applyMessageEvent(eventMessage *protonmail.EventMessage) ([]imapb
 	}
 }
 
+// unknownMessageTimeout bounds the one request made while holding syncSem
+// (updateUnknownMessage): past it, the page is retried at the next poll.
+const unknownMessageTimeout = 30 * time.Second
+
 // updateUnknownMessage handles an update event for a message the database
 // lacks. While the download runs it will list the message, as Proton has it
 // then. After, the message should be there: it is fetched and created, as
-// proton-bridge creates a message an update finds missing.
-func (u *user) updateUnknownMessage(apiID string) error {
+// proton-bridge creates a message an update finds missing. It returns the
+// updates telling clients. A network error is retryable.
+func (u *user) updateUnknownMessage(apiID string) ([]imapbackend.Update, error) {
 	_, done, err := u.db.SyncState()
 	if err != nil {
-		return fmt.Errorf("cannot read where the download stands: %w", err)
+		return nil, fmt.Errorf("cannot read where the download stands: %w", err)
 	}
 	if !done {
-		return nil
+		return nil, nil
 	}
-	msgs, err := u.c.MessagesByID([]string{apiID})
+	ctx, cancel := context.WithTimeout(context.Background(), unknownMessageTimeout)
+	defer cancel()
+	msgs, err := u.c.MessagesByID(ctx, []string{apiID})
 	if err != nil {
-		return fmt.Errorf("cannot get the message missing from the local DB: %w", err)
+		return nil, fmt.Errorf("cannot get the message missing from the local DB: %w", err)
 	}
+	var changes []database.MessageChange
 	for _, msg := range msgs {
-		if _, err := u.db.CreateMessage(msg); err != nil {
-			return fmt.Errorf("cannot create the message missing from the local DB: %w", err)
+		change, err := u.db.CreateMessage(msg)
+		if err != nil {
+			return nil, fmt.Errorf("cannot create the message missing from the local DB: %w", err)
 		}
+		changes = append(changes, change)
 	}
-	return nil
+	return u.downloadUpdates(changes), nil
 }
 
 // rebuild marks the database for a rebuild, stops the download and
@@ -633,9 +752,10 @@ func (u *user) rebuild(updates chan<- imapbackend.Update) {
 			Info: "Proton's mail changed in a way peroxide must download again: please log in again",
 		},
 	}
-	bye.Done()
-	updates <- bye
-	<-bye.Done()
+	// In turn after what clients were told before (sendSem), bounded.
+	u.sendSem <- struct{}{}
+	u.sendOn(updates, []imapbackend.Update{bye})
+	<-u.sendSem
 	u.backend.disconnect(u)
 }
 

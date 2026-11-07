@@ -115,17 +115,10 @@ func (u *user) applyDelete(apiID string) ([]imapbackend.Update, error) {
 }
 
 // sendUpdates hands updates to the IMAP server, and waits until they were
-// written to every client concerned.
+// written to every client concerned, one after the other. Called with
+// sendSem (unlockSyncAndSend).
 func (u *user) sendUpdates(updates []imapbackend.Update) {
-	for _, update := range updates {
-		// go-imap creates Done's channel lazily without synchronization, and
-		// it's waited on below: create it first.
-		update.Done()
-		u.backend.updates <- update
-	}
-	for _, update := range updates {
-		<-update.Done()
-	}
+	u.sendOn(u.backend.updates, updates)
 }
 
 // nothingToDo reports whether err, the result of an action on a message, means
@@ -170,8 +163,7 @@ func (u *user) applyAction(apiIDs []string, failed map[string]error, update *pro
 			log.Printf("cannot apply action to message %v: %v", apiID, err)
 		}
 	}
-	u.unlockSync()
-	u.sendUpdates(updates)
+	u.unlockSyncAndSend(updates, u.sendUpdates)
 	u.pollSoon()
 	return actionError(apiIDs, failed)
 }
@@ -190,8 +182,7 @@ func (u *user) applyDeleteAction(apiIDs []string, failed map[string]error) error
 			log.Printf("cannot apply deletion of message %v: %v", apiID, err)
 		}
 	}
-	u.unlockSync()
-	u.sendUpdates(updates)
+	u.unlockSyncAndSend(updates, u.sendUpdates)
 	u.pollSoon()
 	return actionError(apiIDs, failed)
 }

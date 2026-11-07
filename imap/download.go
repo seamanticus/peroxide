@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"syscall"
 	"time"
 
 	"github.com/emersion/go-imap"
@@ -29,11 +31,12 @@ const downloadRetryDelay = 20 * time.Second
 func (u *user) startDownload() {
 	stop := make(chan struct{})
 	u.downloadStop = stop
-	u.downloads.Go(func() { u.download(stop, u.sendUpdates) })
+	deliver := func(ups []imapbackend.Update) { u.sendOn(u.backend.updates, ups) }
+	u.downloads.Go(func() { u.download(stop, deliver) })
 }
 
-// stopDownload stops the download and waits for it to end: at most for the
-// page it is getting.
+// stopDownload stops the download, aborting the request it is making, and
+// waits for it to end.
 func (u *user) stopDownload() {
 	if u.downloadStop == nil {
 		return
@@ -44,20 +47,34 @@ func (u *user) stopDownload() {
 }
 
 // download stores the account's messages page after page, newest first, from
-// where the last page stored left off, until Proton has no older message. Each
-// page is asked for and stored while holding syncSem, so that an event applied
-// between pages can't be undone by a page fetched before it; events and actions
-// wait for one page at most. send gets each page's updates, so that clients
-// see the mailboxes fill. It reports whether every message is stored.
-func (u *user) download(stop <-chan struct{}, send func([]imapbackend.Update)) (done bool) {
+// where the last page stored left off, until Proton has no older message, as
+// proton-bridge's sync. A page is asked for without syncSem, so that a slow
+// or hung request keeps nothing else waiting, and stored under it; deliver
+// gets its updates, so that clients see the mailboxes fill. An event applied
+// between the request and the storing can be undone by the page (a message
+// deleted comes back, flags go back): so, as bridge does, the event ID of
+// when the download began is kept (SetSyncStart), and once every message is
+// stored the events after it are applied again. It reports whether every
+// message is stored.
+func (u *user) download(stop <-chan struct{}, deliver func([]imapbackend.Update)) (done bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-stop:
+		case <-u.done:
+		case <-ctx.Done():
+		}
+		cancel()
+	}()
+
 	for {
-		updates, pageStored, finished := u.downloadPage(stop)
+		pageStored, finished := u.downloadPage(ctx, stop, deliver)
 		if finished {
 			_, done, err := u.db.SyncState()
 			return err == nil && done
 		}
 		if pageStored {
-			send(updates)
 			continue
 		}
 		select {
@@ -70,57 +87,86 @@ func (u *user) download(stop <-chan struct{}, send func([]imapbackend.Update)) (
 	}
 }
 
-// downloadPage asks for and stores the next page. It reports finished once
-// there is nothing left to do (all stored, or stopped), and pageStored when
-// it stored a page, with the updates telling clients about it; neither means
-// it failed and should be tried again later.
-func (u *user) downloadPage(stop <-chan struct{}) (updates []imapbackend.Update, pageStored, finished bool) {
-	if !u.lockSyncUnless(stop) {
-		return nil, false, true
-	}
+// downloadPage asks for and stores the next page, and has deliver tell
+// clients what it changed. It reports finished once there is nothing left to
+// do (all stored, or stopped), and pageStored when it stored a page; neither
+// means it failed and should be tried again later.
+func (u *user) downloadPage(ctx context.Context, stop <-chan struct{}, deliver func([]imapbackend.Update)) (pageStored, finished bool) {
+	// Only the download writes the cursor: reading it without syncSem is
+	// safe, and a Wipe stops the download first.
 	cursor, done, err := u.db.SyncState()
 	if err != nil {
-		u.unlockSync()
 		log.Printf("cannot read where the download of %q stands: %v", u.u.Name, err)
-		return nil, false, false
+		return false, false
 	}
 	if done {
+		return false, true
+	}
+	if cursor == "" {
+		// Before the first request: every event applied after this one may
+		// be undone by a page fetched before it. Under syncSem, so that no
+		// event page is half applied. SetSyncStart keeps the first start of
+		// a download stopped before its first page was stored.
+		if !u.lockSyncUnless(stop) {
+			return false, true
+		}
+		lastEventID, _, err := u.db.LastEventID()
+		if err == nil {
+			err = u.db.SetSyncStart(lastEventID)
+		}
 		u.unlockSync()
-		return nil, false, true
+		if err != nil {
+			log.Printf("cannot record where the events stand as the download of %q begins: %v (retrying in %v)", u.u.Name, err, downloadRetryDelay)
+			return false, false
+		}
 	}
 
-	page, err := u.c.MessageMetadataPage(cursor, protonmail.MetadataPageSize)
+	page, err := u.c.MessageMetadataPage(ctx, cursor, protonmail.MetadataPageSize)
+	if ctx.Err() != nil {
+		return false, true // stopped
+	}
 	if err != nil {
-		u.unlockSync()
 		log.Printf("cannot download messages of %q before %q: %v (retrying in %v)", u.u.Name, cursor, err, downloadRetryDelay)
-		return nil, false, false
+		return false, false
 	}
 	// The message the page ends at comes first if Proton still has it.
 	if len(page) > 0 && cursor != "" && page[0].ID == cursor {
 		page = page[1:]
 	}
+
+	if !u.lockSyncUnless(stop) {
+		return false, true
+	}
 	if len(page) == 0 {
-		err := u.db.SetSyncDone()
-		u.unlockSync()
+		startEventID, err := u.db.SetSyncDone()
 		if err != nil {
+			u.unlockSync()
 			log.Printf("cannot record that the download of %q is done: %v", u.u.Name, err)
-			return nil, false, false
+			return false, false
 		}
+		if startEventID != "" {
+			// The pages after it come again, the receiver asking from there
+			// at its next poll, which is asked for now.
+			u.rewindEvents(startEventID)
+		}
+		u.unlockSync()
+		u.pollSoon()
 		log.Printf("Downloaded every message of %q", u.u.Name)
-		return nil, false, true
+		return false, true
 	}
 
 	changes, err := u.db.SyncPage(page)
+	var updates []imapbackend.Update
 	if err == nil {
 		updates = u.downloadUpdates(changes)
 	}
-	u.unlockSync()
+	u.unlockSyncAndSend(updates, deliver)
 	if err != nil {
 		log.Printf("cannot store downloaded messages of %q: %v (retrying in %v)", u.u.Name, err, downloadRetryDelay)
-		return nil, false, false
+		return false, false
 	}
 	log.Printf("Downloaded %v messages of %q, down to %v", len(page), u.u.Name, page[len(page)-1].ID)
-	return updates, true, false
+	return true, false
 }
 
 // downloadUpdates tells clients what a page changed, in the order it changed
@@ -168,7 +214,10 @@ func (u *user) downloadUpdates(changes []database.MessageChange) []imapbackend.U
 // every message is stored. With discard, the database is wiped first, as a
 // Refresh does, so that it is rebuilt from Proton alone. It fails with
 // database.ErrInUse while peroxide serve has the database open. Interrupted
-// (SIGINT), it returns an error, and the next download or login resumes.
+// (SIGINT, SIGTERM), it aborts the request it is making and returns an error,
+// and the next download or login resumes. The events received meanwhile are
+// applied at the next login: the download sets the stored event ID back to
+// where it began.
 func DownloadAccount(c *protonmail.Client, discard bool) error {
 	pu, err := c.GetCurrentUser()
 	if err != nil {
@@ -186,6 +235,7 @@ func DownloadAccount(c *protonmail.Client, discard bool) error {
 		db:       db,
 		messages: newMessageCache(),
 		syncSem:  make(chan struct{}, 1),
+		sendSem:  make(chan struct{}, 1),
 		done:     make(chan struct{}),
 	}
 	if discard {
@@ -201,7 +251,7 @@ func DownloadAccount(c *protonmail.Client, discard bool) error {
 	}
 
 	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt)
+	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(interrupt)
 	stop := make(chan struct{})
 	finished := make(chan struct{})

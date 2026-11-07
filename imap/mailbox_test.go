@@ -81,7 +81,7 @@ func newTestMailbox(t *testing.T, msgs []*protonmail.Message, extraLabels ...str
 	return &mailbox{
 		name:    imap.InboxName,
 		label:   protonmail.LabelInbox,
-		u:       &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), syncSem: make(chan struct{}, 1)},
+		u:       &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), syncSem: make(chan struct{}, 1), sendSem: make(chan struct{}, 1)},
 		db:      mboxDB,
 		deleted: make(map[string]struct{}),
 	}, db
@@ -500,13 +500,15 @@ func TestLogoutWhileApplyingEvents(t *testing.T) {
 // first, up to EndID) from msgs, given newest first, as Proton does: the page
 // up to EndID starts with EndID. Before answering it calls hook with the
 // number of the page (from 1), so that a test can block it. Requests for
-// specific IDs (MessagesByID) are refused with a 500, an error only if not
-// quiet.
+// specific IDs (MessagesByID) are refused with status (500 if 0), an error
+// only if not quiet. A request whose context is cancelled fails, as a real
+// transport's does.
 type fakeMetadata struct {
-	t     *testing.T
-	msgs  []*protonmail.Message
-	hook  func(page int)
-	quiet bool
+	t      *testing.T
+	msgs   []*protonmail.Message
+	hook   func(page int)
+	quiet  bool
+	status int
 
 	mu    sync.Mutex
 	pages int
@@ -531,8 +533,12 @@ func (f *fakeMetadata) RoundTrip(r *http.Request) (*http.Response, error) {
 		if !f.quiet {
 			f.t.Errorf("unexpected request for messages %v", req.ID)
 		}
+		status := f.status
+		if status == 0 {
+			status = http.StatusInternalServerError
+		}
 		return &http.Response{
-			StatusCode: http.StatusInternalServerError,
+			StatusCode: status,
 			Header:     http.Header{"Content-Type": {"application/json"}},
 			Body:       io.NopCloser(strings.NewReader(`{"Code":2001,"Error":"refused"}`)),
 			Request:    r,
@@ -547,6 +553,9 @@ func (f *fakeMetadata) RoundTrip(r *http.Request) (*http.Response, error) {
 	f.mu.Unlock()
 	if f.hook != nil {
 		f.hook(page)
+	}
+	if err := r.Context().Err(); err != nil {
+		return nil, err
 	}
 
 	start := 0
@@ -576,8 +585,9 @@ func (f *fakeMetadata) RoundTrip(r *http.Request) (*http.Response, error) {
 
 // newDownloadTestUser returns a user with INBOX whose client answers the
 // download from api, and the channel go-imap would read its updates from,
-// acknowledged at once.
-func newDownloadTestUser(t *testing.T, api *fakeMetadata) (*user, *mailbox, chan imapbackend.Update) {
+// acknowledged at once. Its events receiver is rewound by the download, and
+// records the IDs asked for.
+func newDownloadTestUser(t *testing.T, api *fakeMetadata) (*user, *mailbox, chan imapbackend.Update, *fakeRewinder) {
 	t.Helper()
 	inbox, _ := newTestMailbox(t, nil)
 	u := inbox.u
@@ -594,7 +604,32 @@ func newDownloadTestUser(t *testing.T, api *fakeMetadata) (*user, *mailbox, chan
 		}
 	}()
 	t.Cleanup(func() { close(updates) })
-	return u, inbox, updates
+	rw := &fakeRewinder{}
+	u.eventsReceiver = rw
+	return u, inbox, updates, rw
+}
+
+// fakeRewinder stands for the events receiver: it records the IDs the events
+// were rewound to and how often a poll was asked for.
+type fakeRewinder struct {
+	mu      sync.Mutex
+	rewinds []string
+	polls   int
+}
+
+func (r *fakeRewinder) Rewind(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rewinds = append(r.rewinds, id)
+}
+
+func (r *fakeRewinder) Poll() <-chan error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.polls++
+	ch := make(chan error, 1)
+	ch <- nil
+	return ch
 }
 
 func uidsByID(t *testing.T, mbox *mailbox) map[string]uint32 {
@@ -611,12 +646,11 @@ func uidsByID(t *testing.T, mbox *mailbox) map[string]uint32 {
 
 // The download lists every message newest first, as proton-bridge's sync, so
 // the newest gets UID 1; it pages with EndID and skips the message each page
-// starts with. An event page arriving while a page is being fetched waits for
-// that page only (option A of the 2026-11 decisions, as bridge applies events
-// during its sync), then gets in before the download ends: which of the
-// remaining pages goes first is up to the scheduler, so only what holds either
-// way is checked. Every message has one UID, none is given twice, and the
-// counts match.
+// starts with. A page is asked for holding no lock, as bridge's sync: an event
+// page arriving while a page hangs is applied at once (its message gets the
+// next UID), and the page stored after it leaves that UID alone. Every
+// message has one UID, none is given twice, the counts match, and once done
+// the events are rewound to where the download began.
 func TestDownloadAndEventsInterleave(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		setBubbleClock()
@@ -631,12 +665,15 @@ func TestDownloadAndEventsInterleave(t *testing.T) {
 				<-release
 			}
 		}
-		u, inbox, updates := newDownloadTestUser(t, api)
+		u, inbox, updates, rw := newDownloadTestUser(t, api)
+		if err := u.db.SetLastEventID("e0"); err != nil {
+			t.Fatal(err)
+		}
 		u.startDownload()
 
 		<-fetching // page 1 (m5, m4) is stored; page 2 is being fetched
 		events := make(chan *protonmail.Event, 1)
-		events <- &protonmail.Event{ID: "e1", Messages: []*protonmail.EventMessage{
+		events <- &protonmail.Event{ID: "e1", After: "e0", Messages: []*protonmail.EventMessage{
 			{ID: "m6", Action: protonmail.EventCreate, Created: inboxMessage("m6", 1)},
 		}}
 		close(events)
@@ -645,31 +682,132 @@ func TestDownloadAndEventsInterleave(t *testing.T) {
 			u.receiveEvents(updates, events)
 			close(applied)
 		}()
-		synctest.Wait()
-		if _, _, err := inbox.db.FromApiID("m6"); err == nil {
-			t.Error("the event page was applied while a download page was being fetched")
+		<-applied // while the page still hangs
+		if _, uid, err := inbox.db.FromApiID("m6"); err != nil || uid != 3 {
+			t.Errorf("FromApiID(m6) = UID %v, %v while a page was fetched; want UID 3", uid, err)
 		}
-
 		close(release)
-		<-applied
 		u.downloads.Wait()
 
-		got := uidsByID(t, inbox)
-		// Pages 1 and 2 were stored before the event could be applied.
-		for id, uid := range map[string]uint32{"m5": 1, "m4": 2, "m3": 3} {
-			if got[id] != uid {
-				t.Errorf("message %v has UID %v, want %v", id, got[id], uid)
-			}
-		}
-		uids := slices.Sorted(maps.Values(got))
-		if len(got) != 6 || !slices.Equal(uids, []uint32{1, 2, 3, 4, 5, 6}) {
-			t.Errorf("UIDs = %v, want each of m1..m6 once with UIDs 1..6", got)
+		want := map[string]uint32{"m5": 1, "m4": 2, "m6": 3, "m3": 4, "m2": 5, "m1": 6}
+		if got := uidsByID(t, inbox); !maps.Equal(got, want) {
+			t.Errorf("UIDs = %v, want %v", got, want)
 		}
 		checkStatus(t, inbox, 6, 2)
 		if _, done, err := u.db.SyncState(); err != nil || !done {
 			t.Errorf("SyncState() done = %v, %v; want true", done, err)
 		}
+		rw.mu.Lock()
+		rewinds, polls := slices.Clone(rw.rewinds), rw.polls
+		rw.mu.Unlock()
+		if !slices.Equal(rewinds, []string{"e0"}) || polls == 0 {
+			t.Errorf("rewound to %v with %v polls once done, want [e0] and a poll", rewinds, polls)
+		}
+		if id, _, err := u.db.LastEventID(); err != nil || id != "e0" {
+			t.Errorf("stored last event ID = %q, %v once done; want e0, the replay's start", id, err)
+		}
 	})
+}
+
+// A page fetched before an event and stored after it brings back what the
+// event did (here, a message deleted). Once the download is done the events
+// after its start are delivered again: pages asked for before the rewind are
+// dropped, and the replay deletes the message again, as bridge's rewind does.
+func TestDownloadReplayCorrectsStalePage(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setBubbleClock()
+		fetched, release := make(chan struct{}), make(chan struct{})
+		api := &fakeMetadata{t: t, msgs: []*protonmail.Message{inboxMessage("m2", 0), inboxMessage("m1", 0)}}
+		api.hook = func(page int) {
+			if page == 1 {
+				close(fetched)
+				<-release
+			}
+		}
+		u, inbox, updates, _ := newDownloadTestUser(t, api)
+		if err := u.db.SetLastEventID("e0"); err != nil {
+			t.Fatal(err)
+		}
+		events := make(chan *protonmail.Event, 3)
+		applied := make(chan struct{})
+		go func() {
+			u.receiveEvents(updates, events)
+			close(applied)
+		}()
+		u.startDownload()
+
+		<-fetched // Proton answered with m2, m1; it isn't stored yet
+		deleteM1 := &protonmail.Event{ID: "e1", After: "e0", Messages: []*protonmail.EventMessage{
+			{ID: "m1", Action: protonmail.EventDelete},
+		}}
+		events <- deleteM1
+		synctest.Wait()
+		close(release)
+		u.downloads.Wait()
+		if _, _, err := inbox.db.FromApiID("m1"); err != nil {
+			t.Fatalf("FromApiID(m1) = %v: the stale page should have brought it back", err)
+		}
+
+		// The receiver: a page asked for before the rewind, then the replay.
+		events <- &protonmail.Event{ID: "e2", After: "e1"}
+		replay := *deleteM1
+		events <- &replay
+		close(events)
+		<-applied
+
+		if _, _, err := inbox.db.FromApiID("m1"); !errors.Is(err, database.ErrNotFound) {
+			t.Errorf("FromApiID(m1) = %v after the replay, want ErrNotFound", err)
+		}
+		if id, _, err := u.db.LastEventID(); err != nil || id != "e1" {
+			t.Errorf("stored last event ID = %q, %v; want e1 (e2 was dropped)", id, err)
+		}
+	})
+}
+
+// An event that fails on the network, a rate limit or a server error is
+// retried, as proton-bridge does, not taken for a broken database: its ID
+// isn't stored, the events are rewound to the page before it, and nothing
+// is marked for a rebuild.
+// evidence: witnesses
+func TestEventFailureRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{"rate limit", http.StatusTooManyRequests},
+		{"server error", http.StatusInternalServerError},
+		{"bad gateway", http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				setBubbleClock()
+				api := &fakeMetadata{t: t, quiet: true, status: tc.status}
+				u, _, updates, rw := newDownloadTestUser(t, api)
+				if _, err := u.db.SetSyncDone(); err != nil {
+					t.Fatal(err)
+				}
+				events := make(chan *protonmail.Event, 2)
+				events <- &protonmail.Event{ID: "e1", After: "e0"}
+				events <- &protonmail.Event{ID: "e2", After: "e1", Messages: []*protonmail.EventMessage{
+					{ID: "unknown", Action: protonmail.EventUpdateFlags, Updated: &protonmail.EventMessageUpdate{Unread: new(0)}},
+				}}
+				close(events)
+				u.receiveEvents(updates, events)
+
+				if id, _, err := u.db.LastEventID(); err != nil || id != "e1" {
+					t.Errorf("stored last event ID = %q, %v; want e1", id, err)
+				}
+				if rebuild, err := u.db.NeedsRebuild(); err != nil || rebuild {
+					t.Errorf("NeedsRebuild() = %v, %v; want false", rebuild, err)
+				}
+				rw.mu.Lock()
+				defer rw.mu.Unlock()
+				if !slices.Equal(rw.rewinds, []string{"e1"}) {
+					t.Errorf("rewound to %v, want [e1]", rw.rewinds)
+				}
+			})
+		})
+	}
 }
 
 // A download stopped after a page (peroxide stopped, the last client gone)
@@ -680,7 +818,7 @@ func TestDownloadResumes(t *testing.T) {
 		msgs := []*protonmail.Message{inboxMessage("m4", 0), inboxMessage("m3", 0), inboxMessage("m2", 0), inboxMessage("m1", 0)}
 		stopped := make(chan struct{})
 		api := &fakeMetadata{t: t, msgs: msgs}
-		u, inbox, _ := newDownloadTestUser(t, api)
+		u, inbox, _, _ := newDownloadTestUser(t, api)
 		api.hook = func(page int) {
 			if page == 2 {
 				close(u.done) // the last client logs out
@@ -702,16 +840,18 @@ func TestDownloadResumes(t *testing.T) {
 		if got := uidsByID(t, inbox); !maps.Equal(got, want) {
 			t.Errorf("UIDs = %v after resuming (%v before), want %v", got, first, want)
 		}
-		// The page being fetched when the client left is still stored.
-		if wantFirst := map[string]uint32{"m4": 1, "m3": 2, "m2": 3}; !maps.Equal(first, wantFirst) {
+		// The request in flight when the client left is aborted, its page
+		// not stored.
+		if wantFirst := map[string]uint32{"m4": 1, "m3": 2}; !maps.Equal(first, wantFirst) {
 			t.Errorf("UIDs before resuming = %v, want %v", first, wantFirst)
 		}
 	})
 }
 
-// A Refresh, or a message event that can't be applied, is not stored as the
-// last event: the database is marked for a rebuild, the download stops and
-// the account's clients get BYE. The pages that follow are not applied.
+// A Refresh, or a message event that can't be applied for a reason a retry
+// won't cure, is not stored as the last event: the database is marked for a
+// rebuild, the download stops and the account's clients get BYE. The pages
+// that follow are not applied.
 // evidence: witnesses
 func TestEventsAskForRebuild(t *testing.T) {
 	for _, tc := range []struct {
@@ -720,17 +860,17 @@ func TestEventsAskForRebuild(t *testing.T) {
 	}{
 		{"refresh", &protonmail.Event{ID: "e2", Refresh: protonmail.EventRefreshMail}},
 		// After the download, a message the database lacks must be fetched;
-		// the fake API refuses it (fakeMetadata errors on any other request).
-		{"failed update", &protonmail.Event{ID: "e2", Messages: []*protonmail.EventMessage{
+		// the fake API refuses it with a 422, which no retry cures.
+		{"refused update", &protonmail.Event{ID: "e2", Messages: []*protonmail.EventMessage{
 			{ID: "unknown", Action: protonmail.EventUpdateFlags, Updated: &protonmail.EventMessageUpdate{Unread: new(0)}},
 		}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				setBubbleClock()
-				api := &fakeMetadata{t: t, quiet: true}
-				u, inbox, _ := newDownloadTestUser(t, api)
-				if err := u.db.SetSyncDone(); err != nil {
+				api := &fakeMetadata{t: t, quiet: true, status: http.StatusUnprocessableEntity}
+				u, inbox, _, _ := newDownloadTestUser(t, api)
+				if _, err := u.db.SetSyncDone(); err != nil {
 					t.Fatal(err)
 				}
 				var sent []imapbackend.Update
@@ -813,7 +953,7 @@ func TestInitSessionAsksLatestEventFirst(t *testing.T) {
 				"/events/latest": `{"Code":1000,"EventID":"latest1","More":0}`,
 				"/labels":        `{"Code":1000,"Labels":[]}`,
 			}
-			u := &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), syncSem: make(chan struct{}, 1)}
+			u := &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), syncSem: make(chan struct{}, 1), sendSem: make(chan struct{}, 1)}
 			u.c = &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{
 				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 					requests = append(requests, r.URL.Path)

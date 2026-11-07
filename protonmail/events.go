@@ -15,6 +15,10 @@ const (
 
 type Event struct {
 	ID string `json:"EventID"`
+	// After is the event ID this page was asked after: set by the receiver
+	// that polled it (events.Receiver), not by Proton. It tells a consumer
+	// that rewound the events which page starts the replay.
+	After string `json:"-"`
 	// More is 1 when more events follow this page: ask for the events after
 	// ID again before waiting.
 	More     int

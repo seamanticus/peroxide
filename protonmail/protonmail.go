@@ -203,6 +203,14 @@ func (c *Client) doJSON(req *http.Request, respData any) error {
 	}
 
 	if decodeErr != nil {
+		if resp.StatusCode >= http.StatusBadRequest {
+			// A gateway's HTML page, say: the status is what callers can
+			// act on (a 502 is worth retrying).
+			return &APIError{
+				Status:  resp.StatusCode,
+				Message: fmt.Sprintf("%v, with a body that isn't an API response: %v", resp.Status, decodeErr),
+			}
+		}
 		return decodeErr
 	}
 

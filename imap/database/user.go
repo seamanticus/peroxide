@@ -42,6 +42,11 @@ var (
 	// syncDoneKey is set once every message has been downloaded (bridge's
 	// HasMessages).
 	syncDoneKey = []byte("syncdone")
+	// syncStartEventKey is the last event ID applied when the download began
+	// (bridge's StartSyncEventID): once done, the events after it are
+	// applied again, to correct pages fetched before an event and stored
+	// after it.
+	syncStartEventKey = []byte("syncstartevent")
 	// rebuildKey asks the next login to wipe the database and download the
 	// account again (bridge's ShouldResync).
 	rebuildKey = []byte("rebuild")
@@ -349,9 +354,48 @@ func (u *User) SyncState() (cursor string, done bool, err error) {
 	return cursor, done, err
 }
 
-// SetSyncDone records that every message has been downloaded.
-func (u *User) SetSyncDone() error {
-	return u.putMeta(syncDoneKey, []byte{1})
+// SetSyncDone records that every message has been downloaded, and returns
+// the event ID the download began at (SetSyncStart), forgotten with it, for
+// the events after it to be applied again. Empty if none was recorded. The
+// same transaction stores it as the last event applied, so a restart before
+// the replay ends replays still.
+func (u *User) SetSyncDone() (startEventID string, err error) {
+	err = u.db.Update(func(tx *bolt.Tx) error {
+		meta, err := tx.CreateBucketIfNotExists(metaBucket)
+		if err != nil {
+			return err
+		}
+		startEventID = string(meta.Get(syncStartEventKey))
+		if err := meta.Delete(syncStartEventKey); err != nil {
+			return err
+		}
+		if startEventID != "" {
+			events, err := tx.CreateBucketIfNotExists(eventsBucket)
+			if err != nil {
+				return err
+			}
+			if err := events.Put(lastEventIDKey, []byte(startEventID)); err != nil {
+				return err
+			}
+		}
+		return meta.Put(syncDoneKey, []byte{1})
+	})
+	return startEventID, err
+}
+
+// SetSyncStart records eventID as the event ID the download began at, unless
+// one is recorded already: a download resumed keeps the first.
+func (u *User) SetSyncStart(eventID string) error {
+	return u.db.Update(func(tx *bolt.Tx) error {
+		meta, err := tx.CreateBucketIfNotExists(metaBucket)
+		if err != nil {
+			return err
+		}
+		if meta.Get(syncStartEventKey) != nil {
+			return nil
+		}
+		return meta.Put(syncStartEventKey, []byte(eventID))
+	})
 }
 
 // SetNeedsRebuild asks the next login to wipe the database and download the
@@ -405,7 +449,7 @@ func wipe(tx *bolt.Tx) error {
 	if err != nil {
 		return err
 	}
-	for _, k := range [][]byte{syncCursorKey, syncDoneKey, rebuildKey} {
+	for _, k := range [][]byte{syncCursorKey, syncDoneKey, syncStartEventKey, rebuildKey} {
 		if err := meta.Delete(k); err != nil {
 			return err
 		}

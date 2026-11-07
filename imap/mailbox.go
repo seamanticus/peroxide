@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -606,7 +607,9 @@ func (mbox *mailbox) applyFlag(apiIDs []string, flag string, add bool) error {
 		// no such flag, so it is never sent there and is lost when peroxide
 		// restarts, which RFC 3501 allows. Every connection with the mailbox
 		// selected shares it and is told; go-imap drops the FETCH for one
-		// that sent .SILENT.
+		// that sent .SILENT. Under syncSem, so that its FETCH reaches clients
+		// in turn with the sequence numbers it was made with.
+		mbox.u.lockSync()
 		mbox.Lock()
 		for _, apiID := range apiIDs {
 			if add {
@@ -617,11 +620,8 @@ func (mbox *mailbox) applyFlag(apiIDs []string, flag string, add bool) error {
 		}
 		mbox.Unlock()
 		updates, err := mbox.flagsUpdates(apiIDs)
-		if err != nil {
-			return err
-		}
-		mbox.u.sendUpdates(updates)
-		return nil
+		mbox.u.unlockSyncAndSend(updates, mbox.u.sendUpdates)
+		return err
 	case imap.DraftFlag:
 		// Drafts are a mailbox in Proton, not a label a message can be given.
 		return nil
@@ -835,7 +835,7 @@ func succeeded(apiIDs []string, failed map[string]error) []string {
 func (mbox *mailbox) undoMove(dest *mailbox, apiIDs []string) (allMoved bool, err error) {
 	var moved, undo []string
 	for chunk := range slices.Chunk(apiIDs, protonmail.MaxMessagesPerRequest) {
-		msgs, err := mbox.u.c.MessagesByID(chunk)
+		msgs, err := mbox.u.c.MessagesByID(context.Background(), chunk)
 		if err != nil {
 			return false, fmt.Errorf("cannot check the messages left in both %v and %v until the next event: %w", mbox.Name(), dest.Name(), err)
 		}
@@ -947,7 +947,7 @@ func (mbox *mailbox) forGood(apiIDs []string) ([]string, error) {
 	var forGood []string
 	var listed map[string]*protonmail.Label // labels from Proton, fetched once if needed
 	for chunk := range slices.Chunk(apiIDs, protonmail.MaxMessagesPerRequest) {
-		msgs, err := mbox.u.c.MessagesByID(chunk)
+		msgs, err := mbox.u.c.MessagesByID(context.Background(), chunk)
 		if err != nil {
 			return nil, fmt.Errorf("cannot check what else holds the messages, none expunged from %v: %w", mbox.Name(), err)
 		}
