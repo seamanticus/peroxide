@@ -51,38 +51,57 @@ No `COPYUID` is returned (no UIDPLUS).
 
 ## MOVE
 
-Two calls: label with the destination, then unlabel from the source.
 RFC 6851 asks that each message end in the source or the destination,
-never in neither, and not in both, even if the command fails. peroxide:
+never in neither, and not in both, even if the command fails.
+
+**Between two folders** (INBOX, Archive, Sent, Drafts, Spam, Trash, and
+your own folders) a MOVE is **one call**: label with the destination.
+A message is in at most one folder in Proton, so that takes it out of
+the source too. A message the call fails for is where it was; nothing
+can end in both.
+
+**Out of or into Starred**, which isn't a folder, it is two calls:
+label with the destination, then unlabel from the source. peroxide:
 
 - unlabels only the messages that were labelled (one the label call
   failed for stays where it was);
 - for a message the unlabel failed for, reads its labels back from
-  Proton. If Proton already took it out of the source (moving into a
-  folder does that), the move is complete. Otherwise it unlabels the
-  message from the destination again, as if it never moved. If that
-  undo fails too, the message is in both mailboxes, in Proton as well
-  as locally, and the NO says so: remove it from one by hand. If only
-  the check fails, the local view shows both until the next events
-  tell what Proton did.
+  Proton. If Proton already took it out of the source, the move is
+  complete. Otherwise it unlabels the message from the destination
+  again, as if it never moved. If that undo fails too, the message is
+  in both mailboxes, in Proton as well as locally, and the NO says so:
+  remove it from one by hand. If only the check fails, the local view
+  shows both until the next events tell what Proton did.
+
+**Refused**, before any call: out of All Mail (no message leaves it
+but by being deleted), into All Mail (every message is there), and
+between INBOX and Sent, as proton-bridge refuses them. A MOVE into the
+mailbox itself does nothing.
 
 ## EXPUNGE
 
-EXPUNGE removes the messages marked `\Deleted` **from this mailbox**,
-by unlabelling them (`PUT /messages/unlabel`). It does not delete them
-from your account:
+EXPUNGE removes the messages marked `\Deleted` **from this mailbox**.
+It does not delete them from your account, except from Trash or Drafts:
 
-- From a folder, a message unlabelled from its folder is left in All
-  Mail (and any labels it has). Proton puts no folder in its place.
-- **From Trash or Drafts**, peroxide then deletes for good
-  (`PUT /messages/delete`) the expunged messages that no other mailbox
-  or label still shows. A message still in another folder, or with a
-  label, isn't deleted. If that delete fails, EXPUNGE still answers OK
-  (the messages did leave the mailbox, and clients were told); they
-  stay in All Mail, and the failure is logged.
+- From a folder, the messages are unlabelled from it
+  (`PUT /messages/unlabel`), and left in All Mail (and any labels they
+  have). Proton puts no folder in their place.
+- **From Trash or Drafts**, peroxide first looks up what else holds
+  each message (one metadata request per 150), and **deletes for good**
+  (`PUT /messages/delete`) those no other mailbox or label shows. Only
+  the others, still in another folder or with a label, are then
+  unlabelled from Trash. A message whose delete fails is left exactly
+  as it was: in Trash, still marked `\Deleted`. EXPUNGE then answers NO
+  for it, and the next EXPUNGE tries again. If the lookup fails, nothing
+  is expunged and the answer is NO.
 - **In All Mail, EXPUNGE is refused**: nothing can leave All Mail
   except by being deleted, and deleting everything marked there is
   rarely what a client means. Move messages to Trash and expunge there.
+
+Deleting before unlabelling means a message expunged from Trash is
+either gone or still in Trash: never left in All Mail alone, where a
+client that doesn't show All Mail couldn't reach it, and never
+announced as expunged when it wasn't.
 
 So the usual "delete" of a client (move to Trash, then expunge Trash
 when emptying it) behaves as in Proton's web app. A client that
@@ -114,14 +133,18 @@ import API.
 - **STORE, COPY, MOVE** reach Proton through Gluon, Proton's IMAP
   library, which keeps the mailbox state in its own store. Labels are
   mailboxes there, so COPY to `Labels/x` adds a label and MOVE out of
-  one removes it. On MOVE into a folder or system mailbox, a feature
-  flag lets it skip the unlabel call (Proton has moved the message
-  already); it keeps the call by default, as removing it broke clients
-  (connector.go, BRIDGE-451).
-- **EXPUNGE** is the same as peroxide's (peroxide copied it): unlabel,
-  then delete for good from Trash and Drafts only what no other shown
-  label holds; All Mail refuses.
+  one removes it. Its MOVE has two forms behind a feature flag
+  (connector.go): one that unlabels the source only when it is a label
+  (`moveMessagesWithoutUnlabelCallOnFolders`), which peroxide follows
+  for moves between folders, and one that unlabels always, kept since
+  removing the call broke clients (BRIDGE-451). Both refuse MOVE
+  between INBOX and Sent and into or out of All Mail and Scheduled.
+- **EXPUNGE**: bridge unlabels first, then deletes for good, from Trash
+  and Drafts, what no other shown label holds; All Mail refuses.
+  peroxide decides the same, in the other order, so that a failed
+  delete leaves the message in Trash rather than only in All Mail,
+  which bridge hides by default.
 - **APPEND** imports the message into any mailbox (Proton's import
   API), except All Mail; peroxide doesn't have that client yet.
-- proton-bridge also refuses MOVE between INBOX and Sent, and APPEND
-  or MOVE into All Mail or Scheduled. peroxide doesn't check these.
+- proton-bridge also refuses APPEND into All Mail and Scheduled.
+  peroxide shows no Scheduled mailbox.

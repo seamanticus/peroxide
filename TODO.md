@@ -732,15 +732,22 @@ Small, independent, found reviewing branch `labels-events`.
     record the status and Code of `GET /events/...`. If it is none of
     those, add it to `refused` and to `TestRefused`; if it is a 2xx with
     `Refresh` set, nothing to do (`EventRefreshMail` is handled).
-11. **MOVE out of Starred still makes two requests.** `MoveMessages`
-    always labels then unlabels. Into a folder Proton has already moved
-    the message out of the source folder by the label, so the unlabel
-    answers "does not exist" for each message: a wasted 0.4 s round
-    trip. proton-bridge skips the unlabel when the destination is a
-    folder or system mailbox and the source is not a label
-    (`moveMessagesWithoutUnlabelCallOnFolders`, connector.go), and keeps
-    it behind a feature flag because removing it broke clients (its
-    BRIDGE-451 comment). Measure on a `-debug` log before changing it.
+11. (done: MOVE between folders is one label call, as proton-bridge's
+    `moveMessagesWithoutUnlabelCallOnFolders`; INBOX/Sent and All Mail
+    moves refused.) Left open: bridge keeps the two-call form as its
+    default because removing the unlabel broke clients (BRIDGE-451,
+    unexplained in its code). If a client misbehaves after a folder
+    MOVE (the source still listing the message until the next events),
+    compare a `-debug` log of it with the event that follows.
+12. **Make the SMTP domain configurable.** `listenAndServeSMTP`
+    (cmd/peroxide/main.go) sets `s.Domain = "localhost"`. go-smtp uses it
+    only in the greeting (`220 localhost ESMTP Service Ready`, go-smtp
+    conn.go); nothing sent to Proton carries it. It matters to a client
+    that checks the greeting against the host it connected to, which
+    happens once peroxide listens off loopback with a certificate. Add a
+    `-smtp-domain` flag, defaulting to `localhost`, or with
+    `-tls-cert` the certificate's first DNS name; document it in
+    docs/commands.md. Test: the greeting carries the configured name.
 
 ## 13. Make error handling congruent across the code
 
@@ -782,9 +789,8 @@ files named are the ones the sweep starts from, not a complete list.
    with what was being done.
 6. **Logged and dropped.** Some failures are only logged: an address or
    label event that can't be applied (imap/addresses.go,
-   imap/user.go `createLabel`, `deleteLabel`), a counts request after
-   an event, the delete for good after EXPUNGE (by design since
-   87d4da7: the command did what it said). List each with why it can't
+   imap/user.go `createLabel`, `deleteLabel`) and a counts request after
+   an event. List each with why it can't
    propagate, in a comment at the site, so the next reader doesn't
    "fix" it.
 
