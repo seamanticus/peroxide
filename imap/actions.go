@@ -74,16 +74,6 @@ func (u *user) applyUpdate(apiID string, update *protonmail.EventMessageUpdate) 
 		if mbox == nil {
 			continue
 		}
-		// Not synced yet (All Mail that a client only STATUSes): its bucket
-		// holds only what events added, so it has no sequence number a client
-		// knows, and the FETCH that syncs it reads the flags as they are then.
-		// Stable here: callers hold syncSem.
-		mbox.Lock()
-		synced := mbox.initialized
-		mbox.Unlock()
-		if !synced {
-			continue
-		}
 		seqNum, uid, err := mbox.db.FromApiID(apiID)
 		if err != nil {
 			log.Printf("cannot get sequence number of message %v in %v: %v", apiID, mbox.Name(), err)

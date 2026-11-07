@@ -169,6 +169,15 @@ Commands:
 
 	sendmail <username> -- <args...>		sendmail(1) interface
 
+	download-mailbox [-discard-local-copy] <username>
+						Download the account's mail into peroxide's local copy
+						now, as serve does in the background after a login, and
+						exit once it is complete. Run it before the first client
+						connects to a large account; interrupted, it resumes.
+						Not while serve is running. -discard-local-copy wipes the
+						local copy first and downloads it all again: every
+						mailbox gets a new UIDVALIDITY, so clients refetch.
+
 	serve									Run all servers
 
 	smtp									Run peroxide as an SMTP server
@@ -267,6 +276,7 @@ func main() {
 
 	authCmd := flag.NewFlagSet("auth", flag.ExitOnError)
 	sendmailCmd := flag.NewFlagSet("sendmail", flag.ExitOnError)
+	downloadCmd := flag.NewFlagSet("download-mailbox", flag.ExitOnError)
 
 	flag.Usage = func() {
 		fmt.Print(usage)
@@ -476,6 +486,28 @@ func main() {
 			}()
 		}
 		log.Fatal(<-done)
+	case "download-mailbox":
+		discard := downloadCmd.Bool("discard-local-copy", false, "wipe the local copy first and download it again from scratch")
+		downloadCmd.Parse(flag.Args()[1:])
+		username := downloadCmd.Arg(0)
+		if username == "" || downloadCmd.NArg() != 1 {
+			log.Fatal("usage: peroxide download-mailbox [-discard-local-copy] <username>")
+		}
+
+		bridgePassword, err := askBridgePass()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// The download needs the session only, not the keys: metadata isn't
+		// decrypted.
+		c, _, err := auth.NewManager(newClient).Auth(username, bridgePassword)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := imapbackend.DownloadAccount(c, *discard); err != nil {
+			log.Fatal(err)
+		}
 	case "sendmail":
 		username := flag.Arg(1)
 		if username == "" || flag.Arg(2) != "--" {

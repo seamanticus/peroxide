@@ -14,10 +14,19 @@ import (
 // (notify_design.md) plugs in here too.
 type Extension struct{}
 
-var _ imapserver.Extension = Extension{} // proof: compile-time
+var _ imapserver.ConnExtension = Extension{} // proof: compile-time
 
 func (Extension) Capabilities(imapserver.Conn) []string {
 	return nil
+}
+
+// NewConn hands the backend the server, so that it can disconnect an
+// account's clients (backend.disconnect).
+func (Extension) NewConn(c imapserver.Conn) imapserver.Conn {
+	if be, ok := c.Server().Backend.(*backend); ok {
+		be.setServer(c.Server())
+	}
+	return c
 }
 
 // Command replaces FETCH. UID FETCH looks its inner command up by the same

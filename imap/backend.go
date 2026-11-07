@@ -2,10 +2,13 @@ package imap
 
 import (
 	"errors"
+	"log"
 	"sync"
+	"time"
 
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
+	imapserver "github.com/emersion/go-imap/server"
 
 	"github.com/seamanticus/peroxide/auth"
 	"github.com/seamanticus/peroxide/events"
@@ -42,6 +45,44 @@ type backend struct {
 	sync.Mutex // protects everything below
 
 	users map[string]*user
+	// The server serving this backend, learnt from its first connection
+	// (Extension.NewConn): go-imap gives the backend no other way to reach
+	// the connections.
+	server *imapserver.Server
+}
+
+func (be *backend) setServer(s *imapserver.Server) {
+	be.Lock()
+	defer be.Unlock()
+	be.server = s
+}
+
+// disconnect ends every connection logged in as u, as proton-bridge removes
+// its IMAP user. go-imap's conn.Close logs the user out, and serveConn closes
+// the connection again when it ends, which would log it out twice: so the
+// connection's deadline is set instead, which fails its read and lets go-imap
+// close it once. Called without be's lock, which Logout takes while go-imap
+// holds the server's.
+func (be *backend) disconnect(u *user) {
+	be.Lock()
+	s := be.server
+	be.Unlock()
+	if s == nil {
+		return
+	}
+	s.ForEachConn(func(c imapserver.Conn) {
+		if cu, ok := c.Context().User.(*user); !ok || cu != u {
+			return
+		}
+		d, ok := c.(interface{ SetDeadline(time.Time) error })
+		if !ok {
+			log.Printf("cannot disconnect a client of %q: %T has no SetDeadline", u.username, c)
+			return
+		}
+		if err := d.SetDeadline(time.Unix(1, 0)); err != nil {
+			log.Printf("cannot disconnect a client of %q: %v", u.username, err)
+		}
+	})
 }
 
 func (be *backend) Login(info *imap.ConnInfo, username, password string) (imapbackend.User, error) {

@@ -168,15 +168,16 @@ func TestUpdateFollowsRename(t *testing.T) {
 	}
 }
 
-// newActionTestMailbox returns a synchronized INBOX holding msgs, whose user
-// talks to api, and the updates sent to clients. Updates are acknowledged as
-// the IMAP server does once they are written.
-func newActionTestMailbox(t *testing.T, api *fakeAPI, msgs []*protonmail.Message) (*mailbox, func() []imapbackend.Update) {
+// newActionTestMailbox returns INBOX holding msgs, whose user talks to api,
+// and the updates sent to clients. Updates are acknowledged as the IMAP server
+// does once they are written. The buckets of extraLabels are made first, so
+// that msgs labelled with them are filed there too.
+func newActionTestMailbox(t *testing.T, api *fakeAPI, msgs []*protonmail.Message, extraLabels ...string) (*mailbox, func() []imapbackend.Update) {
 	t.Helper()
 	srv := httptest.NewServer(api)
 	t.Cleanup(srv.Close)
 
-	mbox, _ := newTestMailbox(t, msgs)
+	mbox, _ := newTestMailbox(t, msgs, extraLabels...)
 	u := mbox.u
 	u.c = &protonmail.Client{RootURL: srv.URL}
 	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: mbox}
@@ -243,15 +244,14 @@ func TestStoreSeenAppliedWithoutEvent(t *testing.T) {
 	}
 }
 
-// A flag change on a message is told to the mailboxes synced, not to All Mail
-// when no client opened it yet: it has no sequence numbers to send, and looking
-// the message up there logged a warning for every flag change (TODO.md section
-// 8).
-func TestStoreSkipsUnsyncedMailbox(t *testing.T) {
+// A flag change on a message is told to every mailbox holding it: All Mail
+// holds it too once stored, so nothing is logged (TODO.md section 8 logged
+// "message not found" for a mailbox no client had opened).
+func TestStoreTellsEveryMailbox(t *testing.T) {
 	msgs := []*protonmail.Message{
 		{ID: "a", Unread: 1, LabelIDs: []string{protonmail.LabelInbox, protonmail.LabelAllMail}},
 	}
-	mbox, sent := newActionTestMailbox(t, &fakeAPI{t: t}, msgs)
+	mbox, sent := newActionTestMailbox(t, &fakeAPI{t: t}, msgs, protonmail.LabelAllMail)
 	u := mbox.u
 	allMailDB, err := u.db.Mailbox(protonmail.LabelAllMail)
 	if err != nil {
@@ -271,12 +271,16 @@ func TestStoreSkipsUnsyncedMailbox(t *testing.T) {
 	if logs.Len() != 0 {
 		t.Errorf("logged %q, want nothing", logs.String())
 	}
-	updates := sent()
-	if len(updates) != 1 {
-		t.Fatalf("sent %v updates, want 1", len(updates))
+	var names []string
+	for _, up := range sent() {
+		if _, ok := up.(*imapbackend.MessageUpdate); !ok {
+			t.Errorf("sent %T, want message updates only", up)
+		}
+		names = append(names, up.Mailbox())
 	}
-	if up, ok := updates[0].(*imapbackend.MessageUpdate); !ok || up.Mailbox() != imap.InboxName {
-		t.Errorf("sent %T for mailbox %q, want a message update for %q", updates[0], updates[0].Mailbox(), imap.InboxName)
+	slices.Sort(names)
+	if want := []string{"All Mail", imap.InboxName}; !slices.Equal(names, want) {
+		t.Errorf("sent message updates for %v, want %v", names, want)
 	}
 }
 
@@ -821,7 +825,7 @@ func trashMessage(id string) *protonmail.Message {
 func addTestMailbox(t *testing.T, u *user, name, labelID string, msgs []*protonmail.Message) *mailbox {
 	t.Helper()
 	mboxDB := syncTestMailbox(t, u.db, labelID, msgs)
-	mbox := &mailbox{name: name, label: labelID, u: u, db: mboxDB, deleted: make(map[string]struct{}), initialized: true}
+	mbox := &mailbox{name: name, label: labelID, u: u, db: mboxDB, deleted: make(map[string]struct{})}
 	u.mailboxes[labelID] = mbox
 	return mbox
 }

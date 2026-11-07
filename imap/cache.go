@@ -75,15 +75,6 @@ func (c *messageCache) remove(id string) {
 	}
 }
 
-func (c *messageCache) clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.order.Init()
-	clear(c.messages)
-	clear(c.values)
-}
-
 // errMessageGone is the error of fullMessage for a message Proton no longer
 // has: deleted after the local database learnt of it, and still listed until
 // its delete event is applied.

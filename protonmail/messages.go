@@ -466,6 +466,46 @@ func (c *Client) MessagesByID(ids []string) ([]*Message, error) {
 	return nil, fmt.Errorf("messages still stale after %v requests", maxStaleRetries)
 }
 
+// MetadataPageSize is how many messages MessageMetadataPage asks for, as
+// proton-bridge's sync (syncservice MetadataPageSize).
+const MetadataPageSize = 128
+
+// MessageMetadataPage returns the metadata of the account's messages, every
+// label included, newest first: the pageSize newest if endID is empty, else
+// the pageSize newest up to endID, which Proton lists first if it still has
+// it. It is go-proton-api's GetMessageMetadataPage with {Desc: true, EndID},
+// as proton-bridge's sync pages through every message.
+func (c *Client) MessageMetadataPage(endID string, pageSize int) ([]*Message, error) {
+	reqData := struct {
+		EndID    string `json:",omitempty"`
+		Desc     int
+		Page     int
+		PageSize int
+		Sort     string
+	}{endID, 1, 0, pageSize, "ID"}
+
+	for range maxStaleRetries {
+		req, err := c.newJSONRequest(http.MethodPost, "/mail/v4/messages", &reqData)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("X-HTTP-Method-Override", http.MethodGet)
+
+		var respData struct {
+			resp
+			Messages []*Message
+			Stale    int
+		}
+		if err := c.doJSON(req, &respData); err != nil {
+			return nil, err
+		}
+		if respData.Stale == 0 {
+			return respData.Messages, nil
+		}
+	}
+	return nil, fmt.Errorf("messages still stale after %v requests", maxStaleRetries)
+}
+
 // UndeleteMessages restores deleted messages, and returns the error of each
 // one it failed for.
 func (c *Client) UndeleteMessages(ids []string) (failed map[string]error, err error) {

@@ -1,12 +1,15 @@
 package imap
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"io"
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 
@@ -38,37 +41,39 @@ func openTestDB(t *testing.T) *database.User {
 	return db
 }
 
-// syncTestMailbox synchronizes the mailbox labelID of db with msgs, the way
-// mailbox.sync does.
+// syncTestMailbox stores msgs in db in the order given, as events would, so
+// that the mailbox labelID holds those of msgs labelled with it with UIDs
+// 1, 2, ... in that order.
 func syncTestMailbox(t *testing.T, db *database.User, labelID string, msgs []*protonmail.Message) *database.Mailbox {
 	t.Helper()
 	mboxDB, err := db.Mailbox(labelID)
 	if err != nil {
 		t.Fatalf("db.Mailbox() = %v", err)
 	}
-	if err := mboxDB.Reset(); err != nil {
-		t.Fatalf("Reset() = %v", err)
-	}
-	if err := mboxDB.Sync(msgs); err != nil {
-		t.Fatalf("Sync() = %v", err)
+	for _, msg := range msgs {
+		if _, err := db.CreateMessage(msg); err != nil {
+			t.Fatalf("CreateMessage() = %v", err)
+		}
 	}
 	return mboxDB
 }
 
 // newTestMailbox returns a synchronized INBOX backed by a temporary database,
 // holding msgs.
-func newTestMailbox(t *testing.T, msgs []*protonmail.Message) (*mailbox, *database.User) {
+func newTestMailbox(t *testing.T, msgs []*protonmail.Message, extraLabels ...string) (*mailbox, *database.User) {
 	t.Helper()
 	db := openTestDB(t)
+	for _, labelID := range extraLabels {
+		syncTestMailbox(t, db, labelID, nil)
+	}
 	mboxDB := syncTestMailbox(t, db, protonmail.LabelInbox, msgs)
 
 	return &mailbox{
-		name:        imap.InboxName,
-		label:       protonmail.LabelInbox,
-		u:           &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), syncSem: make(chan struct{}, 1)},
-		db:          mboxDB,
-		deleted:     make(map[string]struct{}),
-		initialized: true,
+		name:    imap.InboxName,
+		label:   protonmail.LabelInbox,
+		u:       &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), syncSem: make(chan struct{}, 1)},
+		db:      mboxDB,
+		deleted: make(map[string]struct{}),
 	}, db
 }
 
@@ -107,15 +112,12 @@ func TestStatusFlagsSorted(t *testing.T) {
 	}
 }
 
-// Proton's events carry no message counts, so counts cached at login go stale:
-// STATUS must follow the local database, which events keep up to date.
+// STATUS follows the local database, which events keep up to date.
 func TestStatusFollowsEvents(t *testing.T) {
 	mbox, db := newTestMailbox(t, []*protonmail.Message{
 		inboxMessage("a", 0),
 		inboxMessage("b", 0),
 	})
-	// Counts from /messages/count at login.
-	mbox.setAPICounts(2, 0)
 	checkStatus(t, mbox, 2, 0)
 
 	if _, err := db.CreateMessage(inboxMessage("c", 1)); err != nil {
@@ -141,19 +143,9 @@ func TestStatusFollowsEvents(t *testing.T) {
 	checkStatus(t, mbox, 2, 0)
 }
 
-// Until a mailbox is synchronized its local database is incomplete, so the
-// counts reported by the API are the only ones available.
-func TestStatusUninitializedUsesAPICounts(t *testing.T) {
-	mbox, _ := newTestMailbox(t, []*protonmail.Message{inboxMessage("a", 1)})
-	mbox.initialized = false
-	mbox.setAPICounts(40, 7)
-	checkStatus(t, mbox, 40, 7)
-}
-
 // FETCH 1:* must reach messages added by events after login.
 func TestListMessagesStarReachesNewMessages(t *testing.T) {
 	mbox, db := newTestMailbox(t, []*protonmail.Message{inboxMessage("a", 0)})
-	mbox.setAPICounts(1, 0)
 	if _, err := db.CreateMessage(inboxMessage("b", 1)); err != nil {
 		t.Fatalf("CreateMessage() = %v", err)
 	}
@@ -206,13 +198,15 @@ func TestCountsMatchRecount(t *testing.T) {
 	}
 	inbox, archive, allMail := protonmail.LabelInbox, protonmail.LabelArchive, protonmail.LabelAllMail
 	mailboxes := map[string]*database.Mailbox{
-		inbox:   syncTestMailbox(t, db, inbox, []*protonmail.Message{msg("a", 1, inbox, allMail), msg("b", 0, inbox, allMail)}),
-		archive: syncTestMailbox(t, db, archive, []*protonmail.Message{msg("c", 1, archive, allMail)}),
+		inbox:   syncTestMailbox(t, db, inbox, nil),
+		archive: syncTestMailbox(t, db, archive, nil),
+		allMail: syncTestMailbox(t, db, allMail, nil),
 	}
-	// Synchronized last, so its entries point at messages already stored.
-	mailboxes[allMail] = syncTestMailbox(t, db, allMail, []*protonmail.Message{
-		msg("a", 1, inbox, allMail), msg("b", 0, inbox, allMail), msg("c", 1, archive, allMail),
-	})
+	for _, m := range []*protonmail.Message{msg("a", 1, inbox, allMail), msg("b", 0, inbox, allMail), msg("c", 1, archive, allMail)} {
+		if _, err := db.CreateMessage(m); err != nil {
+			t.Fatalf("CreateMessage() = %v", err)
+		}
+	}
 
 	read, unread := 0, 1
 	steps := []struct {
@@ -246,7 +240,6 @@ func TestCountsMatchRecount(t *testing.T) {
 			_, err := db.CreateMessage(msg("c", 1, archive, allMail))
 			return err
 		}},
-		{"reset messages", db.ResetMessages},
 	}
 	for _, step := range steps {
 		if err := step.do(); err != nil {
@@ -263,92 +256,6 @@ func TestCountsMatchRecount(t *testing.T) {
 			}
 		}
 	}
-}
-
-// Proton's events carry no message counts, so after a message event the counts
-// are fetched again for mailboxes that aren't synchronized.
-func TestEventRefreshesAPICounts(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/messages/count" {
-			t.Errorf("unexpected request to %v", r.URL.Path)
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"Code":1000,"Counts":[{"LabelID":"0","Total":3,"Unread":1}]}`))
-	}))
-	defer srv.Close()
-
-	mbox, _ := newTestMailbox(t, nil)
-	mbox.initialized = false
-	mbox.setAPICounts(2, 0)
-	u := mbox.u
-	u.c = &protonmail.Client{RootURL: srv.URL}
-	u.u = &protonmail.User{Name: "bob"}
-	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: mbox}
-	u.eventSent = make(chan struct{})
-
-	events := make(chan *protonmail.Event, 1)
-	events <- &protonmail.Event{Messages: []*protonmail.EventMessage{{
-		ID:      "c",
-		Action:  protonmail.EventCreate,
-		Created: inboxMessage("c", 1),
-	}}}
-	close(events)
-	updates := make(chan imapbackend.Update, 10)
-	u.receiveEvents(updates, events)
-
-	checkStatus(t, mbox, 3, 1)
-
-	// Let the goroutine waiting for the updates to be sent finish, as the
-	// server would.
-	close(updates)
-	for update := range updates {
-		close(update.Done())
-	}
-}
-
-// Commands waiting for an event, such as STORE, must not also wait for the
-// counts fetched after it.
-func TestEventSentBeforeCountsFetched(t *testing.T) {
-	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-release
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"Code":1000,"Counts":[{"LabelID":"0","Total":3,"Unread":1}]}`))
-	}))
-	defer srv.Close()
-
-	mbox, _ := newTestMailbox(t, nil)
-	mbox.initialized = false
-	u := mbox.u
-	u.c = &protonmail.Client{RootURL: srv.URL}
-	u.u = &protonmail.User{Name: "bob"}
-	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: mbox}
-	// Buffered, so the signal isn't dropped while this test isn't waiting.
-	u.eventSent = make(chan struct{}, 1)
-
-	events := make(chan *protonmail.Event, 1)
-	events <- &protonmail.Event{Messages: []*protonmail.EventMessage{{
-		ID:      "c",
-		Action:  protonmail.EventCreate,
-		Created: inboxMessage("c", 1),
-	}}}
-	close(events)
-	updates := make(chan imapbackend.Update, 10)
-	done := make(chan struct{})
-	go func() {
-		u.receiveEvents(updates, events)
-		close(done)
-	}()
-
-	// The request for counts is still pending.
-	close((<-updates).Done())
-	<-u.eventSent
-
-	close(release)
-	<-done
-	checkStatus(t, mbox, 3, 1)
 }
 
 func mailboxNames(u *user) map[string]string {
@@ -592,50 +499,146 @@ func TestLogoutWhileApplyingEvents(t *testing.T) {
 	})
 }
 
-// An event page that arrives while a mailbox syncs is applied after the sync,
-// so a message it adds gets a UID after those the sync listed. On 2026-11-05
-// a message received while peroxide was idle got UID 1, below the older ones,
-// because its replayed create event landed in the mailbox the sync had just
-// emptied, and aerc showed it last.
-func TestEventDuringSyncKeepsOrder(t *testing.T) {
+// fakeMetadata answers the download's pages (POST /mail/v4/messages, newest
+// first, up to EndID) from msgs, given newest first, as Proton does: the page
+// up to EndID starts with EndID. Before answering it calls hook with the
+// number of the page (from 1), so that a test can block it. Requests for
+// specific IDs (MessagesByID) are refused with a 500, an error only if not
+// quiet.
+type fakeMetadata struct {
+	t     *testing.T
+	msgs  []*protonmail.Message
+	hook  func(page int)
+	quiet bool
+
+	mu    sync.Mutex
+	pages int
+}
+
+func (f *fakeMetadata) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method != http.MethodPost || r.URL.Path != "/mail/v4/messages" || r.Header.Get("X-HTTP-Method-Override") != http.MethodGet {
+		f.t.Errorf("unexpected request %v %v", r.Method, r.URL.Path)
+		return nil, errors.New("unexpected request")
+	}
+	var req struct {
+		ID       []string
+		EndID    string
+		Desc     int
+		PageSize int
+		Sort     string
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		f.t.Errorf("decode request: %v", err)
+	}
+	if len(req.ID) > 0 {
+		if !f.quiet {
+			f.t.Errorf("unexpected request for messages %v", req.ID)
+		}
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"Code":2001,"Error":"refused"}`)),
+			Request:    r,
+		}, nil
+	}
+	if req.Desc != 1 || req.Sort != "ID" || req.PageSize != protonmail.MetadataPageSize {
+		f.t.Errorf("page asked for with %+v, want Desc 1, Sort ID, PageSize %v", req, protonmail.MetadataPageSize)
+	}
+	f.mu.Lock()
+	f.pages++
+	page := f.pages
+	f.mu.Unlock()
+	if f.hook != nil {
+		f.hook(page)
+	}
+
+	start := 0
+	if req.EndID != "" {
+		start = slices.IndexFunc(f.msgs, func(m *protonmail.Message) bool { return m.ID == req.EndID })
+		if start < 0 {
+			f.t.Errorf("EndID %v is no message", req.EndID)
+			start = len(f.msgs)
+		}
+	}
+	// A small page, to exercise more than one.
+	end := min(start+2, len(f.msgs))
+	b, err := json.Marshal(struct {
+		Code     int
+		Messages []*protonmail.Message
+	}{1000, f.msgs[start:end]})
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader(b)),
+		Request:    r,
+	}, nil
+}
+
+// newDownloadTestUser returns a user with INBOX whose client answers the
+// download from api, and the channel go-imap would read its updates from,
+// acknowledged at once.
+func newDownloadTestUser(t *testing.T, api *fakeMetadata) (*user, *mailbox, chan imapbackend.Update) {
+	t.Helper()
+	inbox, _ := newTestMailbox(t, nil)
+	u := inbox.u
+	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
+	u.flags = map[string]string{}
+	u.done = make(chan struct{})
+	u.eventSent = make(chan struct{}, 1)
+	updates := make(chan imapbackend.Update)
+	u.backend = &backend{updates: updates}
+	u.c = &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{Transport: api}}
+	go func() {
+		for update := range updates {
+			close(update.Done())
+		}
+	}()
+	t.Cleanup(func() { close(updates) })
+	return u, inbox, updates
+}
+
+func uidsByID(t *testing.T, mbox *mailbox) map[string]uint32 {
+	t.Helper()
+	uids := make(map[string]uint32)
+	if err := mbox.db.ForEach(func(_, uid uint32, apiID string) error {
+		uids[apiID] = uid
+		return nil
+	}); err != nil {
+		t.Fatalf("ForEach() = %v", err)
+	}
+	return uids
+}
+
+// The download lists every message newest first, as proton-bridge's sync, so
+// the newest gets UID 1; it pages with EndID and skips the message each page
+// starts with. An event page arriving while a page is being fetched waits for
+// that page only (option A of the 2026-11 decisions, as bridge applies events
+// during its sync): a message it creates gets the next UID, and the page that
+// later lists it again leaves that UID alone. No UID is given twice.
+func TestDownloadAndEventsInterleave(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		inbox, db := newTestMailbox(t, nil)
-		inbox.initialized = false
-		u := inbox.u
-		u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
-		u.flags = map[string]string{}
-
-		// The sync's listing waits on release, as a slow Proton would.
-		listing, release := make(chan struct{}), make(chan struct{})
-		u.c = &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{
-			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				body := `{"Code":1000,"Counts":[{"LabelID":"0","Total":3,"Unread":0}]}`
-				if r.URL.Path == "/messages" {
-					close(listing)
-					<-release
-					body = `{"Code":1000,"Total":2,"Messages":[` +
-						`{"ID":"old1","LabelIDs":["0"]},{"ID":"old2","LabelIDs":["0"]}]}`
-				}
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     http.Header{"Content-Type": {"application/json"}},
-					Body:       io.NopCloser(strings.NewReader(body)),
-					Request:    r,
-				}, nil
-			}),
+		fetching, release := make(chan struct{}), make(chan struct{})
+		api := &fakeMetadata{t: t, msgs: []*protonmail.Message{
+			inboxMessage("m5", 0), inboxMessage("m4", 0), inboxMessage("m3", 1),
+			inboxMessage("m2", 0), inboxMessage("m1", 0),
 		}}
+		api.hook = func(page int) {
+			if page == 2 {
+				close(fetching)
+				<-release
+			}
+		}
+		u, inbox, updates := newDownloadTestUser(t, api)
+		u.startDownload()
 
-		synced := make(chan error, 1)
-		go func() { synced <- inbox.init() }()
-		<-listing // the sync has emptied INBOX and waits for its listing
-
-		updates := make(chan imapbackend.Update, 10)
+		<-fetching // page 1 (m5, m4) is stored; page 2 is being fetched
 		events := make(chan *protonmail.Event, 1)
-		events <- &protonmail.Event{ID: "e1", Messages: []*protonmail.EventMessage{{
-			ID:      "new",
-			Action:  protonmail.EventCreate,
-			Created: inboxMessage("new", 1),
-		}}}
+		events <- &protonmail.Event{ID: "e1", Messages: []*protonmail.EventMessage{
+			{ID: "m6", Action: protonmail.EventCreate, Created: inboxMessage("m6", 1)},
+		}}
 		close(events)
 		applied := make(chan struct{})
 		go func() {
@@ -643,52 +646,145 @@ func TestEventDuringSyncKeepsOrder(t *testing.T) {
 			close(applied)
 		}()
 		synctest.Wait()
-		if _, _, err := inbox.db.FromApiID("new"); err == nil {
-			t.Error("the event page was applied while the mailbox synced")
+		if _, _, err := inbox.db.FromApiID("m6"); err == nil {
+			t.Error("the event page was applied while a download page was being fetched")
 		}
 
 		close(release)
-		if err := <-synced; err != nil {
-			t.Fatalf("init() = %v", err)
-		}
-		// What go-imap does: deliver the page's updates, so it finishes.
-		go func() {
-			for update := range updates {
-				close(update.Done())
-			}
-		}()
 		<-applied
-		close(updates)
+		u.downloads.Wait()
 
-		for _, want := range []struct {
-			id  string
-			uid uint32
-		}{{"old1", 1}, {"old2", 2}, {"new", 3}} {
-			_, uid, err := inbox.db.FromApiID(want.id)
-			if err != nil || uid != want.uid {
-				t.Errorf("message %v has UID %v (%v), want %v", want.id, uid, err, want.uid)
-			}
+		want := map[string]uint32{"m5": 1, "m4": 2, "m6": 3, "m3": 4, "m2": 5, "m1": 6}
+		if got := uidsByID(t, inbox); !maps.Equal(got, want) {
+			t.Errorf("UIDs = %v, want %v", got, want)
 		}
-		if id, ok, err := db.LastEventID(); err != nil || !ok || id != "e1" {
-			t.Errorf("stored last event ID = %q, %v, %v, want e1", id, ok, err)
+		checkStatus(t, inbox, 6, 2)
+		if _, done, err := u.db.SyncState(); err != nil || !done {
+			t.Errorf("SyncState() done = %v, %v; want true", done, err)
 		}
 	})
 }
 
+// A download stopped after a page (peroxide stopped, the last client gone)
+// resumes from the page after it, with no message listed twice and UIDs kept.
+func TestDownloadResumes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		msgs := []*protonmail.Message{inboxMessage("m4", 0), inboxMessage("m3", 0), inboxMessage("m2", 0), inboxMessage("m1", 0)}
+		stopped := make(chan struct{})
+		api := &fakeMetadata{t: t, msgs: msgs}
+		u, inbox, _ := newDownloadTestUser(t, api)
+		api.hook = func(page int) {
+			if page == 2 {
+				close(u.done) // the last client logs out
+				close(stopped)
+			}
+		}
+		u.startDownload()
+		<-stopped
+		u.downloads.Wait()
+		first := uidsByID(t, inbox)
+
+		// The next login.
+		u.done = make(chan struct{})
+		api.hook = nil
+		u.startDownload()
+		u.downloads.Wait()
+
+		want := map[string]uint32{"m4": 1, "m3": 2, "m2": 3, "m1": 4}
+		if got := uidsByID(t, inbox); !maps.Equal(got, want) {
+			t.Errorf("UIDs = %v after resuming (%v before), want %v", got, first, want)
+		}
+		if !maps.Equal(first, map[string]uint32{"m4": 1, "m3": 2}) && len(first) != 0 {
+			t.Errorf("UIDs before resuming = %v, want the first page or none", first)
+		}
+	})
+}
+
+// A Refresh, or a message event that can't be applied, is not stored as the
+// last event: the database is marked for a rebuild, the download stops and
+// the account's clients get BYE. The pages that follow are not applied.
+// evidence: witnesses
+func TestEventsAskForRebuild(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event *protonmail.Event
+	}{
+		{"refresh", &protonmail.Event{ID: "e2", Refresh: protonmail.EventRefreshMail}},
+		// After the download, a message the database lacks must be fetched;
+		// the fake API refuses it (fakeMetadata errors on any other request).
+		{"failed update", &protonmail.Event{ID: "e2", Messages: []*protonmail.EventMessage{
+			{ID: "unknown", Action: protonmail.EventUpdateFlags, Updated: &protonmail.EventMessageUpdate{Unread: new(0)}},
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				api := &fakeMetadata{t: t, quiet: true}
+				u, inbox, _ := newDownloadTestUser(t, api)
+				if err := u.db.SetSyncDone(); err != nil {
+					t.Fatal(err)
+				}
+				var sent []imapbackend.Update
+				updates := make(chan imapbackend.Update)
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					for up := range updates {
+						sent = append(sent, up)
+						close(up.Done())
+					}
+				}()
+
+				events := make(chan *protonmail.Event, 3)
+				events <- &protonmail.Event{ID: "e1"}
+				events <- tc.event
+				events <- &protonmail.Event{ID: "e3", Messages: []*protonmail.EventMessage{
+					{ID: "late", Action: protonmail.EventCreate, Created: inboxMessage("late", 0)},
+				}}
+				close(events)
+				u.receiveEvents(updates, events)
+				close(updates)
+				<-done
+
+				if id, _, err := u.db.LastEventID(); err != nil || id != "e1" {
+					t.Errorf("stored last event ID = %q, %v; want e1", id, err)
+				}
+				if rebuild, err := u.db.NeedsRebuild(); err != nil || !rebuild {
+					t.Errorf("NeedsRebuild() = %v, %v; want true", rebuild, err)
+				}
+				if _, _, err := inbox.db.FromApiID("late"); err == nil {
+					t.Error("a page after the rebuild was asked for was applied")
+				}
+				bye := false
+				for _, up := range sent {
+					if s, ok := up.(*imapbackend.StatusUpdate); ok && s.Type == imap.StatusRespBye && s.Username() == "bob" {
+						bye = true
+					}
+				}
+				if !bye {
+					t.Errorf("sent %v, want a BYE to bob's clients", sent)
+				}
+			})
+		})
+	}
+}
+
 // On a first login (no event ID stored), the latest event ID is asked for
-// before the labels and counts are listed, so a change made between them
-// comes as an event instead of being lost; it is stored once they are
-// loaded. A stored ID is resumed from, with no request for it.
+// before the labels are listed (and the download starts), so a change made
+// meanwhile comes as an event instead of being lost; it is stored once they
+// are loaded. A stored ID is resumed from, with no request for it. A database
+// marked for a rebuild is wiped first, and so starts as a first login.
 // evidence: witnesses
 func TestInitSessionAsksLatestEventFirst(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		stored       string
+		rebuild      bool
 		wantID       string
 		wantRequests []string
 	}{
-		{"first login", "", "latest1", []string{"/events/latest", "/labels", "/messages/count"}},
-		{"resumed", "e7", "e7", []string{"/labels", "/messages/count"}},
+		{"first login", "", false, "latest1", []string{"/events/latest", "/labels"}},
+		{"resumed", "e7", false, "e7", []string{"/labels"}},
+		{"rebuild", "e7", true, "latest1", []string{"/events/latest", "/labels"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openTestDB(t)
@@ -697,11 +793,15 @@ func TestInitSessionAsksLatestEventFirst(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if tc.rebuild {
+				if err := db.SetNeedsRebuild(); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var requests []string
 			bodies := map[string]string{
-				"/events/latest":  `{"Code":1000,"EventID":"latest1","More":0}`,
-				"/labels":         `{"Code":1000,"Labels":[]}`,
-				"/messages/count": `{"Code":1000,"Counts":[]}`,
+				"/events/latest": `{"Code":1000,"EventID":"latest1","More":0}`,
+				"/labels":        `{"Code":1000,"Labels":[]}`,
 			}
 			u := &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), syncSem: make(chan struct{}, 1)}
 			u.c = &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{
@@ -710,7 +810,7 @@ func TestInitSessionAsksLatestEventFirst(t *testing.T) {
 					if r.URL.Path == "/labels" {
 						// The ID asked for first must not be stored yet: a
 						// failed listing asks for it again.
-						if id, ok, err := db.LastEventID(); err != nil || (ok && id != tc.stored) {
+						if id, ok, err := db.LastEventID(); err != nil || (ok && (tc.rebuild || id != tc.stored)) {
 							t.Errorf("while listing, stored event ID = %q, %v, %v", id, ok, err)
 						}
 					}
@@ -739,6 +839,9 @@ func TestInitSessionAsksLatestEventFirst(t *testing.T) {
 			}
 			if got, ok, err := db.LastEventID(); err != nil || !ok || got != tc.wantID {
 				t.Errorf("stored event ID = %q, %v, %v, want %q", got, ok, err, tc.wantID)
+			}
+			if rebuild, err := db.NeedsRebuild(); err != nil || rebuild {
+				t.Errorf("NeedsRebuild() = %v, %v after the login; want false", rebuild, err)
 			}
 		})
 	}

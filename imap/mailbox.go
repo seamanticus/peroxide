@@ -31,16 +31,9 @@ type mailbox struct {
 	nameLock sync.Mutex
 	name     string
 
-	// Message counts reported by the API, the only ones known until the
-	// mailbox is synchronized. They have their own lock, as init holds the
-	// one below for as long as synchronizing takes.
-	apiCountsLock       sync.Mutex
-	apiTotal, apiUnread int
-
 	sync.Mutex // protects everything below
 
-	initialized bool
-	deleted     map[string]struct{}
+	deleted map[string]struct{}
 }
 
 func newMailbox(name string, label string, attrs []string, u *user) (*mailbox, error) {
@@ -81,20 +74,6 @@ func (mbox *mailbox) Info() (*imap.MailboxInfo, error) {
 	}, nil
 }
 
-func (mbox *mailbox) setAPICounts(total, unread int) {
-	mbox.apiCountsLock.Lock()
-	defer mbox.apiCountsLock.Unlock()
-
-	mbox.apiTotal, mbox.apiUnread = total, unread
-}
-
-func (mbox *mailbox) apiCounts() (total, unread int) {
-	mbox.apiCountsLock.Lock()
-	defer mbox.apiCountsLock.Unlock()
-
-	return mbox.apiTotal, mbox.apiUnread
-}
-
 func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
 	mbox.u.Lock()
 	flags := []string{imap.SeenFlag, imap.DeletedFlag}
@@ -112,20 +91,12 @@ func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error
 	status.PermanentFlags = permFlags
 	status.UnseenSeqNum = 0 // TODO
 
-	mbox.Lock()
-	defer mbox.Unlock()
-
-	// The local DB, kept up to date by events, is exact once synchronized;
-	// until then only the API's counts are known.
-	var total, unread int
-	if mbox.initialized {
-		var err error
-		total, unread, err = mbox.db.Count()
-		if err != nil {
-			return nil, fmt.Errorf("cannot count messages in mailbox %v: %w", mbox.Name(), err)
-		}
-	} else {
-		total, unread = mbox.apiCounts()
+	// From the local database, kept by the download and by events: while the
+	// download runs, the counts grow with it, as proton-bridge's do during its
+	// sync.
+	total, unread, err := mbox.db.Count()
+	if err != nil {
+		return nil, fmt.Errorf("cannot count messages in mailbox %v: %w", mbox.Name(), err)
 	}
 
 	for _, name := range items {
@@ -139,7 +110,11 @@ func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error
 			}
 			status.UidNext = uidNext
 		case imap.StatusUidValidity:
-			status.UidValidity = 1
+			uidValidity, err := mbox.db.UidValidity()
+			if err != nil {
+				return nil, err
+			}
+			status.UidValidity = uidValidity
 		case imap.StatusRecent:
 			status.Recent = 0
 		case imap.StatusUnseen:
@@ -160,96 +135,14 @@ func (mbox *mailbox) Check() error {
 	return nil
 }
 
-func (mbox *mailbox) sync() error {
-	log.Printf("Synchronizing mailbox %v...", mbox.Name())
-
-	// TODO: don't do this without incrementing UIDVALIDITY
-	if err := mbox.db.Reset(); err != nil {
-		return err
-	}
-
-	filter := &protonmail.MessageFilter{
-		PageSize: 150,
-		Label:    mbox.label,
-		Sort:     "ID",
-		Asc:      true,
-	}
-
-	total := -1
-	for {
-		offset := filter.PageSize * filter.Page
-		if total >= 0 && offset > total {
-			break
-		}
-
-		var page []*protonmail.Message
-		var err error
-		total, page, err = mbox.u.c.ListMessages(filter)
-		if err != nil {
-			return err
-		}
-
-		if err := mbox.db.Sync(page); err != nil {
-			return err
-		}
-
-		filter.Page++
-	}
-
-	log.Printf("Synchronizing mailbox %v: done.", mbox.Name())
-	return nil
-}
-
-func (mbox *mailbox) init() error {
-	mbox.Lock()
-	initialized := mbox.initialized
-	mbox.Unlock()
-	if initialized {
-		return nil
-	}
-
-	// Taken before mbox's lock (user.syncSem): no event page is applied while
-	// the sync has emptied the mailbox, so none of its messages gets a UID
-	// before the older ones.
-	mbox.u.lockSync()
-	defer mbox.u.unlockSync()
-	mbox.Lock()
-	defer mbox.Unlock()
-
-	if mbox.initialized { // synchronized while this one waited
-		return nil
-	}
-
-	// TODO: sync only the first time (TODO.md section 9, step 6)
-	if err := mbox.sync(); err != nil {
-		return err
-	}
-
-	mbox.initialized = true
-	return nil
-}
-
-func (mbox *mailbox) reset() error {
-	mbox.Lock()
-	defer mbox.Unlock()
-
-	mbox.initialized = false
-	return mbox.db.Reset()
-}
-
 // delete forgets the mailbox after its folder was deleted. Clients that still
 // have it selected get errors from then on. A write that grows the database
 // file waits for open read transactions, so no reader may wait for a lock
-// inside one (SearchMessages and flagsUpdates collect entries first): that
-// keeps writes under mbox's lock, as sync's, safe. The bucket is deleted
-// after the lock is released all the same, as nothing needs it held.
-// Called while an event page holds user.syncSem, so no sync refills the
+// inside one (SearchMessages and flagsUpdates collect entries first). The
+// bucket is deleted without mbox's lock, as nothing needs it held. Called
+// while an event page holds user.syncSem, so no download page refills the
 // bucket meanwhile.
 func (mbox *mailbox) delete() error {
-	mbox.Lock()
-	mbox.initialized = false
-	mbox.Unlock()
-
 	return mbox.db.Delete()
 }
 
@@ -416,10 +309,6 @@ func (mbox *mailbox) fetch(uid bool, seqSet *imap.SeqSet, items []imap.FetchItem
 func (mbox *mailbox) listMessages(uid bool, seqSet *imap.SeqSet, items []imap.FetchItem, ch chan<- *imap.Message) (opened []string, err error) {
 	defer close(ch)
 
-	if err := mbox.init(); err != nil {
-		return nil, err
-	}
-
 	// Every message is fetched with the same items, so an unknown one fails
 	// the first message found, before any is sent.
 	items = expandFetchItems(items)
@@ -578,10 +467,6 @@ func (mbox *mailbox) matchMessage(seqNum, uid uint32, msg *protonmail.Message, c
 }
 
 func (mbox *mailbox) SearchMessages(isUID bool, c *imap.SearchCriteria) ([]uint32, error) {
-	if err := mbox.init(); err != nil {
-		return nil, err
-	}
-
 	// The entries are collected in one read transaction, and the messages
 	// read and matched after it ends. matchMessage takes locks (fetchFlags),
 	// and a bolt write that grows the file waits for every open read
@@ -629,10 +514,6 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 		return errors.New("cannot create messages outside the Drafts mailbox")
 	}
 
-	if err := mbox.init(); err != nil {
-		return err
-	}
-
 	_, err := createMessage(mbox.u.c, mbox.u.u, mbox.u.privateKeys, mbox.u.addresses(), body)
 	if err != nil {
 		return err
@@ -660,10 +541,6 @@ func (mbox *mailbox) fromSeqSet(isUID bool, seqSet *imap.SeqSet) ([]string, erro
 }
 
 func (mbox *mailbox) UpdateMessagesFlags(uid bool, seqSet *imap.SeqSet, op imap.FlagsOp, flags []string) error {
-	if err := mbox.init(); err != nil {
-		return err
-	}
-
 	apiIDs, err := mbox.fromSeqSet(uid, seqSet)
 	if err != nil {
 		return err
@@ -829,10 +706,6 @@ func (mbox *mailbox) flagsUpdates(apiIDs []string) ([]imapbackend.Update, error)
 }
 
 func (mbox *mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string) error {
-	if err := mbox.init(); err != nil {
-		return err
-	}
-
 	apiIDs, err := mbox.fromSeqSet(uid, seqSet)
 	if err != nil {
 		return err
@@ -861,10 +734,6 @@ func (mbox *mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string
 // for is left alone, and one the unlabel failed for is checked and taken out
 // of dest again (undoMove).
 func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) error {
-	if err := mbox.init(); err != nil {
-		return err
-	}
-
 	apiIDs, err := mbox.fromSeqSet(uid, seqSet)
 	if err != nil {
 		return err
@@ -1009,9 +878,6 @@ func (mbox *mailbox) undoMove(dest *mailbox, apiIDs []string) (allMoved bool, er
 func (mbox *mailbox) Expunge() error {
 	if mbox.label == protonmail.LabelAllMail {
 		return errors.New("cannot expunge from All Mail: move the messages to Trash, or remove them from their mailboxes")
-	}
-	if err := mbox.init(); err != nil {
-		return err
 	}
 
 	mbox.Lock()

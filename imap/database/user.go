@@ -1,11 +1,15 @@
 package database
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
+	boltErrors "go.etcd.io/bbolt/errors"
 
 	"github.com/seamanticus/peroxide/config"
 	"github.com/seamanticus/peroxide/protonmail"
@@ -13,12 +17,39 @@ import (
 
 var ErrNotFound = errors.New("message not found in local database")
 
+// ErrInUse is returned by Open when another process holds the database: bolt
+// lets one process open a file at a time.
+var ErrInUse = errors.New("the database is in use by another peroxide process")
+
 var (
 	mailboxesBucket = []byte("mailboxes")
 	messagesBucket  = []byte("messages")
 	countsBucket    = []byte("counts")
 	eventsBucket    = []byte("events")
+	// metaBucket holds what outlives a wipe (the schema version, the last
+	// UIDVALIDITY given) and the state of the account's download.
+	metaBucket = []byte("meta")
 )
+
+// Keys of metaBucket.
+var (
+	versionKey         = []byte("version")
+	lastUIDValidityKey = []byte("lastuidvalidity")
+	// syncCursorKey is the ID of the oldest message the download has stored:
+	// the next page asks for the messages before it (bridge's
+	// LastSyncedMessageID).
+	syncCursorKey = []byte("synccursor")
+	// syncDoneKey is set once every message has been downloaded (bridge's
+	// HasMessages).
+	syncDoneKey = []byte("syncdone")
+	// rebuildKey asks the next login to wipe the database and download the
+	// account again (bridge's ShouldResync).
+	rebuildKey = []byte("rebuild")
+)
+
+// schemaVersion is the layout of the database. Open wipes a database of any
+// other version: it is a copy of what Proton has, rebuilt by downloading it.
+const schemaVersion uint32 = 2
 
 // lastEventIDKey holds, in eventsBucket, the ID of the last event applied.
 var lastEventIDKey = []byte("last")
@@ -42,7 +73,7 @@ func messageUnread(b *bolt.Bucket, apiID string) (bool, error) {
 		return false, nil
 	}
 	msg, err := userMessage(b, apiID)
-	if err == ErrNotFound {
+	if errors.Is(err, ErrNotFound) {
 		return false, nil
 	} else if err != nil {
 		return false, fmt.Errorf("message %v: %w", apiID, err)
@@ -81,7 +112,14 @@ func adjustUnread(tx *bolt.Tx, apiID string, wasUnread, unread bool) error {
 	}
 	for _, labelID := range labelIDs {
 		b := mailboxes.Bucket([]byte(labelID))
-		if b == nil || !mailboxContains(b, apiID) {
+		if b == nil {
+			continue
+		}
+		contains, err := mailboxContains(b, apiID)
+		if err != nil {
+			return fmt.Errorf("mailbox %v: %w", labelID, err)
+		}
+		if !contains {
 			continue
 		}
 		if err := adjustCounts(tx, labelID, 0, unreadCount(unread)-unreadCount(wasUnread)); err != nil {
@@ -115,39 +153,133 @@ func userDeleteMessage(b *bolt.Bucket, msg *protonmail.Message) error {
 	return adjustUnread(b.Tx(), msg.ID, msg.Unread == 1, false)
 }
 
-func userSync(tx *bolt.Tx, messages []*protonmail.Message) error {
-	b, err := tx.CreateBucketIfNotExists(messagesBucket)
+// MessageChange tells, per mailbox (by label ID), what storing a message did:
+// Removed holds the sequence number it had in each mailbox it left, Added the
+// sequence number it got in each mailbox it entered.
+type MessageChange struct {
+	Removed map[string]uint32
+	Added   map[string]uint32
+}
+
+// putMessage stores msg, as Proton has it now, and files it in the mailboxes
+// of its labels that have a bucket. A message stored before leaves the
+// mailboxes its labels no longer list: removed first, while the stored message
+// still says whether it was unread, then the new one counted where it stays.
+func putMessage(tx *bolt.Tx, msg *protonmail.Message) (MessageChange, error) {
+	change := MessageChange{Removed: make(map[string]uint32), Added: make(map[string]uint32)}
+	messages, err := tx.CreateBucketIfNotExists(messagesBucket)
 	if err != nil {
-		return err
+		return change, err
+	}
+	mailboxes, err := tx.CreateBucketIfNotExists(mailboxesBucket)
+	if err != nil {
+		return change, err
 	}
 
-	for _, msg := range messages {
-		if err := userCreateMessage(b, msg); err != nil {
-			return err
+	old, err := userMessage(messages, msg.ID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return change, err
+	}
+	if old != nil {
+		for _, labelID := range old.LabelIDs {
+			if slices.Contains(msg.LabelIDs, labelID) {
+				continue
+			}
+			mbox := mailboxes.Bucket([]byte(labelID))
+			if mbox == nil {
+				continue
+			}
+			seqNum, err := mailboxDeleteMessage(mbox, labelID, msg.ID)
+			if err != nil {
+				return change, err
+			}
+			if seqNum != 0 {
+				change.Removed[labelID] = seqNum
+			}
 		}
 	}
 
-	return nil
+	if err := userCreateMessage(messages, msg); err != nil {
+		return change, err
+	}
+
+	for _, labelID := range msg.LabelIDs {
+		// Labels peroxide shows no mailbox for (categories, custom labels,
+		// which are flags) have no bucket.
+		mbox := mailboxes.Bucket([]byte(labelID))
+		if mbox == nil {
+			continue
+		}
+		seqNum, created, err := mailboxCreateMessage(mbox, labelID, msg.ID)
+		if err != nil {
+			return change, err
+		}
+		if created {
+			change.Added[labelID] = seqNum
+		}
+	}
+	return change, nil
 }
 
 type User struct {
 	db *bolt.DB
 }
 
+// Mailbox returns the mailbox of labelID, creating it, with a new
+// UIDVALIDITY, if the database has none. A mailbox created after messages
+// were stored (a folder that appears later) gets those of them it holds,
+// newest first as the download files them.
 func (u *User) Mailbox(labelID string) (*Mailbox, error) {
 	err := u.db.Update(func(tx *bolt.Tx) error {
 		b, err := tx.CreateBucketIfNotExists(mailboxesBucket)
 		if err != nil {
 			return err
 		}
-		_, err = b.CreateBucketIfNotExists([]byte(labelID))
-		return err
+		if b.Bucket([]byte(labelID)) != nil {
+			return nil
+		}
+		if err := createMailboxBucket(tx, b, labelID); err != nil {
+			return err
+		}
+		return fillMailbox(tx, b.Bucket([]byte(labelID)), labelID)
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	return &Mailbox{labelID, u}, nil
+}
+
+// fillMailbox files in the empty mailbox mbox the stored messages labelled
+// labelID, by descending Order (Proton's arrival order), then ID.
+func fillMailbox(tx *bolt.Tx, mbox *bolt.Bucket, labelID string) error {
+	messages := tx.Bucket(messagesBucket)
+	if messages == nil {
+		return nil
+	}
+	var held []*protonmail.Message
+	err := messages.ForEach(func(k, v []byte) error {
+		msg := &protonmail.Message{}
+		if err := json.Unmarshal(v, msg); err != nil {
+			return fmt.Errorf("message %s: %w", k, err)
+		}
+		if slices.Contains(msg.LabelIDs, labelID) {
+			held = append(held, msg)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	slices.SortFunc(held, func(a, b *protonmail.Message) int {
+		return cmp.Or(cmp.Compare(b.Order, a.Order), cmp.Compare(a.ID, b.ID))
+	})
+	for _, msg := range held {
+		if _, _, err := mailboxCreateMessage(mbox, labelID, msg.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (u *User) Message(apiID string) (*protonmail.Message, error) {
@@ -165,71 +297,131 @@ func (u *User) Message(apiID string) (*protonmail.Message, error) {
 	return msg, err
 }
 
-func (u *User) ResetMessages() error {
-	return u.db.Update(func(tx *bolt.Tx) error {
-		if err := tx.DeleteBucket(messagesBucket); err != nil {
-			return err
-		}
-
-		// Entries left without their message count as read.
-		labelIDs, err := countedMailboxes(tx)
-		if err != nil {
-			return err
-		}
-		for _, labelID := range labelIDs {
-			c, _ := getCounts(tx, labelID)
-			c.unread = 0
-			if err := putCounts(tx, labelID, c); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-func (u *User) CreateMessage(msg *protonmail.Message) (seqNums map[string]uint32, err error) {
-	seqNums = make(map[string]uint32)
+// CreateMessage stores msg, as a create event gives it, and files it in the
+// mailboxes of its labels. A message already stored (listed by the download
+// before its event came) keeps its UIDs.
+func (u *User) CreateMessage(msg *protonmail.Message) (change MessageChange, err error) {
 	err = u.db.Update(func(tx *bolt.Tx) error {
-		messages, err := tx.CreateBucketIfNotExists(messagesBucket)
-		if err != nil {
-			return err
-		}
-
-		if err := userCreateMessage(messages, msg); err != nil {
-			return err
-		}
-
-		mailboxes, err := tx.CreateBucketIfNotExists(mailboxesBucket)
-		if err != nil {
-			return err
-		}
-		for _, labelID := range msg.LabelIDs {
-			mbox, err := mailboxes.CreateBucketIfNotExists([]byte(labelID))
-			if err != nil {
-				return err
-			}
-
-			seqNum, created, err := mailboxCreateMessage(mbox, labelID, msg.ID)
-			if err != nil {
-				return err
-			}
-			if created {
-				seqNums[labelID] = seqNum
-			}
-		}
-
-		return nil
+		change, err = putMessage(tx, msg)
+		return err
 	})
-	return
+	return change, err
 }
 
+// SyncPage stores a page of the download, newest message first, and records
+// the last (oldest) as where the next page starts: both in one transaction, so
+// a download stopped at any point resumes without a gap. It returns what each
+// message changed, in page order.
+func (u *User) SyncPage(msgs []*protonmail.Message) (changes []MessageChange, err error) {
+	if len(msgs) == 0 {
+		return nil, errors.New("cannot store an empty download page")
+	}
+	err = u.db.Update(func(tx *bolt.Tx) error {
+		changes = changes[:0]
+		for _, msg := range msgs {
+			change, err := putMessage(tx, msg)
+			if err != nil {
+				return fmt.Errorf("message %v: %w", msg.ID, err)
+			}
+			changes = append(changes, change)
+		}
+		meta, err := tx.CreateBucketIfNotExists(metaBucket)
+		if err != nil {
+			return err
+		}
+		return meta.Put(syncCursorKey, []byte(msgs[len(msgs)-1].ID))
+	})
+	return changes, err
+}
+
+// SyncState returns where the download stands: the ID of the oldest message it
+// stored, empty before the first page, and whether it is done.
+func (u *User) SyncState() (cursor string, done bool, err error) {
+	err = u.db.View(func(tx *bolt.Tx) error {
+		meta := tx.Bucket(metaBucket)
+		if meta == nil {
+			return nil
+		}
+		cursor = string(meta.Get(syncCursorKey))
+		done = meta.Get(syncDoneKey) != nil
+		return nil
+	})
+	return cursor, done, err
+}
+
+// SetSyncDone records that every message has been downloaded.
+func (u *User) SetSyncDone() error {
+	return u.putMeta(syncDoneKey, []byte{1})
+}
+
+// SetNeedsRebuild asks the next login to wipe the database and download the
+// account again, as proton-bridge's ShouldResync. Wipe clears it: a rebuild
+// stopped halfway resumes its download, as any other (SyncState), rather than
+// wiping again, so a client that reconnects doesn't restart it.
+func (u *User) SetNeedsRebuild() error {
+	return u.putMeta(rebuildKey, []byte{1})
+}
+
+// NeedsRebuild reports whether SetNeedsRebuild was called since the last Wipe.
+func (u *User) NeedsRebuild() (bool, error) {
+	var rebuild bool
+	err := u.db.View(func(tx *bolt.Tx) error {
+		if meta := tx.Bucket(metaBucket); meta != nil {
+			rebuild = meta.Get(rebuildKey) != nil
+		}
+		return nil
+	})
+	return rebuild, err
+}
+
+func (u *User) putMeta(k, v []byte) error {
+	return u.db.Update(func(tx *bolt.Tx) error {
+		meta, err := tx.CreateBucketIfNotExists(metaBucket)
+		if err != nil {
+			return err
+		}
+		return meta.Put(k, v)
+	})
+}
+
+// Wipe empties the database: messages, mailboxes, counts, the last event ID,
+// the download's state and a rebuild asked for go, in one transaction, so the
+// next login starts as the first did. Kept: the schema version, and the last
+// UIDVALIDITY given, so that mailboxes made again get higher ones.
+func (u *User) Wipe() error {
+	return u.db.Update(wipe)
+}
+
+func wipe(tx *bolt.Tx) error {
+	for _, name := range [][]byte{messagesBucket, mailboxesBucket, countsBucket, eventsBucket} {
+		if tx.Bucket(name) == nil {
+			continue
+		}
+		if err := tx.DeleteBucket(name); err != nil {
+			return fmt.Errorf("cannot delete bucket %s: %w", name, err)
+		}
+	}
+	meta, err := tx.CreateBucketIfNotExists(metaBucket)
+	if err != nil {
+		return err
+	}
+	for _, k := range [][]byte{syncCursorKey, syncDoneKey, rebuildKey} {
+		if err := meta.Delete(k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// UpdateMessage applies update to the stored message apiID. ErrNotFound means
+// the database doesn't have it.
 func (u *User) UpdateMessage(apiID string, update *protonmail.EventMessageUpdate) (createdSeqNums map[string]uint32, deletedSeqNums map[string]uint32, err error) {
 	createdSeqNums = make(map[string]uint32)
 	deletedSeqNums = make(map[string]uint32)
 	err = u.db.Update(func(tx *bolt.Tx) error {
 		messages := tx.Bucket(messagesBucket)
 		if messages == nil {
-			return errors.New("cannot update message in local DB: messages bucket doesn't exist")
+			return ErrNotFound
 		}
 
 		msg, err := userMessage(messages, apiID)
@@ -244,9 +436,9 @@ func (u *User) UpdateMessage(apiID string, update *protonmail.EventMessageUpdate
 			return err
 		}
 		for _, labelID := range addedLabels {
-			mbox, err := mailboxes.CreateBucketIfNotExists([]byte(labelID))
-			if err != nil {
-				return err
+			mbox := mailboxes.Bucket([]byte(labelID))
+			if mbox == nil {
+				continue
 			}
 
 			seqNum, created, err := mailboxCreateMessage(mbox, labelID, apiID)
@@ -287,36 +479,32 @@ func (u *User) DeleteMessage(apiID string) (seqNums map[string]uint32, err error
 		}
 
 		msg, err := userMessage(messages, apiID)
-		if err == ErrNotFound {
+		if errors.Is(err, ErrNotFound) {
 			return nil
 		} else if err != nil {
 			return err
 		}
 
-		if err := userDeleteMessage(messages, msg); err != nil {
-			return err
-		}
-
 		mailboxes := tx.Bucket(mailboxesBucket)
-		if mailboxes == nil {
-			return nil
-		}
-		for _, labelID := range msg.LabelIDs {
-			mbox := mailboxes.Bucket([]byte(labelID))
-			if mbox == nil {
-				continue
-			}
+		if mailboxes != nil {
+			for _, labelID := range msg.LabelIDs {
+				mbox := mailboxes.Bucket([]byte(labelID))
+				if mbox == nil {
+					continue
+				}
 
-			seqNum, err := mailboxDeleteMessage(mbox, labelID, msg.ID)
-			if err != nil {
-				return err
-			}
-			if seqNum != 0 {
-				seqNums[labelID] = seqNum
+				seqNum, err := mailboxDeleteMessage(mbox, labelID, msg.ID)
+				if err != nil {
+					return err
+				}
+				if seqNum != 0 {
+					seqNums[labelID] = seqNum
+				}
 			}
 		}
 
-		return nil
+		// After the entries: their counts read the stored message.
+		return userDeleteMessage(messages, msg)
 	})
 	return
 }
@@ -353,27 +541,56 @@ func (u *User) SetLastEventID(id string) error {
 	})
 }
 
+// openTimeout is how long Open waits for another process to let go of the
+// database before it gives up with ErrInUse.
+const openTimeout = time.Second
+
+// Open opens the database filename in peroxide's configuration directory. One
+// of another schema version, as left by an older peroxide, is wiped.
 func Open(filename string) (*User, error) {
 	p, err := config.Path(filename)
 	if err != nil {
 		return nil, err
 	}
 
-	db, err := bolt.Open(p, 0700, nil)
-	if err != nil {
-		return nil, err
+	db, err := bolt.Open(p, 0700, &bolt.Options{Timeout: openTimeout})
+	if errors.Is(err, boltErrors.ErrTimeout) {
+		return nil, fmt.Errorf("cannot open %v: %w", p, ErrInUse)
+	} else if err != nil {
+		return nil, fmt.Errorf("cannot open %v: %w", p, err)
 	}
 
-	// Counts left by a previous run may have been made stale by an older
-	// peroxide; mailboxes rebuild theirs when synchronized.
 	err = db.Update(func(tx *bolt.Tx) error {
-		if tx.Bucket(countsBucket) == nil {
+		meta, err := tx.CreateBucketIfNotExists(metaBucket)
+		if err != nil {
+			return err
+		}
+		if v := meta.Get(versionKey); len(v) == 4 && unserializeUID(v) == schemaVersion {
 			return nil
 		}
-		return tx.DeleteBucket(countsBucket)
+		// Buckets of older versions too: collected first, as bolt forbids
+		// deleting buckets while iterating over them.
+		var names [][]byte
+		if err := tx.ForEach(func(name []byte, _ *bolt.Bucket) error {
+			if string(name) != string(metaBucket) {
+				names = append(names, slices.Clone(name))
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, name := range names {
+			if err := tx.DeleteBucket(name); err != nil {
+				return err
+			}
+		}
+		if err := wipe(tx); err != nil {
+			return err
+		}
+		return meta.Put(versionKey, serializeUID(schemaVersion))
 	})
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("cannot drop message counts: %w", err), db.Close())
+		return nil, errors.Join(fmt.Errorf("cannot check the version of %v: %w", p, err), db.Close())
 	}
 
 	return &User{db}, nil
