@@ -84,6 +84,7 @@ the message. No other sendmail option is understood.
 | `-imap-host`, `-imap-port` | `127.0.0.1`, `1143` | Where the IMAP server listens |
 | `-smtp-host`, `-smtp-port` | `127.0.0.1`, `1025` | Where the SMTP server listens |
 | `-disable-imap`, `-disable-smtp` | off | For `serve`: don't start that server |
+| `-show-all-mail` | on | `=false` leaves All Mail out of IMAP LIST, as proton-bridge's "Show All Mail" off; see [imap/mailboxes.md](imap/mailboxes.md) |
 | `-tls-cert`, `-tls-key` | none | Serve IMAP and SMTP over TLS with this certificate |
 | `-tls-client-ca` | none | With TLS: require a client certificate signed by this CA |
 | `-api-endpoint` | `https://mail.proton.me/api` | Proton's API base URL |

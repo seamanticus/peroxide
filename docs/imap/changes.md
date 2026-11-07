@@ -152,7 +152,7 @@ import API.
   and Drafts, what no other shown label holds; All Mail refuses.
   peroxide decides the same, in the other order, so that a failed
   delete leaves the message in Trash rather than only in All Mail,
-  which bridge hides by default.
+  which bridge can hide ("Show All Mail" off).
 - **APPEND** imports the message into any mailbox (Proton's import
   API), except All Mail; peroxide doesn't have that client yet.
 - proton-bridge also refuses APPEND into All Mail and Scheduled.

@@ -236,17 +236,19 @@ opened yet, Starred included.
 
 **Steps.**
 
-1. `applyUpdate`: skip mailboxes not synced yet (`mbox.initialized`
-   false) instead of looking the message up, which also drops the
-   warning; they get their counts from the API until synced.
-2. Decide whether All Mail is shown: always (as now), or behind an
-   option like bridge's `ShowAllMail`, so users who don't want the
-   duplicates don't get them. Same question for Almost All Mail.
+1. (done) `applyUpdate` skips mailboxes not synced yet
+   (`mbox.initialized` false): no lookup, no warning, no FETCH; they
+   get their counts from the API until synced.
+2. (done) All Mail is shown unless `serve -show-all-mail=false`, as
+   bridge's `ShowAllMail` (on by default): off, it is left out of LIST
+   only (`user.ListMailboxes`), and SELECT/STATUS still open it by name,
+   as gluon does. Open: Almost All Mail (`"15"`) has no mailbox, and
+   bridge shows none either (`WantLabel`); add one only if asked.
 3. If shown, decide how it syncs: on first use as now, or in the
    background after login, so a search over it doesn't wait for a full
    listing.
-4. Tests: a flag change on a message whose All Mail isn't synced logs
-   nothing and sends no FETCH for All Mail.
+4. (done) Tests: `TestStoreSkipsUnsyncedMailbox` (no log, one FETCH for
+   INBOX only) and `TestListShowAllMail` (imap/actions_test.go).
 
 ## 9. Fetch full messages in the background (BODYSTRUCTURE cost)
 

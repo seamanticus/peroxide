@@ -59,7 +59,9 @@ Each page is applied whole, in order, while no mailbox synchronizes
   name; updates change flags and labels (a message given a folder's
   label appears there; one losing a label leaves it); deletes remove it
   everywhere. Clients with an affected mailbox selected get `EXISTS`,
-  `EXPUNGE` or `FETCH (FLAGS)`.
+  `EXPUNGE` or `FETCH (FLAGS)`. A mailbox not synchronized yet gets no
+  `FETCH (FLAGS)`: no client knows its sequence numbers. All Mail is
+  the usual case, as aerc STATUSes it without opening it.
 - **Labels**: see [mailboxes.md](mailboxes.md#when-protons-folders-and-labels-change).
 - **Addresses**: the address list is updated (see
   [../accounts.md](../accounts.md#keys-that-change-while-peroxide-runs)).

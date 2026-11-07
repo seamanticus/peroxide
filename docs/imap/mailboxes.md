@@ -20,7 +20,7 @@ label you set by starring.
 | IMAP mailbox | Proton label ID | LIST attributes |
 |---|---|---|
 | `INBOX` | 0 | |
-| `All Mail` | 5 | `\All` |
+| `All Mail` | 5 | `\All` (hidden from LIST with `-show-all-mail=false`) |
 | `Archive` | 6 | `\Archive` |
 | `Drafts` | 8 | `\Drafts` |
 | `Starred` | 10 | `\Flagged` |
@@ -127,6 +127,9 @@ peroxide shows labels as flags, as hydroxide did: a message appears
 once per folder, and clients filter by keyword instead. Labels as
 mailboxes are planned (`TODO.md` section 1).
 
-proton-bridge also hides All Mail by default (setting "Show All
-Mail"), and refuses APPEND and moves into it. peroxide always shows it
+proton-bridge also has a "Show All Mail" setting (`ShowAllMail`, on
+by default); off, All Mail is left out of LIST, and SELECT still opens
+it by name. peroxide's `-show-all-mail=false` does the same, for
+clients that don't want each message twice. bridge also refuses APPEND
+and moves into All Mail, as peroxide does whatever the setting
 (`TODO.md` section 8).
