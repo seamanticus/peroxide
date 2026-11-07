@@ -244,9 +244,16 @@ opened yet, Starred included.
    only (`user.ListMailboxes`), and SELECT/STATUS still open it by name,
    as gluon does. Open: Almost All Mail (`"15"`) has no mailbox, and
    bridge shows none either (`WantLabel`); add one only if asked.
-3. If shown, decide how it syncs: on first use as now, or in the
-   background after login, so a search over it doesn't wait for a full
-   listing.
+3. (decided 2026-11-07) With `-show-all-mail=true`, All Mail syncs in
+   the background after login, as proton-bridge syncs every message at
+   login (internal/services/syncservice). Built on section 9.1, so it
+   runs once per database and resumes, not once per session: see 9.1
+   step 6. Not before: today's sync holds `syncSem` for the whole
+   listing (events, actions and other syncs wait), and would list the
+   whole account at every login. Holding `syncSem` per page instead
+   brings back the 2026-11-05 out-of-order UIDs
+   (`TestEventDuringSyncKeepsOrder`) unless events for All Mail are
+   held until the sync ends.
 4. (done) Tests: `TestStoreSkipsUnsyncedMailbox` (no log, one FETCH for
    INBOX only) and `TestListShowAllMail` (imap/actions_test.go).
 
@@ -457,10 +464,21 @@ marks connected clients' state invalid so they get BYE and reconnect).
 5. Sync once per database, not per session: `initialized` comes from the
    stored flag, and later sessions rely on events. Keep a way to force a
    full listing (a new `peroxide -resync` flag, or on a Refresh event).
-6. Tests (imap, database): a second session keeps the UIDs and
+6. Background sync of All Mail (section 8 step 3), when shown: started
+   after login, owned by the user and stopped at logout, resuming from
+   the stored progress. It takes `syncSem` one page at a time, and
+   message events for All Mail that arrive meanwhile are applied to it
+   only after the listing ends, so they still get the highest UIDs. A
+   client opening All Mail early waits for it rather than starting a
+   second sync. Its listing carries each message's `LabelIDs`, so it can
+   fill the other mailboxes' buckets too, as bridge's single pass does;
+   decide then whether it replaces their per-mailbox syncs.
+7. Tests (imap, database): a second session keeps the UIDs and
    UIDVALIDITY of the first; a message added while logged out gets the
    next UID; one removed is expunged; a Refresh changes UIDVALIDITY and
-   restarts UIDs; STATUS UIDVALIDITY matches SELECT.
+   restarts UIDs; STATUS UIDVALIDITY matches SELECT; an event during the
+   background sync waits only one page and gets a UID above the listed
+   ones (`testing/synctest`); logout stops the sync.
 
 **Found in the 2026-11-06 audit; both get worse once syncs stop.**
 
