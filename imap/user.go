@@ -685,19 +685,18 @@ func (u *user) applyMessageEvent(eventMessage *protonmail.EventMessage) ([]imapb
 		return u.downloadUpdates([]database.MessageChange{change}), nil
 	case protonmail.EventUpdate, protonmail.EventUpdateFlags:
 		log.Println("Received update event for message", eventMessage.ID)
-		if eventMessage.Action == protonmail.EventUpdate {
-			// Its contents may have changed, e.g. a draft edited: built
-			// again at the next FETCH.
-			if err := u.builds.drop(u.db, eventMessage.ID); err != nil {
-				return nil, fmt.Errorf("cannot drop the stored message: %w", err)
-			}
-		}
 		ups, err := u.applyUpdate(eventMessage.ID, eventMessage.Updated)
 		if errors.Is(err, database.ErrNotFound) {
 			created, err := u.updateUnknownMessage(eventMessage.ID)
 			return append(ups, created...), err
+		} else if err != nil || eventMessage.Action != protonmail.EventUpdate {
+			return ups, err
 		}
-		return ups, err
+		// Its contents may have changed, e.g. a draft edited: new UIDs if
+		// they did. After its flags and labels, so that the new UIDs are in
+		// the mailboxes it is in now.
+		renewed, err := u.refreshMessage(eventMessage.ID)
+		return append(ups, renewed...), err
 	case protonmail.EventDelete:
 		log.Println("Received delete event for message", eventMessage.ID)
 		return u.applyDelete(eventMessage.ID)

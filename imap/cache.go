@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/seamanticus/peroxide/imap/database"
-	"github.com/seamanticus/peroxide/protonmail"
 )
 
 // errMessageGone is the error of storedMessage for a message Proton no longer
@@ -101,16 +100,9 @@ func (u *user) storedMessage(ctx context.Context, apiID string) (*database.BodyR
 // in the failed set, which the background download skips; storing takes it
 // out again.
 func (u *user) buildAndStore(ctx context.Context, apiID string, bd *build) (*database.BodyRecord, []byte, error) {
-	full, err := u.c.GetMessage(ctx, apiID)
-	if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok && apiErr.Code == protonmail.CodeMessageDoesNotExist {
-		return nil, nil, fmt.Errorf("%w: %v", errMessageGone, err)
-	} else if err != nil {
-		return nil, nil, u.recordFailure(apiID, err)
-	}
-	built, err := u.buildMessage(ctx, full)
-	if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok && apiErr.Code == protonmail.CodeMessageDoesNotExist {
-		// An attachment gone with its message.
-		return nil, nil, fmt.Errorf("%w: %v", errMessageGone, err)
+	built, err := u.downloadAndBuild(ctx, apiID)
+	if errors.Is(err, errMessageGone) {
+		return nil, nil, err
 	} else if err != nil {
 		return nil, nil, u.recordFailure(apiID, err)
 	}

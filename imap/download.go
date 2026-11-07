@@ -80,6 +80,7 @@ func (u *user) download(stop <-chan struct{}, deliver func([]imapbackend.Update)
 			if err != nil || !s.Done {
 				return false
 			}
+			u.refreshFallbacks(ctx, deliver)
 			return u.downloadBodies(ctx, retryFailed)
 		}
 		if pageStored {

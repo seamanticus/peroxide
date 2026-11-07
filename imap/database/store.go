@@ -204,18 +204,28 @@ func (u *User) getRecord(tx *bolt.Tx, apiID string) (*sealedRecord, error) {
 	return rec, nil
 }
 
+// newRecord returns the record of a new version of apiID holding literal,
+// naming a new file, and its plaintext as sealed in bodiesBucket.
+func newRecord(apiID string, literal []byte, info BodyInfo) (*sealedRecord, []byte, error) {
+	if len(literal) > math.MaxUint32 {
+		return nil, nil, fmt.Errorf("cannot store message %v: %v bytes is more than IMAP can tell", apiID, len(literal))
+	}
+	sr := &sealedRecord{File: newFileName(apiID), Size: uint32(len(literal)), BodyInfo: info}
+	encoded, err := json.Marshal(sr, recordOptions())
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot encode the record of message %v: %w", apiID, err)
+	}
+	return sr, encoded, nil
+}
+
 // PutBody stores literal, the message apiID as served, with info, replacing
 // what was stored for it, takes it out of the failed messages, and returns
 // its record. A message the database doesn't have (deleted meanwhile) isn't
 // stored: stored is false.
 func (u *User) PutBody(apiID string, literal []byte, info BodyInfo) (rec *BodyRecord, stored bool, err error) {
-	if len(literal) > math.MaxUint32 {
-		return nil, false, fmt.Errorf("cannot store message %v: %v bytes is more than IMAP can tell", apiID, len(literal))
-	}
-	sr := sealedRecord{File: newFileName(apiID), Size: uint32(len(literal)), BodyInfo: info}
-	encoded, err := json.Marshal(sr, recordOptions())
+	sr, encoded, err := newRecord(apiID, literal, info)
 	if err != nil {
-		return nil, false, fmt.Errorf("cannot encode the record of message %v: %w", apiID, err)
+		return nil, false, err
 	}
 	if err := u.store.write(sr.File, apiID, literal); err != nil {
 		return nil, false, err
@@ -309,6 +319,56 @@ func (u *User) dropLostRecord(apiID, file string) error {
 		}
 		return tx.Bucket(bodiesBucket).Delete([]byte(apiID))
 	})
+}
+
+// unlockedKeysKey, in metaBucket, holds a digest of the keys that were
+// unlocked when the stored messages were built (SetUnlockedKeys).
+var unlockedKeysKey = []byte("unlockedkeys")
+
+// UnlockedKeys returns the digest SetUnlockedKeys stored, nil if none.
+func (u *User) UnlockedKeys() ([]byte, error) {
+	var v []byte
+	err := u.db.View(func(tx *bolt.Tx) error {
+		if meta := tx.Bucket(metaBucket); meta != nil {
+			v = slices.Clone(meta.Get(unlockedKeysKey))
+		}
+		return nil
+	})
+	return v, err
+}
+
+// SetUnlockedKeys stores digest, naming the keys unlocked now.
+func (u *User) SetUnlockedKeys(digest []byte) error {
+	return u.db.Update(func(tx *bolt.Tx) error {
+		meta, err := tx.CreateBucketIfNotExists(metaBucket)
+		if err != nil {
+			return err
+		}
+		return meta.Put(unlockedKeysKey, digest)
+	})
+}
+
+// Fallbacks returns the IDs of the stored messages built with something
+// left encrypted (BodyInfo.Fallback), in ID order.
+func (u *User) Fallbacks() ([]string, error) {
+	var ids []string
+	err := u.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bodiesBucket)
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, _ []byte) error {
+			rec, err := u.getRecord(tx, string(k))
+			if err != nil {
+				return err
+			}
+			if rec.Fallback {
+				ids = append(ids, string(k))
+			}
+			return nil
+		})
+	})
+	return ids, err
 }
 
 // MissingBody is a message whose body isn't stored.
