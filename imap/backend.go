@@ -36,6 +36,8 @@ type backend struct {
 	sessions      *auth.Manager
 	eventsManager *events.Manager
 	updates       chan imapbackend.Update
+	// Whether LIST shows All Mail, as proton-bridge's ShowAllMail setting.
+	showAllMail bool
 
 	sync.Mutex // protects everything below
 
@@ -55,10 +57,13 @@ func (be *backend) Updates() <-chan imapbackend.Update {
 	return be.updates
 }
 
-func New(sessions *auth.Manager, eventsManager *events.Manager) imapbackend.Backend {
+// New returns the IMAP backend. showAllMail false leaves All Mail out of LIST
+// (user.ListMailboxes).
+func New(sessions *auth.Manager, eventsManager *events.Manager, showAllMail bool) imapbackend.Backend {
 	return &backend{
 		sessions:      sessions,
 		eventsManager: eventsManager,
+		showAllMail:   showAllMail,
 		updates:       make(chan imapbackend.Update, 50),
 		users:         make(map[string]*user),
 	}

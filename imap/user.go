@@ -282,6 +282,11 @@ func (u *user) ListMailboxes(subscribed bool) ([]imapbackend.Mailbox, error) {
 
 	list := make([]imapbackend.Mailbox, 0, len(u.mailboxes))
 	for _, mbox := range u.mailboxes {
+		// Hidden from LIST only, as proton-bridge hides it (gluon's
+		// GetMailboxVisibility): SELECT and STATUS still find it by name.
+		if mbox.label == protonmail.LabelAllMail && !u.backend.showAllMail {
+			continue
+		}
 		list = append(list, mbox)
 	}
 	return list, nil

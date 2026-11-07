@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -239,6 +240,79 @@ func TestStoreSeenAppliedWithoutEvent(t *testing.T) {
 	}
 	if _, ok := up.Message.Items[imap.FetchUid]; !ok {
 		t.Error("sent FETCH doesn't hold the UID item")
+	}
+}
+
+// A flag change on a message is told to the mailboxes synced, not to All Mail
+// when no client opened it yet: it has no sequence numbers to send, and looking
+// the message up there logged a warning for every flag change (TODO.md section
+// 8).
+func TestStoreSkipsUnsyncedMailbox(t *testing.T) {
+	msgs := []*protonmail.Message{
+		{ID: "a", Unread: 1, LabelIDs: []string{protonmail.LabelInbox, protonmail.LabelAllMail}},
+	}
+	mbox, sent := newActionTestMailbox(t, &fakeAPI{t: t}, msgs)
+	u := mbox.u
+	allMailDB, err := u.db.Mailbox(protonmail.LabelAllMail)
+	if err != nil {
+		t.Fatalf("db.Mailbox() = %v", err)
+	}
+	u.mailboxes[protonmail.LabelAllMail] = &mailbox{name: "All Mail", label: protonmail.LabelAllMail, u: u, db: allMailDB, deleted: make(map[string]struct{})}
+
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(oldWriter)
+
+	if err := mbox.UpdateMessagesFlags(true, uidSet(1), imap.AddFlags, []string{imap.SeenFlag}); err != nil {
+		t.Fatalf("UpdateMessagesFlags() = %v", err)
+	}
+
+	if logs.Len() != 0 {
+		t.Errorf("logged %q, want nothing", logs.String())
+	}
+	updates := sent()
+	if len(updates) != 1 {
+		t.Fatalf("sent %v updates, want 1", len(updates))
+	}
+	if up, ok := updates[0].(*imapbackend.MessageUpdate); !ok || up.Mailbox() != imap.InboxName {
+		t.Errorf("sent %T for mailbox %q, want a message update for %q", updates[0], updates[0].Mailbox(), imap.InboxName)
+	}
+}
+
+// LIST shows All Mail only with ShowAllMail, as proton-bridge does. Hidden, it
+// is still a mailbox: SELECT and STATUS find it by name.
+// evidence: witnesses
+func TestListShowAllMail(t *testing.T) {
+	for _, show := range []bool{false, true} {
+		t.Run(fmt.Sprint(show), func(t *testing.T) {
+			inbox, _ := newTestMailbox(t, nil)
+			u := inbox.u
+			u.backend = &backend{showAllMail: show}
+			allMail := &mailbox{name: "All Mail", label: protonmail.LabelAllMail, u: u}
+			u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox, protonmail.LabelAllMail: allMail}
+
+			list, err := u.ListMailboxes(false)
+			if err != nil {
+				t.Fatalf("ListMailboxes() = %v", err)
+			}
+			var names []string
+			for _, mbox := range list {
+				names = append(names, mbox.Name())
+			}
+			slices.Sort(names)
+			want := []string{imap.InboxName}
+			if show {
+				want = []string{"All Mail", imap.InboxName}
+			}
+			if !slices.Equal(names, want) {
+				t.Errorf("LIST = %v, want %v", names, want)
+			}
+
+			if got, err := u.GetMailbox("All Mail"); err != nil || got != allMail {
+				t.Errorf("GetMailbox(All Mail) = %v, %v; want the All Mail mailbox", got, err)
+			}
+		})
 	}
 }
 

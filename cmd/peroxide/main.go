@@ -135,8 +135,8 @@ func listenAndServeSMTP(addr string, debug bool, authManager *auth.Manager, tlsC
 	return s.ListenAndServe()
 }
 
-func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, eventsManager *events.Manager, tlsConfig *tls.Config) error {
-	be := imapbackend.New(authManager, eventsManager)
+func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, eventsManager *events.Manager, tlsConfig *tls.Config, showAllMail bool) error {
+	be := imapbackend.New(authManager, eventsManager, showAllMail)
 	s := imapserver.New(be)
 	s.Enable(imapbackend.Extension{})
 	// A larger literal is refused before it is read: the client gets BAD, as
@@ -205,6 +205,9 @@ Global options:
 	-disable-imap
 		Disable IMAP for peroxide serve
 	
+	-show-all-mail=false
+		Leave the All Mail mailbox out of IMAP LIST, defaults to true
+	
 	-disable-smtp
 		Disable SMTP for peroxide serve
 	
@@ -256,6 +259,7 @@ func main() {
 	imapHost := flag.String("imap-host", "127.0.0.1", "Allowed IMAP email hostname on which peroxide listens, defaults to 127.0.0.1")
 	imapPort := flag.String("imap-port", "1143", "IMAP port on which peroxide listens, defaults to 1143")
 	disableIMAP := flag.Bool("disable-imap", false, "Disable IMAP for peroxide serve")
+	showAllMail := flag.Bool("show-all-mail", true, "Show the All Mail mailbox in IMAP LIST")
 
 	tlsCert := flag.String("tls-cert", "", "Path to the certificate to use for incoming connections")
 	tlsCertKey := flag.String("tls-key", "", "Path to the certificate key to use for incoming connections")
@@ -452,7 +456,7 @@ func main() {
 		addr := *imapHost + ":" + *imapPort
 		authManager := auth.NewManager(newClient)
 		eventsManager := events.NewManager()
-		log.Fatal(listenAndServeIMAP(addr, debug, authManager, eventsManager, tlsConfig))
+		log.Fatal(listenAndServeIMAP(addr, debug, authManager, eventsManager, tlsConfig, *showAllMail))
 	case "serve":
 		smtpAddr := *smtpHost + ":" + *smtpPort
 		imapAddr := *imapHost + ":" + *imapPort
@@ -468,7 +472,7 @@ func main() {
 		}
 		if !*disableIMAP {
 			go func() {
-				done <- listenAndServeIMAP(imapAddr, debug, authManager, eventsManager, tlsConfig)
+				done <- listenAndServeIMAP(imapAddr, debug, authManager, eventsManager, tlsConfig, *showAllMail)
 			}()
 		}
 		log.Fatal(<-done)
