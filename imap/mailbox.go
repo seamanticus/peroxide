@@ -850,11 +850,15 @@ func (mbox *mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string
 	return mbox.u.applyAction(apiIDs, failed, labelUpdate(dest.label, true))
 }
 
-// MoveMessages labels the messages with dest, then unlabels them from mbox. Each
-// message must end in one of the two, and should not end in both, even when
-// the command fails (RFC 6851 section 3.3): one dest's label failed for is
-// left alone, and one the unlabel failed for is checked and taken out of dest
-// again (undoMove).
+// MoveMessages moves the messages to dest. Between two folders it is one call,
+// as proton-bridge's (connector.go, moveMessagesWithoutUnlabelCallOnFolders):
+// Proton keeps a message in at most one folder, so labelling it with dest
+// takes it out of mbox, and an unlabel call would only answer "does not
+// exist". Otherwise (Starred, All Mail) it labels with dest, then unlabels
+// from mbox. Each message must end in one of the two, and should not end in
+// both, even when the command fails (RFC 6851 section 3.3): one dest's label
+// failed for is left alone, and one the unlabel failed for is checked and
+// taken out of dest again (undoMove).
 func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string) error {
 	if err := mbox.init(); err != nil {
 		return err
@@ -869,10 +873,26 @@ func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string
 	if dest == nil {
 		return imapbackend.ErrNoSuchMailbox
 	}
+	if dest.label == mbox.label {
+		// Labelling would do nothing, and unlabelling would take the
+		// messages out of the mailbox they are to stay in.
+		return nil
+	}
+	if err := moveAllowed(mbox.label, dest.label); err != nil {
+		return err
+	}
 
 	failed, err := mbox.u.c.LabelMessages(dest.label, apiIDs)
 	if err != nil {
 		return err
+	}
+	if mbox.isFolder() && dest.isFolder() {
+		// Applied as Proton did it: in dest, out of mbox, in one update. The
+		// events after it confirm.
+		return mbox.u.applyAction(apiIDs, failed, &protonmail.EventMessageUpdate{
+			LabelIDsAdded:   []string{dest.label},
+			LabelIDsRemoved: []string{mbox.label},
+		})
 	}
 	labelErr := mbox.u.applyAction(apiIDs, failed, labelUpdate(dest.label, true))
 	labelled := succeeded(apiIDs, failed)
@@ -907,6 +927,36 @@ func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string
 	return errors.Join(labelErr, unlabelErr, err)
 }
 
+// moveAllowed refuses the moves proton-bridge refuses
+// (moveMessagesWithoutUnlabelCallOnFolders): out of All Mail, which no message
+// leaves but by being deleted, so the unlabel always fails; into it, where a
+// message already is, so the move would only take it out of the source; and
+// between INBOX and Sent, which bridge refuses without saying why (Proton
+// files a message there by whether it was received or sent).
+func moveAllowed(from, to string) error {
+	switch {
+	case from == protonmail.LabelAllMail:
+		return errors.New("cannot move out of All Mail: move the message from its own mailbox")
+	case to == protonmail.LabelAllMail:
+		return errors.New("cannot move into All Mail: every message is there already")
+	case from == protonmail.LabelInbox && to == protonmail.LabelSent,
+		from == protonmail.LabelSent && to == protonmail.LabelInbox:
+		return errors.New("cannot move between INBOX and Sent")
+	}
+	return nil
+}
+
+// isFolder reports whether mbox is a Proton folder, which holds a message only
+// if no other folder does: every mailbox but All Mail and Starred, as only
+// exclusive labels become mailboxes (initMailboxes).
+func (mbox *mailbox) isFolder() bool {
+	switch mbox.label {
+	case protonmail.LabelAllMail, protonmail.LabelStarred:
+		return false
+	}
+	return true
+}
+
 // succeeded returns the messages of apiIDs that an action's failures don't
 // name, or name as nothing to do.
 func succeeded(apiIDs []string, failed map[string]error) []string {
@@ -920,12 +970,11 @@ func succeeded(apiIDs []string, failed map[string]error) []string {
 }
 
 // undoMove settles the messages apiIDs, labelled with dest but not unlabelled
-// from mbox, so that none stays in both. Labelling into a folder can have
-// moved one out of mbox in Proton already: that one is moved, and only the
-// local copy leaves mbox. One Proton still shows in mbox is unlabelled from
-// dest, as if never moved. Never the other way round: unlabelling from dest a
-// message mbox no longer holds would leave it in neither. allMoved reports
-// whether every one turned out moved.
+// from mbox, so that none stays in both. Proton can have taken one out of mbox
+// already: that one is moved, and only the local copy leaves mbox. One Proton
+// still shows in mbox is unlabelled from dest, as if never moved. Never the
+// other way round: unlabelling from dest a message mbox no longer holds would
+// leave it in neither. allMoved reports whether every one turned out moved.
 func (mbox *mailbox) undoMove(dest *mailbox, apiIDs []string) (allMoved bool, err error) {
 	var moved, undo []string
 	for chunk := range slices.Chunk(apiIDs, protonmail.MaxMessagesPerRequest) {
@@ -958,15 +1007,17 @@ func (mbox *mailbox) undoMove(dest *mailbox, apiIDs []string) (allMoved bool, er
 	return len(moved) == len(apiIDs), errors.Join(errs...)
 }
 
-// Expunge removes the messages marked \Deleted from this mailbox, as
-// proton-bridge does (connector.go, removeMessagesFromMailboxWithUnlabelCall
-// OnFolders): it unlabels them, so they leave this mailbox and stay in the
-// others and in All Mail. Only from Trash and Drafts are they then deleted for
-// good, and only those that no other mailbox or label still shows
-// (expungeForGood). All Mail holds every message: nothing leaves it but by
-// leaving every other mailbox, so EXPUNGE there is refused. The answer is
-// that of the unlabel: deleting for good is peroxide's own step after it,
-// whose failure is logged.
+// Expunge removes the messages marked \Deleted from this mailbox. From Trash
+// and Drafts, those no other mailbox or label shows are deleted for good
+// (forGood), as proton-bridge does (connector.go,
+// removeMessagesFromMailboxWithUnlabelCallOnFolders); the others are
+// unlabelled, so they leave this mailbox and stay in the others and in All
+// Mail. Unlike bridge, the delete comes first and the unlabel only after, for
+// the messages not deleted: one the delete fails for is left as it was, in
+// this mailbox and marked \Deleted, so that NO is the truth and a second
+// EXPUNGE tries again. Unlabelled first, it would have left for All Mail
+// only, which clients may not show. All Mail holds every message: nothing
+// leaves it but by leaving every other mailbox, so EXPUNGE there is refused.
 func (mbox *mailbox) Expunge() error {
 	if mbox.label == protonmail.LabelAllMail {
 		return errors.New("cannot expunge from All Mail: move the messages to Trash, or remove them from their mailboxes")
@@ -983,72 +1034,82 @@ func (mbox *mailbox) Expunge() error {
 	apiIDs := slices.Sorted(maps.Keys(mbox.deleted))
 	mbox.Unlock()
 
-	failed, err := mbox.u.c.UnlabelMessages(mbox.label, apiIDs)
-	if err != nil {
-		return err
-	}
-
-	// Removed messages are gone from here: don't remove them again on the
-	// next EXPUNGE.
-	var removed []string
-	mbox.Lock()
-	for _, apiID := range apiIDs {
-		if err, ok := failed[apiID]; !ok || nothingToDo(err) {
-			delete(mbox.deleted, apiID)
-			removed = append(removed, apiID)
-		}
-	}
-	mbox.Unlock()
-
-	err = mbox.u.applyAction(apiIDs, failed, labelUpdate(mbox.label, false))
+	unlabel := apiIDs
+	var deleteErr error
 	if mbox.label == protonmail.LabelTrash || mbox.label == protonmail.LabelDraft {
-		// The messages left the mailbox, as asked, and clients were told
-		// (EXPUNGE): NO would contradict that. One not deleted for good stays
-		// in All Mail, where the user can delete it again.
-		if forGoodErr := mbox.expungeForGood(removed); forGoodErr != nil {
-			log.Printf("Messages expunged from %v, not all deleted for good: %v", mbox.Name(), forGoodErr)
+		forGood, err := mbox.forGood(apiIDs)
+		if err != nil {
+			return err
+		}
+		if len(forGood) > 0 {
+			log.Printf("Deleting %v messages for good, expunged from %v", len(forGood), mbox.Name())
+			failed, err := mbox.u.c.DeleteMessages(forGood)
+			if err != nil {
+				return fmt.Errorf("cannot delete the messages, none expunged from %v: %w", mbox.Name(), err)
+			}
+			mbox.forgetDeleted(succeeded(forGood, failed))
+			deleteErr = mbox.u.applyDeleteAction(forGood, failed)
+
+			tried := make(map[string]struct{}, len(forGood))
+			for _, apiID := range forGood {
+				tried[apiID] = struct{}{}
+			}
+			unlabel = slices.DeleteFunc(slices.Clone(apiIDs), func(apiID string) bool {
+				_, ok := tried[apiID]
+				return ok
+			})
 		}
 	}
-	return err
+	if len(unlabel) == 0 {
+		return deleteErr
+	}
+
+	failed, err := mbox.u.c.UnlabelMessages(mbox.label, unlabel)
+	if err != nil {
+		return errors.Join(deleteErr, fmt.Errorf("cannot remove the messages from %v: %w", mbox.Name(), err))
+	}
+	mbox.forgetDeleted(succeeded(unlabel, failed))
+	return errors.Join(deleteErr, mbox.u.applyAction(unlabel, failed, labelUpdate(mbox.label, false)))
 }
 
-// expungeForGood deletes for good those of the messages apiIDs, just removed
-// from Trash or Drafts, that no mailbox or label of the account shows any
-// more. Labels Proton keeps for itself (All Mail, All Drafts, All Sent, All
-// Scheduled, and those peroxide shows nothing for) don't keep a message, as
-// in bridge; a label peroxide doesn't know yet is looked up (ListLabels) and
-// keeps it if it is a folder or a label. A message these requests fail for is
-// kept: it has left the mailbox, and stays in All Mail.
-func (mbox *mailbox) expungeForGood(apiIDs []string) error {
+// forgetDeleted unmarks apiIDs, gone from the mailbox: the next EXPUNGE
+// mustn't remove them again.
+func (mbox *mailbox) forgetDeleted(apiIDs []string) {
+	mbox.Lock()
+	defer mbox.Unlock()
+	for _, apiID := range apiIDs {
+		delete(mbox.deleted, apiID)
+	}
+}
+
+// forGood returns those of the messages apiIDs, marked \Deleted in Trash or
+// Drafts, that no other mailbox or label of the account shows: expunged, they
+// are deleted for good. Labels Proton keeps for itself (All Mail, All Drafts,
+// All Sent, All Scheduled, and those peroxide shows nothing for) don't keep a
+// message, as in bridge; a label peroxide doesn't know yet is looked up
+// (ListLabels) and keeps it if it is a folder or a label. A message Proton no
+// longer has is left out, and unlabelled as the others, which does nothing.
+func (mbox *mailbox) forGood(apiIDs []string) ([]string, error) {
 	var forGood []string
 	var listed map[string]*protonmail.Label // labels from Proton, fetched once if needed
 	for chunk := range slices.Chunk(apiIDs, protonmail.MaxMessagesPerRequest) {
 		msgs, err := mbox.u.c.MessagesByID(chunk)
 		if err != nil {
-			return fmt.Errorf("cannot check what else holds the messages removed from %v, kept in All Mail: %w", mbox.Name(), err)
+			return nil, fmt.Errorf("cannot check what else holds the messages, none expunged from %v: %w", mbox.Name(), err)
 		}
 		for _, msg := range msgs {
 			kept, err := mbox.u.keepsMessage(msg, mbox.label, &listed)
 			if err != nil {
-				return fmt.Errorf("cannot check what else holds the messages removed from %v, kept in All Mail: %w", mbox.Name(), err)
+				return nil, fmt.Errorf("cannot check what else holds the messages, none expunged from %v: %w", mbox.Name(), err)
 			}
 			if kept == "" {
 				forGood = append(forGood, msg.ID)
 			} else {
-				log.Printf("Message %v left %v, not deleted: label %v still holds it", msg.ID, mbox.Name(), kept)
+				log.Printf("Message %v leaves %v, not deleted: label %v still holds it", msg.ID, mbox.Name(), kept)
 			}
 		}
 	}
-	if len(forGood) == 0 {
-		return nil
-	}
-
-	log.Printf("Deleting %v messages for good, expunged from %v", len(forGood), mbox.Name())
-	failed, err := mbox.u.c.DeleteMessages(forGood)
-	if err != nil {
-		return fmt.Errorf("cannot delete the messages expunged from %v, kept in All Mail: %w", mbox.Name(), err)
-	}
-	return mbox.u.applyDeleteAction(forGood, failed)
+	return forGood, nil
 }
 
 // keepsMessage returns a label of msg, other than from, for which the message

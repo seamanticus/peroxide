@@ -381,20 +381,66 @@ func TestStoreSeenFailure(t *testing.T) {
 	checkStatus(t, mbox, 2, 1)
 }
 
+// Between two folders MOVE is one label call, as in proton-bridge: Proton
+// takes the message out of the source folder itself. Locally it is in the
+// destination and out of the source at once.
 func TestMoveAppliedWithoutEvent(t *testing.T) {
 	api := &fakeAPI{t: t}
 	mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{inboxMessage("a", 1), inboxMessage("b", 0)})
-	archiveDB := syncTestMailbox(t, mbox.u.db, protonmail.LabelArchive, nil)
-	archive := &mailbox{name: "Archive", label: protonmail.LabelArchive, u: mbox.u, db: archiveDB, deleted: make(map[string]struct{}), initialized: true}
-	mbox.u.mailboxes[protonmail.LabelArchive] = archive
+	archive := addTestMailbox(t, mbox.u, "Archive", protonmail.LabelArchive, nil)
 
 	if err := mbox.MoveMessages(true, uidSet(1), "Archive"); err != nil {
 		t.Fatalf("MoveMessages() = %v", err)
 	}
 	checkStatus(t, mbox, 1, 0)
 	checkStatus(t, archive, 1, 1)
-	if got := len(api.madeRequests()); got != 2 {
-		t.Errorf("made %v requests, want 2: label and unlabel", got)
+	if got, want := api.madeRequests(), []string{"PUT /messages/label"}; !slices.Equal(got, want) {
+		t.Errorf("made requests %q, want %q", got, want)
+	}
+}
+
+// MOVE refuses what proton-bridge refuses, before any request: out of or into
+// All Mail, and between INBOX and Sent. A MOVE into the mailbox itself does
+// nothing.
+// evidence: witnesses
+func TestMoveRefused(t *testing.T) {
+	name := map[string]string{
+		protonmail.LabelInbox:   imap.InboxName,
+		protonmail.LabelAllMail: "All Mail",
+		protonmail.LabelSent:    "Sent",
+		protonmail.LabelArchive: "Archive",
+	}
+	for _, tc := range []struct {
+		name     string
+		from, to string
+		wantErr  bool
+	}{
+		{"out of All Mail", protonmail.LabelAllMail, protonmail.LabelArchive, true},
+		{"into All Mail", protonmail.LabelArchive, protonmail.LabelAllMail, true},
+		{"INBOX to Sent", protonmail.LabelInbox, protonmail.LabelSent, true},
+		{"Sent to INBOX", protonmail.LabelSent, protonmail.LabelInbox, true},
+		{"into itself", protonmail.LabelArchive, protonmail.LabelArchive, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeAPI{t: t}
+			inbox, _ := newActionTestMailbox(t, api, nil)
+			msg := &protonmail.Message{ID: "a", LabelIDs: []string{tc.from, protonmail.LabelAllMail}}
+			from := addTestMailbox(t, inbox.u, name[tc.from], tc.from, []*protonmail.Message{msg})
+			if tc.to != tc.from {
+				addTestMailbox(t, inbox.u, name[tc.to], tc.to, nil)
+			}
+
+			err := from.MoveMessages(true, uidSet(1), name[tc.to])
+			if (err != nil) != tc.wantErr {
+				t.Errorf("MoveMessages() = %v, want error %v", err, tc.wantErr)
+			}
+			if got := api.madeRequests(); len(got) != 0 {
+				t.Errorf("made requests %q, want none", got)
+			}
+			if !inMailbox(from, "a") {
+				t.Error("message left the source")
+			}
+		})
 	}
 }
 
@@ -405,16 +451,19 @@ func inMailbox(mbox *mailbox, apiID string) bool {
 }
 
 // A MOVE that fails partway leaves no message in both mailboxes nor in
-// neither (RFC 6851 section 3.3). A message the label failed for isn't
+// neither (RFC 6851 section 3.3). Between folders it is one label call, so a
+// failure leaves the message where it was. Out of Starred, not a folder, it
+// is a label then an unlabel: a message the label failed for isn't
 // unlabelled; one the unlabel failed for is looked up: if Proton shows it out
-// of the source already (a folder move does that), it is moved; otherwise it
-// is taken out of the destination again.
+// of the source already, it is moved; otherwise it is taken out of the
+// destination again.
 // evidence: witnesses
 func TestMovePartialFailure(t *testing.T) {
 	var (
 		labelArchive   = "/messages/label " + protonmail.LabelArchive
-		unlabelInbox   = "/messages/unlabel " + protonmail.LabelInbox
+		unlabelStarred = "/messages/unlabel " + protonmail.LabelStarred
 		unlabelArchive = "/messages/unlabel " + protonmail.LabelArchive
+		inBoth         = []string{protonmail.LabelStarred, protonmail.LabelArchive, protonmail.LabelAllMail}
 	)
 	const (
 		label    = "PUT /messages/label"
@@ -423,76 +472,116 @@ func TestMovePartialFailure(t *testing.T) {
 	)
 	for _, tc := range []struct {
 		name         string
+		from         string // the source: INBOX, a folder, or Starred
 		api          *fakeAPI
 		wantErr      bool
 		wantRequests []string
-		wantInbox    bool
+		wantSource   bool
 		wantArchive  bool
 	}{
 		{
-			name:         "label fails",
+			name:         "folder: label fails",
+			from:         protonmail.LabelInbox,
 			api:          &fakeAPI{actionCodes: map[string]map[string]int{labelArchive: {"a": 2011}}},
 			wantErr:      true,
 			wantRequests: []string{label},
-			wantInbox:    true,
+			wantSource:   true,
 		},
 		{
-			name: "unlabel fails, still in source",
+			name:         "folder: label request fails",
+			from:         protonmail.LabelInbox,
+			api:          &fakeAPI{actionStatus: map[string]int{labelArchive: http.StatusUnprocessableEntity}},
+			wantErr:      true,
+			wantRequests: []string{label},
+			wantSource:   true,
+		},
+		{
+			name:         "folder: already there",
+			from:         protonmail.LabelInbox,
+			api:          &fakeAPI{actionCodes: map[string]map[string]int{labelArchive: {"a": protonmail.CodeMessageDoesNotExist}}},
+			wantRequests: []string{label},
+			wantArchive:  true,
+		},
+		{
+			name:         "Starred: moved",
+			from:         protonmail.LabelStarred,
+			api:          &fakeAPI{},
+			wantRequests: []string{label, unlabel},
+			wantArchive:  true,
+		},
+		{
+			name:         "Starred: label fails",
+			from:         protonmail.LabelStarred,
+			api:          &fakeAPI{actionCodes: map[string]map[string]int{labelArchive: {"a": 2011}}},
+			wantErr:      true,
+			wantRequests: []string{label},
+			wantSource:   true,
+		},
+		{
+			name: "Starred: unlabel fails, still in source",
+			from: protonmail.LabelStarred,
 			api: &fakeAPI{
-				actionCodes: map[string]map[string]int{unlabelInbox: {"a": 2011}},
-				labelIDs:    map[string][]string{"a": {protonmail.LabelInbox, protonmail.LabelArchive, protonmail.LabelAllMail}},
+				actionCodes: map[string]map[string]int{unlabelStarred: {"a": 2011}},
+				labelIDs:    map[string][]string{"a": inBoth},
 			},
 			wantErr:      true,
 			wantRequests: []string{label, unlabel, metadata, unlabel},
-			wantInbox:    true,
+			wantSource:   true,
 		},
 		{
-			name: "unlabel request fails, still in source",
+			name: "Starred: unlabel request fails, still in source",
+			from: protonmail.LabelStarred,
 			api: &fakeAPI{
-				actionStatus: map[string]int{unlabelInbox: http.StatusUnprocessableEntity},
-				labelIDs:     map[string][]string{"a": {protonmail.LabelInbox, protonmail.LabelArchive, protonmail.LabelAllMail}},
+				actionStatus: map[string]int{unlabelStarred: http.StatusUnprocessableEntity},
+				labelIDs:     map[string][]string{"a": inBoth},
 			},
 			wantErr:      true,
 			wantRequests: []string{label, unlabel, metadata, unlabel},
-			wantInbox:    true,
+			wantSource:   true,
 		},
 		{
-			name: "unlabel fails, moved by the label",
+			name: "Starred: unlabel fails, out of source anyway",
+			from: protonmail.LabelStarred,
 			api: &fakeAPI{
-				actionCodes: map[string]map[string]int{unlabelInbox: {"a": 2011}},
+				actionCodes: map[string]map[string]int{unlabelStarred: {"a": 2011}},
 				labelIDs:    map[string][]string{"a": {protonmail.LabelArchive, protonmail.LabelAllMail}},
 			},
 			wantRequests: []string{label, unlabel, metadata},
 			wantArchive:  true,
 		},
 		{
-			name: "undo fails",
+			name: "Starred: undo fails",
+			from: protonmail.LabelStarred,
 			api: &fakeAPI{
-				actionCodes: map[string]map[string]int{unlabelInbox: {"a": 2011}, unlabelArchive: {"a": 2011}},
-				labelIDs:    map[string][]string{"a": {protonmail.LabelInbox, protonmail.LabelArchive, protonmail.LabelAllMail}},
+				actionCodes: map[string]map[string]int{unlabelStarred: {"a": 2011}, unlabelArchive: {"a": 2011}},
+				labelIDs:    map[string][]string{"a": inBoth},
 			},
 			wantErr:      true,
 			wantRequests: []string{label, unlabel, metadata, unlabel},
-			// Left in both locally, as in Proton, until the next event.
-			wantInbox:   true,
+			// In both, locally as in Proton.
+			wantSource:  true,
 			wantArchive: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := tc.api
 			api.t = t
-			inbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{inboxMessage("a", 0)})
-			archive := addTestMailbox(t, inbox.u, "Archive", protonmail.LabelArchive, nil)
+			source, _ := newActionTestMailbox(t, api, []*protonmail.Message{inboxMessage("a", 0)})
+			if tc.from == protonmail.LabelStarred {
+				source = addTestMailbox(t, source.u, "Starred", protonmail.LabelStarred,
+					[]*protonmail.Message{{ID: "a", LabelIDs: []string{protonmail.LabelStarred, protonmail.LabelAllMail}}})
+			}
+			archive := addTestMailbox(t, source.u, "Archive", protonmail.LabelArchive, nil)
 
-			err := inbox.MoveMessages(true, uidSet(1), "Archive")
+			err := source.MoveMessages(true, uidSet(1), "Archive")
 			if (err != nil) != tc.wantErr {
 				t.Errorf("MoveMessages() = %v, want error %v", err, tc.wantErr)
 			}
 			if got := api.madeRequests(); !slices.Equal(got, tc.wantRequests) {
 				t.Errorf("made requests %q, want %q", got, tc.wantRequests)
 			}
-			if got := inMailbox(inbox, "a"); got != tc.wantInbox {
-				t.Errorf("in INBOX = %v, want %v", got, tc.wantInbox)
+			if got := inMailbox(source, "a"); got != tc.wantSource {
+				t.Errorf("in %v = %v, want %v", source.Name(), got, tc.wantSource)
 			}
 			if got := inMailbox(archive, "a"); got != tc.wantArchive {
 				t.Errorf("in Archive = %v, want %v", got, tc.wantArchive)
@@ -547,23 +636,32 @@ func TestCopyMessages(t *testing.T) {
 	}
 }
 
-// A message expunged from Trash whose delete for good fails has left Trash
-// all the same, and clients were told: EXPUNGE answers OK, not NO. It stays
-// in All Mail.
+// From Trash, a message no other mailbox shows is deleted before anything
+// else. If the delete, or the lookup of what else holds it, fails, nothing is
+// expunged: the message stays in Trash, still marked \Deleted, EXPUNGE
+// answers NO, and the next EXPUNGE tries again. It never ends in All Mail
+// alone, which clients may not show.
+// evidence: witnesses
 func TestExpungeFromTrashDeleteFails(t *testing.T) {
+	const (
+		metadata = "POST /mail/v4/messages"
+		del      = "PUT /messages/delete"
+	)
+	inTrash := map[string][]string{"a": {protonmail.LabelTrash, protonmail.LabelAllMail}}
 	for _, tc := range []struct {
-		name string
-		api  *fakeAPI
+		name         string
+		api          *fakeAPI
+		wantRequests []string
 	}{
 		{"refused for the message", &fakeAPI{
 			actionCodes: map[string]map[string]int{"/messages/delete ": {"a": 2011}},
-			labelIDs:    map[string][]string{"a": {protonmail.LabelAllMail}},
-		}},
+			labelIDs:    inTrash,
+		}, []string{metadata, del}},
 		{"request fails", &fakeAPI{
 			actionStatus: map[string]int{"/messages/delete ": http.StatusUnprocessableEntity},
-			labelIDs:     map[string][]string{"a": {protonmail.LabelAllMail}},
-		}},
-		{"labels unknown", &fakeAPI{metadataStatus: http.StatusBadGateway}},
+			labelIDs:     inTrash,
+		}, []string{metadata, del}},
+		{"labels unknown", &fakeAPI{metadataStatus: http.StatusBadGateway}, []string{metadata}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := tc.api
@@ -575,17 +673,51 @@ func TestExpungeFromTrashDeleteFails(t *testing.T) {
 				t.Fatalf("UpdateMessagesFlags() = %v", err)
 			}
 			stored := len(sent())
-			if err := trash.Expunge(); err != nil {
-				t.Errorf("Expunge() = %v, want nil: the messages left Trash", err)
+			if err := trash.Expunge(); err == nil {
+				t.Error("Expunge() = nil, want an error: the message is still in Trash")
 			}
-			checkStatus(t, trash, 0, 0)
-			if updates := sent()[stored:]; len(updates) != 1 {
-				t.Errorf("sent %v updates, want 1 EXPUNGE", len(updates))
+			if got := api.madeRequests(); !slices.Equal(got, tc.wantRequests) {
+				t.Errorf("made requests %q, want %q", got, tc.wantRequests)
+			}
+			checkStatus(t, trash, 1, 0)
+			if updates := sent()[stored:]; len(updates) != 0 {
+				t.Errorf("sent %v updates, want none", len(updates))
 			}
 			if _, err := inbox.u.db.Message("a"); err != nil {
 				t.Errorf("db.Message() = %v, want the message kept", err)
 			}
+			if flags := trash.fetchFlags(trashMessage("a")); !slices.Contains(flags, imap.DeletedFlag) {
+				t.Errorf("flags = %v, want \\Deleted kept for the next EXPUNGE", flags)
+			}
 		})
+	}
+}
+
+// Of two messages expunged from Trash, the one whose delete fails stays, and
+// the other is gone: EXPUNGE answers NO for the first only.
+func TestExpungeFromTrashPartialDelete(t *testing.T) {
+	api := &fakeAPI{
+		t:           t,
+		actionCodes: map[string]map[string]int{"/messages/delete ": {"b": 2011}},
+		labelIDs: map[string][]string{
+			"a": {protonmail.LabelTrash, protonmail.LabelAllMail},
+			"b": {protonmail.LabelTrash, protonmail.LabelAllMail},
+		},
+	}
+	inbox, _ := newActionTestMailbox(t, api, nil)
+	trash := addTestMailbox(t, inbox.u, "Trash", protonmail.LabelTrash, []*protonmail.Message{trashMessage("a"), trashMessage("b")})
+	if err := trash.UpdateMessagesFlags(true, uidSet(1, 2), imap.AddFlags, []string{imap.DeletedFlag}); err != nil {
+		t.Fatalf("UpdateMessagesFlags() = %v", err)
+	}
+
+	if err := trash.Expunge(); err == nil {
+		t.Error("Expunge() = nil, want an error for b")
+	}
+	if inMailbox(trash, "a") || !inMailbox(trash, "b") {
+		t.Errorf("in Trash: a %v, b %v; want only b", inMailbox(trash, "a"), inMailbox(trash, "b"))
+	}
+	if _, err := inbox.u.db.Message("a"); !errors.Is(err, database.ErrNotFound) {
+		t.Errorf("db.Message(a) = %v, want %v: deleted for good", err, database.ErrNotFound)
 	}
 }
 
@@ -631,8 +763,8 @@ func addTestMailbox(t *testing.T, u *user, name, labelID string, msgs []*protonm
 	return mbox
 }
 
-// EXPUNGE in Trash removes the message from Trash, then deletes it for good
-// only if no mailbox or label of the account still holds it.
+// EXPUNGE in Trash deletes for good, first, the messages no other mailbox or
+// label of the account holds, and only unlabels the others from Trash.
 func TestExpungeFromTrash(t *testing.T) {
 	const (
 		unlabel  = "PUT /messages/unlabel"
@@ -642,46 +774,40 @@ func TestExpungeFromTrash(t *testing.T) {
 	)
 	for _, tc := range []struct {
 		name string
-		// labelIDs are the message's labels in Proton after the unlabel; nil
-		// when Proton doesn't have it.
+		// labelIDs are the message's labels in Proton; nil when Proton
+		// doesn't have it.
 		labelIDs     []string
 		listLabels   string // GET /labels body; empty when not expected
 		wantRequests []string
 		wantDeleted  bool
 	}{
 		{
-			name:         "only in All Mail",
-			labelIDs:     []string{protonmail.LabelAllMail, protonmail.LabelAllSent, protonmail.LabelAllDraft},
-			wantRequests: []string{unlabel, metadata, del},
-			wantDeleted:  true,
-		},
-		{
-			name:         "still in Trash",
-			labelIDs:     []string{protonmail.LabelTrash, protonmail.LabelAllMail},
-			wantRequests: []string{unlabel, metadata, del},
+			name:         "only in Trash",
+			labelIDs:     []string{protonmail.LabelTrash, protonmail.LabelAllMail, protonmail.LabelAllSent, protonmail.LabelAllDraft},
+			wantRequests: []string{metadata, del},
 			wantDeleted:  true,
 		},
 		{
 			name:         "in Inbox",
-			labelIDs:     []string{protonmail.LabelAllMail, protonmail.LabelInbox},
-			wantRequests: []string{unlabel, metadata},
+			labelIDs:     []string{protonmail.LabelTrash, protonmail.LabelAllMail, protonmail.LabelInbox},
+			wantRequests: []string{metadata, unlabel},
 		},
 		{
 			name:         "in a label not known yet",
-			labelIDs:     []string{protonmail.LabelAllMail, "x"},
+			labelIDs:     []string{protonmail.LabelTrash, protonmail.LabelAllMail, "x"},
 			listLabels:   `{"Code":1000,"Labels":[{"ID":"x","Name":"x","Type":1}]}`,
-			wantRequests: []string{unlabel, metadata, labels},
+			wantRequests: []string{metadata, labels, unlabel},
 		},
 		{
 			name:         "in a label not listed",
-			labelIDs:     []string{protonmail.LabelAllMail, "x"},
+			labelIDs:     []string{protonmail.LabelTrash, protonmail.LabelAllMail, "x"},
 			listLabels:   `{"Code":1000,"Labels":[]}`,
-			wantRequests: []string{unlabel, metadata, labels, del},
+			wantRequests: []string{metadata, labels, del},
 			wantDeleted:  true,
 		},
 		{
 			name:         "gone from Proton",
-			wantRequests: []string{unlabel, metadata},
+			wantRequests: []string{metadata, unlabel},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
