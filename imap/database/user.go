@@ -535,7 +535,12 @@ func (u *User) UpdateMessage(apiID string, update *protonmail.EventMessageUpdate
 
 func (u *User) DeleteMessage(apiID string) (seqNums map[string]uint32, err error) {
 	seqNums = make(map[string]uint32)
+	var file string
 	err = u.db.Update(func(tx *bolt.Tx) error {
+		var err error
+		if file, err = u.deleteBodyRecord(tx, apiID); err != nil {
+			return err
+		}
 		messages := tx.Bucket(messagesBucket)
 		if messages == nil {
 			return nil
@@ -569,7 +574,11 @@ func (u *User) DeleteMessage(apiID string) (seqNums map[string]uint32, err error
 		// After the entries: their counts read the stored message.
 		return userDeleteMessage(messages, msg)
 	})
-	return
+	if err != nil {
+		return nil, err
+	}
+	// After the record, as a file without a record is unused.
+	return seqNums, u.store.remove(file)
 }
 
 func (u *User) Close() error {

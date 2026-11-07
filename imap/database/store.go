@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json/v2"
@@ -24,9 +25,13 @@ import (
 // under the account's store key (auth.StoreKey), which is never stored: meta
 // keeps only a check value telling whether a key is the one that sealed them.
 //
-// A file is written before its record and removed after it, so a record
-// always has its file but for a file removed from outside; a crash may leave
-// a file without a record, which the next put overwrites and Wipe removes.
+// Each version of a message gets a file of its own, which its record names:
+// a reader takes the record, then its file, so it never pairs a record with
+// another version's bytes. A file is written before the record naming it and
+// removed after; a record is only written in the transaction that finds the
+// message's metadata, and DeleteMessage removes it with the metadata. A file
+// may outlive its record (a crash, a reader holding the name): Wipe removes
+// those.
 
 // bodiesBucket holds the sealed record of every stored message, by message ID.
 var bodiesBucket = []byte("bodies")
@@ -72,15 +77,15 @@ func newStore(dir string, key *[32]byte) (*store, error) {
 	return &store{dir: dir, aead: aead}, nil
 }
 
-// path names the file of apiID by the hex of the ID, so that no character of
-// an ID Proton sends ends up in a path.
-func (s *store) path(apiID string) string {
-	return filepath.Join(s.dir, hex.EncodeToString([]byte(apiID)))
+// newFileName names a new version of apiID's file: the hex of the ID, so that
+// no character of an ID Proton sends ends up in a path, and a random version.
+func newFileName(apiID string) string {
+	return hex.EncodeToString([]byte(apiID)) + "." + rand.Text()
 }
 
-// write seals literal into the file of apiID, replacing it atomically: a
-// reader sees the old file or the new one, never a part.
-func (s *store) write(apiID string, literal []byte) error {
+// write seals literal into the file name, which it creates whole or not at
+// all: a reader never sees a part.
+func (s *store) write(name, apiID string, literal []byte) error {
 	sealed := s.aead.Seal(nil, nil, literal, fileAD(apiID))
 	tmp, err := os.CreateTemp(s.dir, "tmp-*")
 	if err != nil {
@@ -92,7 +97,7 @@ func (s *store) write(apiID string, literal []byte) error {
 	}
 	err = errors.Join(err, tmp.Close())
 	if err == nil {
-		err = os.Rename(tmp.Name(), s.path(apiID))
+		err = os.Rename(tmp.Name(), filepath.Join(s.dir, name))
 	}
 	if err != nil {
 		return errors.Join(fmt.Errorf("cannot store message %v: %w", apiID, err), os.Remove(tmp.Name()))
@@ -100,11 +105,10 @@ func (s *store) write(apiID string, literal []byte) error {
 	return nil
 }
 
-func (s *store) read(apiID string) ([]byte, error) {
-	sealed, err := os.ReadFile(s.path(apiID))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, ErrNotFound
-	} else if err != nil {
+// read opens the file name of apiID. A missing file is fs.ErrNotExist.
+func (s *store) read(name, apiID string) ([]byte, error) {
+	sealed, err := os.ReadFile(filepath.Join(s.dir, name))
+	if err != nil {
 		return nil, fmt.Errorf("cannot read stored message %v: %w", apiID, err)
 	}
 	literal, err := s.aead.Open(nil, nil, sealed, fileAD(apiID))
@@ -114,10 +118,13 @@ func (s *store) read(apiID string) ([]byte, error) {
 	return literal, nil
 }
 
-func (s *store) remove(apiID string) error {
-	err := os.Remove(s.path(apiID))
+func (s *store) remove(name string) error {
+	if name == "" {
+		return nil
+	}
+	err := os.Remove(filepath.Join(s.dir, name))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("cannot remove stored message %v: %w", apiID, err)
+		return fmt.Errorf("cannot remove stored message file %v: %w", name, err)
 	}
 	return nil
 }
@@ -130,7 +137,7 @@ func (s *store) removeAll() error {
 	}
 	var errs []error
 	for _, e := range entries {
-		if err := os.Remove(filepath.Join(s.dir, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := s.remove(e.Name()); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -143,6 +150,7 @@ func (s *store) removeAll() error {
 // BodyInfo is what FETCH derives from a stored message's bytes, computed once
 // when it is stored.
 type BodyInfo struct {
+	// BodyStructure is the extended one (FETCH BODYSTRUCTURE).
 	BodyStructure *imap.BodyStructure
 	Envelope      *imap.Envelope
 	// Fallback is set when the message was built without decrypting all of
@@ -158,76 +166,168 @@ type BodyRecord struct {
 	BodyInfo
 }
 
-// PutBody stores literal, the message apiID as served, with info, replacing
-// what was stored for it.
-func (u *User) PutBody(apiID string, literal []byte, info BodyInfo) error {
-	if len(literal) > math.MaxUint32 {
-		return fmt.Errorf("cannot store message %v: %v bytes is more than IMAP can tell", apiID, len(literal))
-	}
-	rec, err := json.Marshal(BodyRecord{Size: uint32(len(literal)), BodyInfo: info}, json.Deterministic(true))
-	if err != nil {
-		return fmt.Errorf("cannot encode the record of message %v: %w", apiID, err)
-	}
-	if err := u.store.write(apiID, literal); err != nil {
-		return err
-	}
-	return u.db.Update(func(tx *bolt.Tx) error {
-		b, err := tx.CreateBucketIfNotExists(bodiesBucket)
-		if err != nil {
-			return err
-		}
-		return b.Put([]byte(apiID), u.store.aead.Seal(nil, nil, rec, recordAD(apiID)))
-	})
+// recordOptions encode records so that they decode to what was encoded: nil
+// slices and maps stay nil, which go-imap writes as NIL where an empty one
+// would be an empty list, which RFC 3501's grammar has no room for (e.g. the
+// body language).
+func recordOptions() json.Options {
+	return json.JoinOptions(json.Deterministic(true), json.FormatNilSliceAsNull(true), json.FormatNilMapAsNull(true))
 }
 
-// Body returns the stored bytes of apiID. ErrNotFound means none are stored.
-func (u *User) Body(apiID string) ([]byte, error) {
-	if _, err := u.BodyRecord(apiID); err != nil {
-		return nil, err
-	}
-	return u.store.read(apiID)
+// sealedRecord is a BodyRecord as sealed in bodiesBucket, with the name of
+// the file holding its version of the message.
+type sealedRecord struct {
+	File string
+	BodyRecord
 }
 
-// BodyRecord returns the record of the stored message apiID. ErrNotFound
-// means none is stored.
-func (u *User) BodyRecord(apiID string) (*BodyRecord, error) {
-	var sealed []byte
-	err := u.db.View(func(tx *bolt.Tx) error {
-		if b := tx.Bucket(bodiesBucket); b != nil {
-			// Only valid during the transaction: copied out.
-			if v := b.Get([]byte(apiID)); v != nil {
-				sealed = append([]byte(nil), v...)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+// getRecord returns the record of apiID in tx, or nil if there is none.
+func (u *User) getRecord(tx *bolt.Tx, apiID string) (*sealedRecord, error) {
+	b := tx.Bucket(bodiesBucket)
+	if b == nil {
+		return nil, nil
 	}
+	sealed := b.Get([]byte(apiID))
 	if sealed == nil {
-		return nil, ErrNotFound
+		return nil, nil
 	}
 	plain, err := u.store.aead.Open(nil, nil, sealed, recordAD(apiID))
 	if err != nil {
 		return nil, fmt.Errorf("cannot open the record of message %v: %w", apiID, err)
 	}
-	rec := new(BodyRecord)
+	rec := new(sealedRecord)
 	if err := json.Unmarshal(plain, rec); err != nil {
 		return nil, fmt.Errorf("cannot decode the record of message %v: %w", apiID, err)
 	}
 	return rec, nil
 }
 
-// DeleteBody removes what is stored of apiID, if anything.
-func (u *User) DeleteBody(apiID string) error {
-	err := u.db.Update(func(tx *bolt.Tx) error {
-		if b := tx.Bucket(bodiesBucket); b != nil {
-			return b.Delete([]byte(apiID))
+// PutBody stores literal, the message apiID as served, with info, replacing
+// what was stored for it, and returns its record. A message the database
+// doesn't have (deleted meanwhile) isn't stored: stored is false.
+func (u *User) PutBody(apiID string, literal []byte, info BodyInfo) (rec *BodyRecord, stored bool, err error) {
+	if len(literal) > math.MaxUint32 {
+		return nil, false, fmt.Errorf("cannot store message %v: %v bytes is more than IMAP can tell", apiID, len(literal))
+	}
+	sr := sealedRecord{File: newFileName(apiID), Size: uint32(len(literal)), BodyInfo: info}
+	encoded, err := json.Marshal(sr, recordOptions())
+	if err != nil {
+		return nil, false, fmt.Errorf("cannot encode the record of message %v: %w", apiID, err)
+	}
+	if err := u.store.write(sr.File, apiID, literal); err != nil {
+		return nil, false, err
+	}
+	var oldFile string
+	err = u.db.Update(func(tx *bolt.Tx) error {
+		messages := tx.Bucket(messagesBucket)
+		if messages == nil || messages.Get([]byte(apiID)) == nil {
+			return nil
 		}
-		return nil
+		// An unreadable old record is replaced all the same; its file is
+		// left for Wipe.
+		if old, err := u.getRecord(tx, apiID); err == nil && old != nil {
+			oldFile = old.File
+		}
+		b, err := tx.CreateBucketIfNotExists(bodiesBucket)
+		if err != nil {
+			return err
+		}
+		stored = true
+		return b.Put([]byte(apiID), u.store.aead.Seal(nil, nil, encoded, recordAD(apiID)))
+	})
+	if err != nil {
+		return nil, false, errors.Join(err, u.store.remove(sr.File))
+	}
+	if !stored {
+		return nil, false, u.store.remove(sr.File)
+	}
+	return &sr.BodyRecord, true, u.store.remove(oldFile)
+}
+
+// BodyRecord returns the record of the stored message apiID. ErrNotFound
+// means none is stored.
+func (u *User) BodyRecord(apiID string) (*BodyRecord, error) {
+	var rec *sealedRecord
+	err := u.db.View(func(tx *bolt.Tx) error {
+		var err error
+		rec, err = u.getRecord(tx, apiID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if rec == nil {
+		return nil, ErrNotFound
+	}
+	return &rec.BodyRecord, nil
+}
+
+// Body returns the stored message apiID, its record and its bytes, which
+// belong to the same version. ErrNotFound means none is stored, or its file
+// was replaced while being read: then ask again. A record whose file is gone
+// (removed from outside) is dropped, so that the message is stored again.
+func (u *User) Body(apiID string) (*BodyRecord, []byte, error) {
+	var rec *sealedRecord
+	err := u.db.View(func(tx *bolt.Tx) error {
+		var err error
+		rec, err = u.getRecord(tx, apiID)
+		return err
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if rec == nil {
+		return nil, nil, ErrNotFound
+	}
+	literal, err := u.store.read(rec.File, apiID)
+	if errors.Is(err, fs.ErrNotExist) {
+		if err := u.dropLostRecord(apiID, rec.File); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, fmt.Errorf("stored message %v changed while read: %w", apiID, ErrNotFound)
+	} else if err != nil {
+		return nil, nil, err
+	}
+	return &rec.BodyRecord, literal, nil
+}
+
+// dropLostRecord deletes the record of apiID if it still names file, which is
+// gone; one replaced meanwhile is kept.
+func (u *User) dropLostRecord(apiID, file string) error {
+	return u.db.Update(func(tx *bolt.Tx) error {
+		rec, err := u.getRecord(tx, apiID)
+		if err != nil || rec == nil || rec.File != file {
+			return err
+		}
+		return tx.Bucket(bodiesBucket).Delete([]byte(apiID))
+	})
+}
+
+// DeleteBody removes what is stored of apiID, if anything; its metadata
+// stays.
+func (u *User) DeleteBody(apiID string) error {
+	var file string
+	err := u.db.Update(func(tx *bolt.Tx) error {
+		var err error
+		file, err = u.deleteBodyRecord(tx, apiID)
+		return err
 	})
 	if err != nil {
 		return err
 	}
-	return u.store.remove(apiID)
+	return u.store.remove(file)
+}
+
+// deleteBodyRecord deletes the record of apiID in tx, and returns the file it
+// named, for the caller to remove once tx is committed. An unreadable record
+// is deleted too; its file is left for Wipe.
+func (u *User) deleteBodyRecord(tx *bolt.Tx, apiID string) (file string, err error) {
+	b := tx.Bucket(bodiesBucket)
+	if b == nil {
+		return "", nil
+	}
+	if rec, err := u.getRecord(tx, apiID); err == nil && rec != nil {
+		file = rec.File
+	}
+	return file, b.Delete([]byte(apiID))
 }
