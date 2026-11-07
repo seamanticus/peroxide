@@ -29,8 +29,8 @@ details are on the pages linked.
 | `-debug` output, if you keep it | Decrypted mail and metadata | whatever you give it |
 
 Decrypted bodies, unlocked keys and the bridge password are never
-written by peroxide (except by `export-secret-keys`, to its stdout, and
-by `-debug`). See [accounts.md](accounts.md#files-on-disk).
+written by peroxide (except by `-debug`). See
+[accounts.md](accounts.md#files-on-disk).
 
 Consequences:
 

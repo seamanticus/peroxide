@@ -24,10 +24,6 @@ With `-debug`, everything goes to **stdout**, interleaved in order:
 would. The runtime's crash output (written to file descriptor 2) is
 copied there too (`runtime/debug.SetCrashOutput`).
 
-Exception: `export-secret-keys` writes the keys to stdout, so its logs
-and prompts stay on stderr, and `-debug` there logs the API traffic to
-stderr.
-
 Each IMAP or SMTP connection's lines are written whole: two clients'
 lines never mix within a line, and an API request logged while a
 client line is half received lands after it, not inside it.

@@ -62,20 +62,6 @@ session; `serve` does it once.
 Lists the usernames that have stored credentials. It reads only the
 names in `auth.json` (they are not encrypted) and makes no request.
 
-### `export-secret-keys <username>`
-
-Asks for the bridge password (or reads `PEROXIDE_BRIDGE_PASS`), logs in,
-unlocks your keys, and writes every unlocked private key to stdout as
-one ASCII-armored `PGP PRIVATE KEY BLOCK`. **The keys are written
-unprotected, without a passphrase.** Anyone who reads that output can
-decrypt all your mail and sign as you. Pipe it straight into
-`gpg --import` or an encrypted file; never into a file in plain text.
-Its logs and prompts go to stderr even with `-debug`, so that stdout
-holds only the keys.
-
-Keys that fail to unlock are left out (each failure is logged as
-"warning: failed to unlock address").
-
 ### `sendmail <username> -- <recipients...>`
 
 A `sendmail(1)` replacement for programs such as `git send-email`. It
@@ -138,11 +124,10 @@ proton-bridge sends.
 
 ## Environment
 
-- `PEROXIDE_BRIDGE_PASS`: the bridge password for `export-secret-keys`
-  and `sendmail`, instead of a prompt. Environment variables can be
-  read by other processes of the same user (`/proc/<pid>/environ`);
-  prefer piping it from a password manager into the command's
-  environment only.
+- `PEROXIDE_BRIDGE_PASS`: the bridge password for `sendmail`, instead
+  of a prompt. Environment variables can be read by other processes of
+  the same user (`/proc/<pid>/environ`); prefer piping it from a
+  password manager into the command's environment only.
 - `XDG_CONFIG_HOME`: where `peroxide/` is created (default
   `~/.config`; on macOS `~/Library/Application Support`). See
   [accounts.md](accounts.md#files-on-disk).
