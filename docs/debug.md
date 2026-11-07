@@ -103,10 +103,11 @@ Treat a `-debug` log as a copy of your mailbox.
 - **Encrypted bodies** as Proton returns them (`GET /messages/<id>`):
   armored PGP messages, safe without your keys, which the log doesn't
   hold.
-- **Query strings.** Request lines include the query: the address of
-  every public-key lookup (`/keys?Email=...`), the address of
-  `/messages/count?Address=...`, and list filters. Message, label and
-  address IDs are in paths.
+- **Query strings and request bodies.** Request lines include the
+  query: the address of every public-key lookup (`/keys?Email=...`) and
+  list filters. The download's requests (`POST /mail/v4/messages`) carry
+  message IDs in their JSON body. Message, label and address IDs are in
+  paths.
 - **Your username and addresses**, in API responses and in the SMTP
   `MAIL FROM`/`RCPT TO` lines.
 - **Session identifiers that aren't credentials**: the session UID in

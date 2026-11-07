@@ -211,21 +211,21 @@ place (people, and LLM tools reading a mailbox over IMAP); others don't.
 logged by `user.applyUpdate` (imap/actions.go) for a `STORE +FLAGS
 (\Seen)` in INBOX. The STORE succeeded and the client got its FETCH.
 
-**Cause.** A mailbox is synced into the local database only when a client
-first opens it (`mailbox.init`, from SELECT, FETCH, SEARCH...); STATUS
-uses the API's counts until then. aerc STATUSes All Mail but never
-selects it, so its bucket stays empty, while each message still lists
-`"5"` in `LabelIDs`. `applyUpdate` walks every label of the message,
-finds the All Mail mailbox, and doesn't find the message in it. Harmless
-today (an unsynced mailbox needs no FETCH), but it is logged for every
-flag change of every message, and the same happens for any folder not
-opened yet, Starred included.
+**Cause (before 1476ca8).** A mailbox was synced into the local database
+only when a client first opened it (`mailbox.init`, from SELECT, FETCH,
+SEARCH...); STATUS used the API's counts until then. aerc STATUSes All
+Mail but never selects it, so its bucket stayed empty, while each
+message still lists `"5"` in `LabelIDs`. `applyUpdate` walked every
+label of the message, found the All Mail mailbox, and didn't find the
+message in it. Since 1476ca8 one download fills every mailbox, so the
+message is always there.
 
-**Also.**
+**Also (before 1476ca8).**
 
-- Syncing All Mail means listing every message of the account
-  (`mailbox.sync`, 150 per page, from 0): slow for a large account, and
-  it stores each message's metadata again under another bucket.
+- Syncing All Mail meant listing every message of the account
+  (`mailbox.sync`, 150 per page, from 0) at every login. The download
+  now lists the account once per database, and a message is stored once
+  with an entry per mailbox.
 - proton-bridge has a setting for it, `ShowAllMail`, on by default
   (internal/vault/types_settings.go): off, All Mail is hidden from LIST
   (`Connector.GetMailboxVisibility`, connector.go). It also refuses APPEND
@@ -308,59 +308,126 @@ after login, as a pipeline of four stages, persisted and resumable:
    maximum recommended by the API team", doubled to 64 in
    `NewDownloadStage`). Each request retries with exponential cool-down
    on 429 and 5xx (`network.ExpCoolDown`). Parallelism adapts per chunk
-   (`DefaultDownloadRateModifier`): note that its test
-   (`TestAutoDownloadScale_429or500x`) expects it to fall to 2 after a
-   chunk without 429 and to double after one with a 429, which looks
-   inverted; don't copy it as is.
+   (`DefaultDownloadRateModifier`), and that is a bug, confirmed in
+   `autoDownloadRate` (stage_download.go:258): it passes "a 429 or 5xx
+   was seen" as `Apply`'s `wasSuccess`, so the parallelism doubles after
+   a chunk that hit 429 and falls to 2 after a clean one, and it starts
+   at the maximum (64). `TestAutoDownloadScale_429or500x` asserts that
+   behaviour. Don't copy it (decided 2026-11-08, step 3 below).
 3. Build (stage_build.go): decrypt and build the RFC 822 message
    (`DecryptAndBuildRFC822Into`, `IgnoreDecryptionErrors`: an
    undecryptable body becomes the PGP/MIME fallback peroxide now uses),
    parse its structure (`imap.NewParsedMessage`).
 4. Apply (stage_apply.go): store the literal and the parsed structure in
-   gluon's on-disk store, so later FETCHes make no request.
+   gluon's on-disk store, so later FETCHes make no request. The store
+   (gluon store/disk.go) seals each literal with AES-256-GCM under a key
+   hashed from the user's gluon passphrase (vault `GluonKey`), in blocks,
+   compressed first; a file per message, named by gluon's internal ID.
 
 Progress is saved (`syncservice.Status`: `LastSyncedMessageID`,
 `NumSyncedMessages`, `FailedMessages`): a sync stopped halfway resumes,
 and messages that failed are retried later. `StartSyncEventID` is the
 event ID when the sync began: events received meanwhile go to a reduced
 handler (messages only, `newSyncEventHandler`, service_sync_events.go),
-and a failed sync rewinds the events to that ID.
+and once the sync ends the events are rewound to that ID and applied
+again (service.go:463-525). peroxide does this for the metadata since
+3b67642.
 
-**What peroxide would need.**
+**Decided 2026-11-08** (not started):
 
-1. Storage, i.e. option (b) first: a bolt bucket keyed by message ID
-   with what FETCH needs without a request. Either the API's full
-   message as received (body still PGP-encrypted to the account's keys,
-   attachments' key packets, names, MIME types, sizes), which is no less
-   safe at rest than the metadata already stored in clear (subjects,
-   addresses); or the computed BODYSTRUCTURE plus the pass-through flag,
-   which needs no decryption per FETCH but stores attachment names in
-   clear. Decryption keys are never stored.
-2. A downloader per user, started by the first `mailbox.init` of a
-   session (not at login: no requests while no client looks), stopped
-   with the last logout (`u.done`), as the events poll is. Newest first,
-   the selected mailbox before the others.
-3. Bounded parallelism (start at 4, at most 32 per bridge's figure),
-   halved on 429 or 5xx with exponential back-off, raised slowly while
-   requests succeed. No attachments: BODYSTRUCTURE needs only the
-   message; attachments are fetched when a client asks for them.
+- Store the built message, as bridge: (a). Not the API's encrypted
+  message (b), nor only the computed BODYSTRUCTURE (c).
+- Download every body and every attachment in the sync, as bridge: (a).
+  It costs a full download at the first sync, but the mail is then on
+  disk, readable offline, the user's own copy.
+- Parallelism: the intent of bridge's modifier, fixed (step 3).
+
+**Found in the 2026-11-08 audit of uid-persist, to settle first or
+with it.**
+
+- Done before this section, in 3b67642 and 6c5f64b: updates reach
+  clients in order (`user.sendSem`); the download holds no lock across
+  requests, replaying events once done; events failing on the network,
+  429 or 5xx are retried, not rebuilt; FETCH walks the mailbox once.
+  The body download inherits all four: its requests must hold no lock,
+  and store under `syncSem`.
+- An edited draft (`EventUpdate`) keeps its UID while its body changes
+  (`applyMessageEvent`, imap/user.go: only the memory cache is dropped;
+  `UpdateMessage` patches the metadata). RFC 3501 has a message's
+  content immutable under a UID, and clients cache bodies by UID; with
+  stored bodies the stale one would stay on disk. proton-bridge deletes
+  a draft or sent message and creates it again, with new UIDs
+  (`onMessageUpdateDraftOrSent`, service_message_events.go). Do it in
+  step 5: expunge the old entries, drop the stored body, create the
+  message again from `GET /messages/{id}`.
+- Each connection sees the shared state (no per-session snapshot): see
+  section 14. With stored bodies it doesn't get worse, but FETCH over a
+  range being filled by the download is where it shows.
+
+**What peroxide needs.**
+
+1. Storage: the message as served to clients (the RFC 822 bytes
+   `fetchBodySection` builds today, pass-through and fallbacks included),
+   its BODYSTRUCTURE and its envelope, sealed with AES-256-GCM as gluon's
+   store does, one file per message under `~/.config/peroxide/<user>/`,
+   named by message ID (bolt holds only the index). Keys never stored.
+   The sealing key: peroxide has no key at rest of its own. Options to
+   decide: derive it (HKDF-SHA256) from the secret key the bridge
+   password decodes to, which already seals `auth.json`, so a stored
+   body is as safe as the credentials and only a login can read it; or
+   a random key stored inside the sealed `auth.json` entry, which
+   survives a bridge password change (`peroxide auth` makes a new one
+   today, so the first option would discard every stored body then).
+   Both need the bridge password, which a login or `download-mailbox`
+   gives.
+2. A body downloader per user, after the metadata download (bridge's
+   download stage follows its metadata stage), at login, stopped with
+   the last logout (`u.done`), resumable: a message is downloaded when
+   it has no stored body, so the stored bodies are the progress. Newest
+   first. Every message body (`GET /messages/{id}`) and every attachment
+   (`GET /attachments/{id}`). Requests hold no lock; storing takes
+   `syncSem` and delivers in turn (`unlockSyncAndSend`). Bounded memory,
+   as bridge's `DownloadRequestMem`: a batch stops at a total of
+   message and attachment sizes, not only a count.
+3. Parallelism, the intent of bridge's `DefaultDownloadRateModifier`
+   fixed: start small, increase while requests succeed, decrease on a
+   429 or 5xx, with a cool-down. Proposed, AIMD (additive increase,
+   multiplicative decrease, as TCP congestion control; it converges to
+   the largest rate the server allows without oscillating as doubling
+   does):
+   - start at 2 parallel requests; at most 32 (bridge's
+     `MaxParallelDownloads` before its doubling: "the maximum
+     recommended by the API team");
+   - every request that succeeds while no cool-down runs adds
+     1/parallelism (so +1 per round of requests);
+   - a 429 or 5xx halves it (at least 1) and starts a cool-down: the
+     `Retry-After` the response gives, else an exponential back-off from
+     2 s to 60 s with jitter (seeded, `rand.New(rand.NewPCG)`), the
+     request retried after it;
+   - another 429 during the cool-down halves again and restarts it; at
+     its end increase resumes;
+   - until every message is stored.
+   Tested in testing/synctest with a fake that answers 429 above a
+   given parallelism: the rate settles below it, no request is lost.
 4. Interactive FETCHes go first: a FETCH needing a message the
    downloader hasn't reached fetches it at once (as now) and stores it,
-   and the downloader skips it.
-5. Invalidation: `EventUpdate` (a draft edited) and deletes remove the
-   stored entry, and a Refresh event clears all of it, as already done
-   for the memory cache (`receiveEvents`, imap/user.go; `applyDelete`,
-   imap/actions.go).
-6. Resume: the stored entries are the progress, so a restart continues
-   where the last session stopped. This needs `mailbox.sync` to stop
-   resetting the mailbox on the first open of every session ("TODO:
-   sync only the first time", "TODO: don't do this without incrementing
-   UIDVALIDITY", imap/mailbox.go), or the downloader would start over
-   each session.
+   and the downloader skips it. A FETCH and the downloader asking for
+   one message make one request.
+5. Invalidation: deletes remove the stored message; an edited draft or
+   sent message (`EventUpdate`) is deleted and created again with new
+   UIDs, as bridge (see the audit above); a rebuild deletes every
+   stored message (`Wipe`, and the files). Keys change: an address key
+   unlocked at a later login turns an armored fallback into a decrypted
+   body, so a stored body records which fallback it is, and those are
+   built again when the unlocked keys differ from the ones recorded.
+6. Resume: done for the metadata (9.1, 1476ca8); the bodies resume by
+   what is stored (step 2).
 7. Tests: a stored message makes BODYSTRUCTURE and BODY[] make no
-   request; an edited draft is fetched again; on 429 the downloader
-   backs off and the parallelism drops (testing/synctest); a FETCH of a
-   message being downloaded makes one request, not two.
+   request; an edited draft gets new UIDs and its new body; on 429 the
+   downloader backs off and the parallelism drops (testing/synctest); a
+   FETCH of a message being downloaded makes one request, not two; a
+   stored body can't be read with another key; `BenchmarkFetchFlags`
+   and a FETCH-BODYSTRUCTURE benchmark before and after.
 8. ENVELOPE from the original header (with the storage of step 1).
    Since 49b614e `messageHeader` starts from the header Proton
    received (`Message.Header`, sent only by `GET /messages/{id}`: the
@@ -836,3 +903,60 @@ files named are the ones the sweep starts from, not a complete list.
 Tests: none of this changes behaviour but item 2, whose test is one
 per changed path that a wrapped `*protonmail.APIError` is found with
 `errors.AsType` by the caller (e.g. SMTP send failing with code 2028).
+
+## 14. Upgrade to Gluon
+
+peroxide is to move to gluon, proton-bridge's IMAP library, so that it
+behaves as proton-bridge does. What gluon brings that go-imap v1 doesn't
+let peroxide fix, found as they come:
+
+1. **No per-session view of a mailbox** (2026-11-08 audit of uid-persist,
+   item 6). go-imap v1 gives a backend no session state, so every
+   connection reads the shared database as it is now: `FETCH 1:*` reads
+   the count when it runs and can answer sequence numbers the client was
+   never told of (EXISTS still on its way, a download page landing), and
+   an EXPUNGE caused by another session renumbers messages in the middle
+   of a command. RFC 3501 section 7.4.1 requires that a session's
+   sequence numbers change only through the responses it is sent. gluon
+   keeps a snapshot per session (internal/state) and applies other
+   sessions' changes to it only between commands. Left as is until the
+   move.
+
+To plan with the move: the whole store changes (sqlite and gluon's
+encrypted store instead of bolt), so every mailbox gets a new
+UIDVALIDITY and is downloaded again; gluon needs cgo
+(`mattn/go-sqlite3`), and release.sh builds with `CGO_ENABLED=0` for
+every target, so the release matrix needs cgo cross-compilers.
+
+## 15. Manual tests
+
+Checks that need a live Proton account and a client, for behaviour the
+unit tests can't reach.
+
+1. **A rebuild from a refused event ID** (2026-11-08 audit, "Noticed").
+   Shows the BYE, the disconnect, the wipe at the next login and whether
+   the client reconnects by itself.
+   1. Log aerc in, let the download finish, note a message's UID
+      (`:pipe -m` the UID FETCH from `-debug`) and the mailbox's
+      UIDVALIDITY (STATUS in the `-debug` log).
+   2. Stop peroxide. Set the stored event ID to one Proton refuses,
+      e.g. with a small Go program (bbolt, bucket `events`, key `last`,
+      value `bogus`) on a copy, then put the copy in place.
+   3. Start `peroxide -debug serve`, connect aerc.
+   4. Expected: "Proton refused the events after bogus (...): starting
+      again from event ..., and rebuilding every mailbox"; aerc gets
+      `* BYE` and is disconnected; on reconnect the log shows "was
+      marked for a rebuild: wiping it" and a new download; the new
+      UIDVALIDITY is higher than the one noted.
+   5. Record whether aerc reconnected by itself and how it showed the
+      BYE.
+
+## 16. aerc and the download's UID order
+
+Clients that sort by date themselves (Thunderbird, Evolution, KMail)
+show the downloaded mail in order. aerc doesn't: it sorts on the server
+only, with SORT (aerc worker/imap/open.go, `handleFetchDirectoryContents`:
+"SORT is not supported but requested: list messages by UID"), which
+neither peroxide nor gluon offers, so after the newest-first download it
+lists the oldest message at the top. Fixed in aerc, not here
+(aerc_implementation.md, item 5, outside this repository).

@@ -71,9 +71,10 @@ metadata only, newest first. Use it before the first client connects to
 a large account, so the client finds every mailbox full. It asks for the
 bridge password or reads `PEROXIDE_BRIDGE_PASS`, as `sendmail` does.
 
-Interrupted (Ctrl-C) or failed, it exits with status 1, and the next
-run, or the next login, resumes where it stopped. A local copy already
-complete makes it exit at once.
+Interrupted (Ctrl-C, SIGTERM) or failed, it exits with status 1, and
+the next run, or the next login, resumes where it stopped. A local copy
+already complete makes it exit at once. Events that arrived meanwhile
+are applied at the next login.
 
 `-discard-local-copy` first wipes the local copy, then downloads the
 account from scratch: for a copy that went wrong. Every mailbox gets a
@@ -82,9 +83,10 @@ in Proton changes. It is what peroxide does by itself on a Refresh
 event or an event it can't apply (see
 [imap/sync.md](imap/sync.md#rebuilding-the-database)).
 
-Not while `serve` runs: the database file takes one process at a time,
-and the command fails with "the database is in use by another peroxide
-process". Stop `serve` first.
+The database file takes one process at a time, and `serve` holds an
+account's file while an IMAP client of that account is logged in.
+Then the command fails with "the database is in use by another peroxide
+process": log the client out, or stop `serve`, first.
 
 ### `sendmail <username> -- <recipients...>`
 
