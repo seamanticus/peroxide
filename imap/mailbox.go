@@ -950,7 +950,7 @@ func (mbox *mailbox) undoMove(dest *mailbox, apiIDs []string) (allMoved bool, er
 		log.Printf("Taking %v messages out of %v again: they couldn't leave %v", len(undo), dest.Name(), mbox.Name())
 		failed, err := mbox.u.c.UnlabelMessages(dest.label, undo)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("cannot take the messages out of %v again, left in both until the next event: %w", dest.Name(), err))
+			errs = append(errs, fmt.Errorf("cannot take the messages out of %v again: left in both %v and %v, in Proton too: %w", dest.Name(), mbox.Name(), dest.Name(), err))
 		} else {
 			errs = append(errs, mbox.u.applyAction(undo, failed, labelUpdate(dest.label, false)))
 		}

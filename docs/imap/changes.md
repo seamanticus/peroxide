@@ -61,8 +61,10 @@ never in neither, and not in both, even if the command fails. peroxide:
   Proton. If Proton already took it out of the source (moving into a
   folder does that), the move is complete. Otherwise it unlabels the
   message from the destination again, as if it never moved. If that
-  check or undo fails too, the message stays in both until the next
-  events, and the NO says so.
+  undo fails too, the message is in both mailboxes, in Proton as well
+  as locally, and the NO says so: remove it from one by hand. If only
+  the check fails, the local view shows both until the next events
+  tell what Proton did.
 
 ## EXPUNGE
 
