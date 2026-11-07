@@ -342,13 +342,15 @@ again (service.go:463-525). peroxide does this for the metadata since
   disk, readable offline, the user's own copy.
 - Parallelism: AIMD as proposed in step 3 (decided 2026-11-08, second
   round).
-- Sealing key: a random key per Proton account, kept inside its sealed
-  `auth.json` entry (decided 2026-11-08, second round), not derived from
-  the bridge password: a bridge password replaced because it may be
-  compromised then needs no rebuild of the stored bodies. The key belongs
-  to the account's `UserID`, which Proton never changes, so it is easy to
-  tell which key seals which store. Details and what is left open in
-  step 1.
+- Sealing key: derived from the bridge password (decided 2026-11-08,
+  third round, replacing the second round's random key kept in
+  `auth.json`). A lost or replaced bridge password loses the store: it
+  is rebuilt. Chosen as the safest and simplest, with the smallest
+  attack surface: no key is stored anywhere, nothing to carry over into
+  a new `auth.json` entry, and a new bridge password also cuts off
+  whoever had the old one from the store, which a random key kept in
+  `auth.json` would not (whoever read the old entry kept that key).
+  Details in step 1.
 
 **Found in the 2026-11-08 audit of uid-persist, to settle first or
 with it.**
@@ -379,39 +381,43 @@ with it.**
    its BODYSTRUCTURE and its envelope, sealed with AES-256-GCM as gluon's
    store does, one file per message under `~/.config/peroxide/<user>/`,
    named by message ID (bolt holds only the index). Keys never stored.
-   The sealing key (decided): 32 random bytes (`crypto/rand`) made when
-   the account's first body is stored, kept in the account's
-   `CachedAuth` (auth/auth.go) next to its `UserID`, so it is sealed
-   with the rest of the entry (nacl/secretbox under the bridge password's
-   secret key) and read whenever a login or `download-mailbox` decrypts
-   the entry. Never written anywhere else, never logged.
+   The sealing key (decided): derived, never stored. The bridge password
+   is the base64 of 32 random bytes (`auth.GeneratePassword`), the same
+   secret key that seals the `auth.json` entry (nacl/secretbox). The
+   store's key is HKDF-SHA256 (`crypto/hkdf`) of that secret key, with
+   the account's `UserID` (immutable at Proton) as salt and a fixed
+   label, e.g. "peroxide message store v1", as info: a different key
+   from the one sealing `auth.json`, and one per account. No slow KDF is
+   needed: the input is 32 random bytes, not a human password. It exists
+   in memory only while a login or `download-mailbox` holds the
+   password, never written, never logged.
+   - `auth.Manager.Auth` checks the password and drops the secret key
+     (it keeps a bcrypt hash only), so it must hand the derived key, or
+     the means to derive it, to its caller: an interface change in
+     auth/auth.go and its callers (imap backend, `download-mailbox`).
    - Each stored file is AES-256-GCM with a fresh random nonce, its
      message ID as additional data (a file renamed to another message's
      name fails to open).
    - The database records which key sealed the store: the `UserID` and
      a key check value (HMAC-SHA256 of a fixed label under the key), in
-     `meta`. A key that doesn't match (the `auth.json` entry made anew,
-     another account's key) drops the stored bodies and downloads them
-     again; the metadata and UIDs stay.
-   - To carry over: `peroxide auth <username>` today builds a new
-     `CachedAuth` and a new bridge password, losing the key. Replacing
-     the bridge password without a rebuild needs the key carried into
-     the new entry. Open, to decide when the step starts: `peroxide
-     auth` asks for the old bridge password (or reads
-     `PEROXIDE_BRIDGE_PASS`) when an entry exists, and keeps its key;
-     or a separate command that only replaces the bridge password
-     (decrypt with the old, seal with the new, same key and tokens).
-     Without the old password the key is gone, and the bodies are
-     downloaded again (the metadata, sealed by nothing, stays).
-   - What it protects: a replaced bridge password can't open the new
-     `auth.json` entry, so it can't get the key from now on. But whoever
-     read the old entry with the leaked password has the key, and the
-     store sealed under it: if the disk itself may have been read, a
-     rebuild (`download-mailbox -discard-local-copy`) and a new key are
-     what helps. docs/security.md says so.
+     `meta`. A key that doesn't match (a new bridge password from
+     `peroxide auth`, a lost one) rebuilds the database at that login,
+     by the same path as a Refresh (`Wipe`, then the download): one path,
+     and the user's choice of "lose the password, rebuild the mailbox".
+     Keeping the metadata and UIDs and dropping only the bodies would be
+     possible (the metadata isn't sealed), but is a second path for no
+     need: not planned.
+   - What it protects: the bodies at rest are as safe as the bridge
+     password. After a new bridge password (`peroxide auth` again) the
+     next login wipes the old store and rebuilds it under the new key,
+     so the old password opens nothing that stays on disk. Copies of
+     the old files taken before then remain readable with the old
+     password: no scheme can undo that. docs/security.md and
+     docs/commands.md (`auth`) say so; nothing to carry over.
    - Tests: a store sealed under one key fails to open under another,
-     and is downloaded again; the key survives a bridge password
-     replaced by the carry-over path; the key never appears in a
+     and a login with a new bridge password rebuilds the database; the
+     derived key differs from the secret key sealing `auth.json`, and
+     from another account's (salt); the key never appears in a
      `-debug` log.
 2. A body downloader per user, after the metadata download (bridge's
    download stage follows its metadata stage), at login, stopped with
