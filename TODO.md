@@ -340,7 +340,15 @@ again (service.go:463-525). peroxide does this for the metadata since
 - Download every body and every attachment in the sync, as bridge: (a).
   It costs a full download at the first sync, but the mail is then on
   disk, readable offline, the user's own copy.
-- Parallelism: the intent of bridge's modifier, fixed (step 3).
+- Parallelism: AIMD as proposed in step 3 (decided 2026-11-08, second
+  round).
+- Sealing key: a random key per Proton account, kept inside its sealed
+  `auth.json` entry (decided 2026-11-08, second round), not derived from
+  the bridge password: a bridge password replaced because it may be
+  compromised then needs no rebuild of the stored bodies. The key belongs
+  to the account's `UserID`, which Proton never changes, so it is easy to
+  tell which key seals which store. Details and what is left open in
+  step 1.
 
 **Found in the 2026-11-08 audit of uid-persist, to settle first or
 with it.**
@@ -371,15 +379,40 @@ with it.**
    its BODYSTRUCTURE and its envelope, sealed with AES-256-GCM as gluon's
    store does, one file per message under `~/.config/peroxide/<user>/`,
    named by message ID (bolt holds only the index). Keys never stored.
-   The sealing key: peroxide has no key at rest of its own. Options to
-   decide: derive it (HKDF-SHA256) from the secret key the bridge
-   password decodes to, which already seals `auth.json`, so a stored
-   body is as safe as the credentials and only a login can read it; or
-   a random key stored inside the sealed `auth.json` entry, which
-   survives a bridge password change (`peroxide auth` makes a new one
-   today, so the first option would discard every stored body then).
-   Both need the bridge password, which a login or `download-mailbox`
-   gives.
+   The sealing key (decided): 32 random bytes (`crypto/rand`) made when
+   the account's first body is stored, kept in the account's
+   `CachedAuth` (auth/auth.go) next to its `UserID`, so it is sealed
+   with the rest of the entry (nacl/secretbox under the bridge password's
+   secret key) and read whenever a login or `download-mailbox` decrypts
+   the entry. Never written anywhere else, never logged.
+   - Each stored file is AES-256-GCM with a fresh random nonce, its
+     message ID as additional data (a file renamed to another message's
+     name fails to open).
+   - The database records which key sealed the store: the `UserID` and
+     a key check value (HMAC-SHA256 of a fixed label under the key), in
+     `meta`. A key that doesn't match (the `auth.json` entry made anew,
+     another account's key) drops the stored bodies and downloads them
+     again; the metadata and UIDs stay.
+   - To carry over: `peroxide auth <username>` today builds a new
+     `CachedAuth` and a new bridge password, losing the key. Replacing
+     the bridge password without a rebuild needs the key carried into
+     the new entry. Open, to decide when the step starts: `peroxide
+     auth` asks for the old bridge password (or reads
+     `PEROXIDE_BRIDGE_PASS`) when an entry exists, and keeps its key;
+     or a separate command that only replaces the bridge password
+     (decrypt with the old, seal with the new, same key and tokens).
+     Without the old password the key is gone, and the bodies are
+     downloaded again (the metadata, sealed by nothing, stays).
+   - What it protects: a replaced bridge password can't open the new
+     `auth.json` entry, so it can't get the key from now on. But whoever
+     read the old entry with the leaked password has the key, and the
+     store sealed under it: if the disk itself may have been read, a
+     rebuild (`download-mailbox -discard-local-copy`) and a new key are
+     what helps. docs/security.md says so.
+   - Tests: a store sealed under one key fails to open under another,
+     and is downloaded again; the key survives a bridge password
+     replaced by the carry-over path; the key never appears in a
+     `-debug` log.
 2. A body downloader per user, after the metadata download (bridge's
    download stage follows its metadata stage), at login, stopped with
    the last logout (`u.done`), resumable: a message is downloaded when
@@ -391,7 +424,7 @@ with it.**
    message and attachment sizes, not only a count.
 3. Parallelism, the intent of bridge's `DefaultDownloadRateModifier`
    fixed: start small, increase while requests succeed, decrease on a
-   429 or 5xx, with a cool-down. Proposed, AIMD (additive increase,
+   429 or 5xx, with a cool-down. Decided: AIMD (additive increase,
    multiplicative decrease, as TCP congestion control; it converges to
    the largest rate the server allows without oscillating as doubling
    does):
