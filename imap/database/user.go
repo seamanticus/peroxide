@@ -2,6 +2,7 @@ package database
 
 import (
 	"cmp"
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -227,7 +228,8 @@ func putMessage(tx *bolt.Tx, msg *protonmail.Message) (MessageChange, error) {
 }
 
 type User struct {
-	db *bolt.DB
+	db    *bolt.DB
+	store *store
 }
 
 // Mailbox returns the mailbox of labelID, creating it, with a new
@@ -439,15 +441,22 @@ func (u *User) putMeta(k, v []byte) error {
 }
 
 // Wipe empties the database: messages, mailboxes, counts, the last event ID,
-// the download's state and a rebuild asked for go, in one transaction, so the
-// next login starts as the first did. Kept: the schema version, and the last
-// UIDVALIDITY given, so that mailboxes made again get higher ones.
+// the download's state, a rebuild asked for and the stored messages go, so
+// the next login starts as the first did. Kept: the schema version, the last
+// UIDVALIDITY given, so that mailboxes made again get higher ones, and the
+// store key's check value, as the key is the same.
 func (u *User) Wipe() error {
-	return u.db.Update(wipe)
+	if err := u.db.Update(wipe); err != nil {
+		return err
+	}
+	// After the records are gone, as a file without a record is unused.
+	return u.store.removeAll()
 }
 
+// wipe empties the database in tx. The caller removes the stored files once
+// tx is committed.
 func wipe(tx *bolt.Tx) error {
-	for _, name := range [][]byte{messagesBucket, mailboxesBucket, countsBucket, eventsBucket} {
+	for _, name := range [][]byte{messagesBucket, mailboxesBucket, countsBucket, eventsBucket, bodiesBucket} {
 		if tx.Bucket(name) == nil {
 			continue
 		}
@@ -599,53 +608,85 @@ func (u *User) SetLastEventID(id string) error {
 // database before it gives up with ErrInUse.
 const openTimeout = time.Second
 
-// Open opens the database filename in peroxide's configuration directory. One
-// of another schema version, as left by an older peroxide, is wiped.
-func Open(filename string) (*User, error) {
-	p, err := config.Path(filename)
+// Open opens the database of the account name, <name>.db in peroxide's
+// configuration directory, with its message store in the data directory,
+// sealed under key. A database of another schema version, as left by an
+// older peroxide, is wiped; so is one whose messages were stored under
+// another key (a new or lost bridge password), which keyChanged reports: the
+// store is rebuilt by downloading it again, as after a Refresh.
+func Open(name string, key [32]byte) (u *User, keyChanged bool, err error) {
+	p, err := config.Path(name + ".db")
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	dir, err := config.DataPath(name)
+	if err != nil {
+		return nil, false, err
+	}
+	s, err := newStore(dir, &key)
+	if err != nil {
+		return nil, false, err
 	}
 
 	db, err := bolt.Open(p, 0700, &bolt.Options{Timeout: openTimeout})
 	if errors.Is(err, boltErrors.ErrTimeout) {
-		return nil, fmt.Errorf("cannot open %v: %w", p, ErrInUse)
+		return nil, false, fmt.Errorf("cannot open %v: %w", p, ErrInUse)
 	} else if err != nil {
-		return nil, fmt.Errorf("cannot open %v: %w", p, err)
+		return nil, false, fmt.Errorf("cannot open %v: %w", p, err)
 	}
 
+	check := storeKeyCheck(&key)
+	var wiped bool
 	err = db.Update(func(tx *bolt.Tx) error {
 		meta, err := tx.CreateBucketIfNotExists(metaBucket)
 		if err != nil {
 			return err
 		}
-		if v := meta.Get(versionKey); len(v) == 4 && unserializeUID(v) == schemaVersion {
-			return nil
-		}
-		// Buckets of older versions too: collected first, as bolt forbids
-		// deleting buckets while iterating over them.
-		var names [][]byte
-		if err := tx.ForEach(func(name []byte, _ *bolt.Bucket) error {
-			if string(name) != string(metaBucket) {
-				names = append(names, slices.Clone(name))
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		for _, name := range names {
-			if err := tx.DeleteBucket(name); err != nil {
+		if v := meta.Get(versionKey); len(v) != 4 || unserializeUID(v) != schemaVersion {
+			if err := wipeAll(tx, meta); err != nil {
 				return err
 			}
+			wiped = true
 		}
-		if err := wipe(tx); err != nil {
-			return err
+		if old := meta.Get(storeKeyCheckKey); old != nil && !hmac.Equal(old, check) {
+			if err := wipe(tx); err != nil {
+				return err
+			}
+			wiped, keyChanged = true, true
 		}
-		return meta.Put(versionKey, serializeUID(schemaVersion))
+		return meta.Put(storeKeyCheckKey, check)
 	})
+	if err == nil && wiped {
+		err = s.removeAll()
+	}
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("cannot check the version of %v: %w", p, err), db.Close())
+		return nil, false, errors.Join(fmt.Errorf("cannot open %v: %w", p, err), db.Close())
 	}
 
-	return &User{db}, nil
+	return &User{db: db, store: s}, keyChanged, nil
+}
+
+// wipeAll empties a database of another schema version: every bucket but
+// meta, those of older versions too, then stamps the version.
+func wipeAll(tx *bolt.Tx, meta *bolt.Bucket) error {
+	// Collected first, as bolt forbids deleting buckets while iterating
+	// over them.
+	var names [][]byte
+	if err := tx.ForEach(func(name []byte, _ *bolt.Bucket) error {
+		if string(name) != string(metaBucket) {
+			names = append(names, slices.Clone(name))
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := tx.DeleteBucket(name); err != nil {
+			return err
+		}
+	}
+	if err := wipe(tx); err != nil {
+		return err
+	}
+	return meta.Put(versionKey, serializeUID(schemaVersion))
 }

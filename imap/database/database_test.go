@@ -14,17 +14,27 @@ import (
 	"github.com/seamanticus/peroxide/protonmail"
 )
 
-// openTestDB opens test.db in a temporary configuration directory, and returns
-// it with a function that closes and opens it again, as a restart does.
-func openTestDB(t *testing.T) (*User, func() *User) {
+// testKey seals the message stores of tests.
+func testKey() [32]byte { return [32]byte{1, 2, 3} }
+
+// setTestDirs points the configuration and data directories at dir.
+func setTestDirs(t *testing.T, dir string) {
 	t.Helper()
-	dir := t.TempDir()
 	// os.UserConfigDir reads one of these, depending on the OS.
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("XDG_DATA_HOME", dir)
 	t.Setenv("HOME", dir)
 	t.Setenv("AppData", dir)
+}
 
-	db, err := Open("test.db")
+// openTestDB opens the database of the account "test" in a temporary
+// directory, and returns it with a function that closes and opens it again,
+// as a restart does.
+func openTestDB(t *testing.T) (*User, func() *User) {
+	t.Helper()
+	setTestDirs(t, t.TempDir())
+
+	db, _, err := Open("test", testKey())
 	if err != nil {
 		t.Fatalf("Open() = %v", err)
 	}
@@ -34,9 +44,13 @@ func openTestDB(t *testing.T) (*User, func() *User) {
 		if err := db.Close(); err != nil {
 			t.Fatalf("Close() = %v", err)
 		}
-		db, err = Open("test.db")
+		var keyChanged bool
+		db, keyChanged, err = Open("test", testKey())
 		if err != nil {
 			t.Fatalf("Open() = %v", err)
+		}
+		if keyChanged {
+			t.Fatal("Open() with the same key reports another key")
 		}
 		return db
 	}
@@ -199,10 +213,7 @@ func TestPutMessageIdempotent(t *testing.T) {
 // is wiped when opened, with the version then stamped; one held open by
 // another handle fails with ErrInUse rather than waiting.
 func TestOpenWipesOldSchemaAndRefusesSecondOpener(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("HOME", dir)
-	t.Setenv("AppData", dir)
+	setTestDirs(t, t.TempDir())
 	p, err := config.Path("old.db")
 	if err != nil {
 		t.Fatal(err)
@@ -226,7 +237,7 @@ func TestOpenWipesOldSchemaAndRefusesSecondOpener(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := Open("old.db")
+	db, _, err := Open("old", testKey())
 	if err != nil {
 		t.Fatalf("Open() = %v", err)
 	}
@@ -239,7 +250,7 @@ func TestOpenWipesOldSchemaAndRefusesSecondOpener(t *testing.T) {
 		t.Errorf("Status() of the wiped INBOX = %+v, %v; want empty with a UIDVALIDITY", s, err)
 	}
 
-	if _, err := Open("old.db"); !errors.Is(err, ErrInUse) {
+	if _, _, err := Open("old", testKey()); !errors.Is(err, ErrInUse) {
 		t.Errorf("second Open() = %v, want ErrInUse", err)
 	}
 }

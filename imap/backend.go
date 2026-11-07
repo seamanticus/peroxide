@@ -106,12 +106,12 @@ func (be *backend) disconnect(u *user) {
 }
 
 func (be *backend) Login(info *imap.ConnInfo, username, password string) (imapbackend.User, error) {
-	c, privateKeys, _, err := be.sessions.Auth(username, password)
+	c, privateKeys, storeKey, err := be.sessions.Auth(username, password)
 	if err != nil {
 		return nil, err
 	}
 
-	u, err := getUser(be, username, c, privateKeys)
+	u, err := getUser(be, username, c, privateKeys, storeKey)
 	if err != nil {
 		return nil, err
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
 
+	"github.com/seamanticus/peroxide/auth"
 	"github.com/seamanticus/peroxide/imap/database"
 	"github.com/seamanticus/peroxide/protonmail"
 )
@@ -218,15 +219,18 @@ func (u *user) downloadUpdates(changes []database.MessageChange) []imapbackend.U
 // (SIGINT, SIGTERM), it aborts the request it is making and returns an error,
 // and the next download or login resumes. The events received meanwhile are
 // applied at the next login: the download sets the stored event ID back to
-// where it began.
-func DownloadAccount(c *protonmail.Client, discard bool) error {
+// where it began. storeKey seals the stored messages.
+func DownloadAccount(c *protonmail.Client, storeKey auth.StoreKey, discard bool) error {
 	pu, err := c.GetCurrentUser()
 	if err != nil {
 		return fmt.Errorf("cannot get the account: %w", err)
 	}
-	db, err := database.Open(pu.Name + ".db")
+	db, keyChanged, err := database.Open(pu.Name, storeKey)
 	if err != nil {
 		return err
+	}
+	if keyChanged {
+		log.Printf("The messages of %q were stored under another bridge password: downloading them again", pu.Name)
 	}
 
 	u := &user{

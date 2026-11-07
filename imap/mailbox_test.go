@@ -23,6 +23,7 @@ import (
 	imapbackend "github.com/emersion/go-imap/backend"
 	imapserver "github.com/emersion/go-imap/server"
 
+	"github.com/seamanticus/peroxide/auth"
 	"github.com/seamanticus/peroxide/imap/database"
 	"github.com/seamanticus/peroxide/protonmail"
 )
@@ -36,16 +37,21 @@ func setBubbleClock() {
 	time.Sleep(time.Until(time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)))
 }
 
+// testStoreKey seals the message stores of tests.
+func testStoreKey() auth.StoreKey { return auth.StoreKey{1, 2, 3} }
+
 // openTestDB opens a database in a temporary directory.
 func openTestDB(t *testing.T) *database.User {
 	t.Helper()
-	// os.UserConfigDir reads one of these, depending on the OS.
+	// os.UserConfigDir reads one of these, depending on the OS; the store
+	// goes under XDG_DATA_HOME.
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("XDG_DATA_HOME", dir)
 	t.Setenv("HOME", dir)
 	t.Setenv("AppData", dir)
 
-	db, err := database.Open("test.db")
+	db, _, err := database.Open("test", testStoreKey())
 	if err != nil {
 		t.Fatalf("database.Open() = %v", err)
 	}
@@ -349,9 +355,10 @@ func TestEntriesStar(t *testing.T) {
 func BenchmarkFetchFlags(b *testing.B) {
 	dir := b.TempDir()
 	b.Setenv("XDG_CONFIG_HOME", dir)
+	b.Setenv("XDG_DATA_HOME", dir)
 	b.Setenv("HOME", dir)
 	b.Setenv("AppData", dir)
-	db, err := database.Open("bench.db")
+	db, _, err := database.Open("bench", testStoreKey())
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -640,7 +647,7 @@ func TestLogoutWhileApplyingEvents(t *testing.T) {
 
 		// The page cut by Logout was recorded before the database closed: the
 		// next session resumes after it.
-		reopened, err := database.Open("test.db")
+		reopened, _, err := database.Open("test", testStoreKey())
 		if err != nil {
 			t.Fatalf("reopen database: %v", err)
 		}

@@ -18,6 +18,8 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
+
+	"github.com/seamanticus/peroxide/auth"
 	"github.com/seamanticus/peroxide/events"
 	"github.com/seamanticus/peroxide/imap/database"
 	"github.com/seamanticus/peroxide/protonmail"
@@ -98,14 +100,14 @@ type user struct {
 	addrs []*protonmail.Address
 }
 
-func getUser(be *backend, username string, c *protonmail.Client, privateKeys openpgp.EntityList) (*user, error) {
+func getUser(be *backend, username string, c *protonmail.Client, privateKeys openpgp.EntityList, storeKey auth.StoreKey) (*user, error) {
 	for {
 		// TODO: logging a user in may take some time, find a way not to lock all
 		// other logins during this time
 		be.Lock()
 		u, ok := be.users[username]
 		if !ok {
-			u, err := newUser(be, username, c, privateKeys)
+			u, err := newUser(be, username, c, privateKeys, storeKey)
 			if err != nil {
 				be.Unlock()
 				return nil, err
@@ -135,7 +137,7 @@ func getUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 	}
 }
 
-func newUser(be *backend, username string, c *protonmail.Client, privateKeys openpgp.EntityList) (*user, error) {
+func newUser(be *backend, username string, c *protonmail.Client, privateKeys openpgp.EntityList, storeKey auth.StoreKey) (*user, error) {
 	u, err := c.GetCurrentUser()
 	if err != nil {
 		return nil, err
@@ -160,9 +162,12 @@ func newUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 		messages:    newMessageCache(),
 	}
 
-	db, err := database.Open(u.Name + ".db")
+	db, keyChanged, err := database.Open(u.Name, storeKey)
 	if err != nil {
 		return nil, err
+	}
+	if keyChanged {
+		log.Printf("The messages of %q were stored under another bridge password: downloading them again", u.Name)
 	}
 	uu.db = db
 
