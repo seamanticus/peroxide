@@ -16,8 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ProtonMail/go-crypto/openpgp"
-	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	imapserver "github.com/emersion/go-imap/server"
 	"github.com/emersion/go-smtp"
 	"golang.org/x/term"
@@ -169,8 +167,6 @@ Commands:
 
 	auth [options...] <username>			Login to ProtonMail via peroxide
 
-	export-secret-keys 	<username> 			Export secret keys
-
 	sendmail <username> -- <args...>		sendmail(1) interface
 
 	serve									Run all servers
@@ -186,9 +182,7 @@ Global options:
 	-debug
 		Log API requests and responses as received, and IMAP and SMTP
 		traffic, with credentials scrubbed. Everything else written to
-		stderr, prompts and crashes included, goes to stdout too, except
-		for export-secret-keys, whose stdout is its output: its logs and
-		prompts stay on stderr
+		stderr, prompts and crashes included, goes to stdout too
 	
 	-api-endpoint <url>
 		ProtonMail API endpoint
@@ -268,7 +262,6 @@ func main() {
 	tlsClientCA := flag.String("tls-client-ca", "", "If set, clients must provide a certificate signed by the given CA")
 
 	authCmd := flag.NewFlagSet("auth", flag.ExitOnError)
-	exportSecretKeysCmd := flag.NewFlagSet("export-secret-keys", flag.ExitOnError)
 	sendmailCmd := flag.NewFlagSet("sendmail", flag.ExitOnError)
 
 	flag.Usage = func() {
@@ -282,21 +275,16 @@ func main() {
 		log.Fatal(err)
 	}
 
-	cmd := flag.Arg(0)
-	switch cmd {
-	case "export-secret-keys":
-		// Its stdout is its output.
-	default:
-		if debug {
-			// One redirect then captures the whole session in order, as
-			// 2>&1 would: prompts and server error logs follow log.Writer(),
-			// and a crash, which the runtime writes to fd 2, is copied here.
-			log.SetOutput(os.Stdout)
-			if err := rtdebug.SetCrashOutput(os.Stdout, rtdebug.CrashOptions{}); err != nil {
-				log.Fatalf("copy crashes to stdout: %v", err)
-			}
+	if debug {
+		// One redirect then captures the whole session in order, as
+		// 2>&1 would: prompts and server error logs follow log.Writer(),
+		// and a crash, which the runtime writes to fd 2, is copied here.
+		log.SetOutput(os.Stdout)
+		if err := rtdebug.SetCrashOutput(os.Stdout, rtdebug.CrashOptions{}); err != nil {
+			log.Fatalf("copy crashes to stdout: %v", err)
 		}
 	}
+	cmd := flag.Arg(0)
 	switch cmd {
 	case "auth":
 		var captchaMode, captchaListen string
@@ -455,37 +443,6 @@ func main() {
 			for _, u := range usernames {
 				fmt.Printf("- %v\n", u)
 			}
-		}
-	case "export-secret-keys":
-		exportSecretKeysCmd.Parse(flag.Args()[1:])
-		username := exportSecretKeysCmd.Arg(0)
-		if username == "" {
-			log.Fatal("usage: peroxide export-secret-keys <username>")
-		}
-
-		bridgePassword, err := askBridgePass()
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		_, privateKeys, err := auth.NewManager(newClient).Auth(username, bridgePassword)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		wc, err := armor.Encode(os.Stdout, openpgp.PrivateKeyType, nil)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		for _, key := range privateKeys {
-			if err := key.SerializePrivate(wc, nil); err != nil {
-				log.Fatal(err)
-			}
-		}
-
-		if err := wc.Close(); err != nil {
-			log.Fatal(err)
 		}
 	case "smtp":
 		addr := *smtpHost + ":" + *smtpPort
