@@ -969,6 +969,51 @@ func TestSearchMessages(t *testing.T) {
 	}
 }
 
+// SEARCH reads a stored message as served: BODY finds its decoded text, not
+// an attachment's; HEADER its original header; SENTSINCE its Date header;
+// LARGER its stored size. A message not stored yet is searched in its
+// metadata, without a request; before 2026-11-09 BODY never matched.
+// evidence: witnesses
+func TestSearchStoredMessages(t *testing.T) {
+	stored := fetchTestMessage("a", 0)
+	stored.Body = "Gr\u00fc\u00dfe from the body\r\n"
+	stored.MIMEType = "text/plain"
+	stored.Header = "X-List: peroxide-devel\r\nDate: Mon, 02 Nov 2026 10:00:00 +0000\r\n"
+	stored.Time = protonmail.Timestamp(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Unix())
+	unstored := fetchTestMessage("b", 0)
+	unstored.Subject = "metadata subject"
+	api := &fakeAPI{t: t}
+	mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{stored, unstored})
+	cacheFull(t, mbox, stored)
+
+	for _, tc := range []struct {
+		name     string
+		criteria *imap.SearchCriteria
+		want     []uint32
+	}{
+		{"body text", &imap.SearchCriteria{Body: []string{"gr\u00fc\u00dfe from"}}, []uint32{1}},
+		{"body is decoded", &imap.SearchCriteria{Body: []string{"=C3"}}, nil},
+		{"text in the header", &imap.SearchCriteria{Text: []string{"peroxide-devel"}}, []uint32{1}},
+		{"original header", &imap.SearchCriteria{Header: map[string][]string{"X-List": {"devel"}}}, []uint32{1}},
+		{"unstored subject", &imap.SearchCriteria{Header: map[string][]string{"Subject": {"metadata"}}}, []uint32{2}},
+		{"sent since the Date header", &imap.SearchCriteria{SentSince: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}, []uint32{1}},
+		{"larger than nothing", &imap.SearchCriteria{Larger: 1}, []uint32{1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := mbox.SearchMessages(false, tc.criteria)
+			if err != nil {
+				t.Fatalf("SearchMessages() = %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("SearchMessages() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if got := api.madeRequests(); len(got) != 0 {
+		t.Errorf("made requests %v, want none: SEARCH downloads nothing", got)
+	}
+}
+
 // A message the API returns without a Sender has no From, rather than
 // crashing the connection that fetches or searches it.
 // evidence: witnesses
