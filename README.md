@@ -146,7 +146,7 @@ For IMAP:
 
 * Hostname: `localhost`
 * Port: `1143`
-* Security: none
+* Security: none (with `-tls-cert`/`-tls-key`: SSL/TLS, *not* STARTTLS)
 * Username: `your ProtonMail username`
 * Password: `bridge password` (*NOT YOUR PROTONMAIL PASSWORD*)
 
@@ -154,9 +154,12 @@ For SMTP:
 
 * Hostname: `localhost`
 * Port: `1025`
-* Security: none
+* Security: none (with `-tls-cert`/`-tls-key`: SSL/TLS, *not* STARTTLS)
+* Authentication: `PLAIN` (peroxide doesn't offer `LOGIN`)
 * Username: `your ProtonMail username`
 * Password: `bridge password` (*NOT YOUR PROTONMAIL PASSWORD*)
+
+*Note on TLS*: by default peroxide listens on `127.0.0.1` without TLS, and the password never leaves your machine. Given `-tls-cert` and `-tls-key`, both servers speak TLS from the first byte (implicit TLS, the way ports 993 and 465 do) on the same ports, and refuse plain connections: pick "SSL/TLS" in the client, never "STARTTLS", which peroxide doesn't offer. In aerc that is `imaps://` and `smtps://` instead of `imap+insecure://` and `smtp+insecure://`. A self-signed certificate must be trusted by the client. See `docs/commands.md`.
 
 *Note*: some clients store your *bridge password* in plain text, which is an aberration!!! Like leaving your house key under the mat with a sign pointing at it. An elegant solution is presented below: encrypted and on demand.
 

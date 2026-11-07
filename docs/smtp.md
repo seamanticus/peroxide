@@ -86,7 +86,8 @@ message (it asks for the bridge password, or reads
     [sendemail]
         sendmailcmd = peroxide sendmail you@proton.me --
 
-It reads stdin to the end: `-i` is accepted and changes nothing, and no
+It reads stdin to the end: `-i` (which git send-email always passes) is
+accepted and changes nothing, and no
 other sendmail flag is understood. Each run logs in and unlocks your
 keys afresh, as no session outlives the command.
 

@@ -85,8 +85,9 @@ the command line become Bcc recipients unless they already appear in
 To or Cc, or the message has a Bcc header. It asks for the bridge
 password or reads `PEROXIDE_BRIDGE_PASS`.
 
-`-i` is accepted, for compatibility, and ignored: peroxide reads stdin
-to its end whatever it contains, so a line holding only `.` never ends
+`-i` is accepted, because `git send-email` always passes it, and
+changes nothing: peroxide reads stdin to its end whatever it contains,
+so a line holding only `.` never ends
 the message. No other sendmail option is understood.
 
 ## Global options
@@ -111,7 +112,11 @@ but it needs the bridge password to log in.
 
 With `-tls-cert` and `-tls-key`, both servers use **implicit TLS**: the
 connection is TLS from its first byte (as on ports 993 and 465), not
-STARTTLS. Configure the client for "SSL/TLS", not "STARTTLS". Plain
+STARTTLS, on the same ports as without it. Configure the client for
+"SSL/TLS", not "STARTTLS": in aerc, `imaps://` and `smtps://` rather
+than `imap://` and `smtp://` (which mean STARTTLS there) or the
+`+insecure` forms; in Thunderbird, "SSL/TLS". A self-signed certificate
+must be trusted by the client. Plain
 connections are then refused, and the servers advertise each protocol
 by ALPN (`imap`, `smtp`, RFC 8314).
 

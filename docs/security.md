@@ -24,7 +24,7 @@ details are on the pages linked.
 
 | | Content | Protection |
 |---|---|---|
-| `auth.json` | Session tokens, **login password**, **mailbox password**, key salts | NaCl secretbox under a key that *is* the bridge password |
+| `auth.json` | Session tokens, **login password**, **mailbox password**, key salts | NaCl secretbox under a key that *is* the bridge password; file mode 0600, directory 0700 |
 | `<user>.db` | Message metadata of every message listed: subjects, addresses, dates, labels, attachment names | none, file mode 0700, directory 0700 |
 | `-debug` output, if you keep it | Decrypted mail and metadata | whatever you give it |
 
