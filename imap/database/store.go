@@ -203,8 +203,9 @@ func (u *User) getRecord(tx *bolt.Tx, apiID string) (*sealedRecord, error) {
 }
 
 // PutBody stores literal, the message apiID as served, with info, replacing
-// what was stored for it, and returns its record. A message the database
-// doesn't have (deleted meanwhile) isn't stored: stored is false.
+// what was stored for it, takes it out of the failed messages, and returns
+// its record. A message the database doesn't have (deleted meanwhile) isn't
+// stored: stored is false.
 func (u *User) PutBody(apiID string, literal []byte, info BodyInfo) (rec *BodyRecord, stored bool, err error) {
 	if len(literal) > math.MaxUint32 {
 		return nil, false, fmt.Errorf("cannot store message %v: %v bytes is more than IMAP can tell", apiID, len(literal))
@@ -231,6 +232,11 @@ func (u *User) PutBody(apiID string, literal []byte, info BodyInfo) (rec *BodyRe
 		b, err := tx.CreateBucketIfNotExists(bodiesBucket)
 		if err != nil {
 			return err
+		}
+		if fb := tx.Bucket(failedBucket); fb != nil {
+			if err := fb.Delete([]byte(apiID)); err != nil {
+				return err
+			}
 		}
 		stored = true
 		return b.Put([]byte(apiID), u.store.aead.Seal(nil, nil, encoded, recordAD(apiID)))

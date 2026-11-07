@@ -667,6 +667,13 @@ func retryable(err error) bool {
 // the updates telling clients about it. An error means the database may now
 // differ from Proton.
 func (u *user) applyMessageEvent(eventMessage *protonmail.EventMessage) ([]imapbackend.Update, error) {
+	if eventMessage.Action == protonmail.EventCreate || eventMessage.Action == protonmail.EventUpdate {
+		// Proton has a new version of it: the background download tries a
+		// message that failed again.
+		if err := u.db.RemoveFailed(eventMessage.ID); err != nil {
+			return nil, fmt.Errorf("cannot clear message %v from the failed ones: %w", eventMessage.ID, err)
+		}
+	}
 	switch eventMessage.Action {
 	case protonmail.EventCreate:
 		log.Println("Received create event for message", eventMessage.ID)

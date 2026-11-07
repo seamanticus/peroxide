@@ -163,7 +163,11 @@ func (c *Client) GetAttachment(id string) (io.ReadCloser, error) {
 	}
 
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("cannot get attachment %q: %v %v", id, resp.Status, resp.StatusCode)
+		resp.Body.Close()
+		// An APIError, so callers can tell a rate limit or a server error,
+		// worth retrying, from the rest. The body isn't read: on success
+		// it is the attachment, which isn't JSON.
+		return nil, fmt.Errorf("cannot get attachment %q: %w", id, &APIError{Status: resp.StatusCode, Message: resp.Status})
 	}
 
 	return resp.Body, nil

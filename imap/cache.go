@@ -3,6 +3,7 @@ package imap
 import (
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/seamanticus/peroxide/imap/database"
@@ -93,17 +94,24 @@ func (u *user) storedMessage(apiID string) (*database.BodyRecord, []byte, error)
 	}
 }
 
-// buildAndStore downloads, builds and stores the message apiID, as bd.
+// buildAndStore downloads, builds and stores the message apiID, as bd. A
+// download or build that fails for a reason retrying soon won't change (not
+// the network, a rate limit or a server error, retryable) puts the message
+// in the failed set, which the background download skips; storing takes it
+// out again.
 func (u *user) buildAndStore(apiID string, bd *build) (*database.BodyRecord, []byte, error) {
 	full, err := u.c.GetMessage(apiID)
 	if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok && apiErr.Code == protonmail.CodeMessageDoesNotExist {
 		return nil, nil, fmt.Errorf("%w: %v", errMessageGone, err)
 	} else if err != nil {
-		return nil, nil, err
+		return nil, nil, u.recordFailure(apiID, err)
 	}
 	built, err := u.buildMessage(full)
-	if err != nil {
-		return nil, nil, err
+	if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok && apiErr.Code == protonmail.CodeMessageDoesNotExist {
+		// An attachment gone with its message.
+		return nil, nil, fmt.Errorf("%w: %v", errMessageGone, err)
+	} else if err != nil {
+		return nil, nil, u.recordFailure(apiID, err)
 	}
 	rec, stored, err := u.builds.store(u.db, apiID, bd, built)
 	if err != nil {
@@ -116,4 +124,17 @@ func (u *user) buildAndStore(apiID string, bd *build) (*database.BodyRecord, []b
 		rec = &database.BodyRecord{Size: uint32(len(built.literal)), BodyInfo: built.info}
 	}
 	return rec, built.literal, nil
+}
+
+// recordFailure puts apiID in the failed set if err, its download or build's,
+// isn't retryable, and returns err.
+func (u *user) recordFailure(apiID string, err error) error {
+	if retryable(err) {
+		return err
+	}
+	log.Printf("Message %v failed to download or build, and is left for a FETCH to try again: %v", apiID, err)
+	if addErr := u.db.AddFailed(apiID); addErr != nil {
+		return errors.Join(err, fmt.Errorf("cannot record message %v as failed: %w", apiID, addErr))
+	}
+	return err
 }

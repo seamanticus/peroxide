@@ -456,7 +456,7 @@ func (u *User) Wipe() error {
 // wipe empties the database in tx. The caller removes the stored files once
 // tx is committed.
 func wipe(tx *bolt.Tx) error {
-	for _, name := range [][]byte{messagesBucket, mailboxesBucket, countsBucket, eventsBucket, bodiesBucket} {
+	for _, name := range [][]byte{messagesBucket, mailboxesBucket, countsBucket, eventsBucket, bodiesBucket, failedBucket} {
 		if tx.Bucket(name) == nil {
 			continue
 		}
@@ -540,6 +540,11 @@ func (u *User) DeleteMessage(apiID string) (seqNums map[string]uint32, err error
 		var err error
 		if file, err = u.deleteBodyRecord(tx, apiID); err != nil {
 			return err
+		}
+		if b := tx.Bucket(failedBucket); b != nil {
+			if err := b.Delete([]byte(apiID)); err != nil {
+				return err
+			}
 		}
 		messages := tx.Bucket(messagesBucket)
 		if messages == nil {

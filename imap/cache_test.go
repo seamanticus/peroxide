@@ -66,6 +66,69 @@ func TestDroppedBuildNotStored(t *testing.T) {
 	u.builds.finish("a")
 }
 
+// A message Proton refuses for a lasting reason (a 4xx other than 2501 or
+// 429) goes in the failed set, and the FETCH fails; a rate limit doesn't;
+// a FETCH that then succeeds takes it out.
+// evidence: witnesses
+func TestFailedMessagesRecorded(t *testing.T) {
+	var mu sync.Mutex
+	status := http.StatusBadRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		s := status
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if s != http.StatusOK {
+			w.WriteHeader(s)
+			w.Write([]byte(`{"Code":2001,"Error":"refused"}`))
+			return
+		}
+		w.Write([]byte(`{"Code":1000,"Message":{"ID":"a","Body":"body","MIMEType":"text/plain"}}`))
+	}))
+	t.Cleanup(srv.Close)
+	setStatus := func(s int) {
+		mu.Lock()
+		status = s
+		mu.Unlock()
+	}
+
+	mbox, db := newTestMailbox(t, []*protonmail.Message{inboxMessage("a", 0)})
+	u := mbox.u
+	u.c = &protonmail.Client{RootURL: srv.URL}
+	failed := func() bool {
+		t.Helper()
+		f, err := db.Failed("a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+
+	setStatus(http.StatusTooManyRequests)
+	if _, _, err := u.storedMessage("a"); err == nil {
+		t.Fatal("storedMessage() on 429 succeeded")
+	}
+	if failed() {
+		t.Error("a rate-limited message is in the failed set")
+	}
+
+	setStatus(http.StatusBadRequest)
+	if _, _, err := u.storedMessage("a"); err == nil {
+		t.Fatal("storedMessage() on 400 succeeded")
+	}
+	if !failed() {
+		t.Error("a refused message isn't in the failed set")
+	}
+
+	setStatus(http.StatusOK)
+	if _, _, err := u.storedMessage("a"); err != nil {
+		t.Fatalf("storedMessage() = %v", err)
+	}
+	if failed() {
+		t.Error("a stored message is still in the failed set")
+	}
+}
+
 // A message is downloaded and built once, then served from the store, across
 // sessions too; once deleted it is gone from the store, and Proton is asked
 // again if a FETCH still wants it.
