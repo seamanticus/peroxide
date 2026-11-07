@@ -94,32 +94,24 @@ func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error
 
 	// From the local database, kept by the download and by events: while the
 	// download runs, the counts grow with it, as proton-bridge's do during its
-	// sync.
-	total, unread, err := mbox.db.Count()
+	// sync. One transaction, so that no change falls between the fields.
+	s, err := mbox.db.Status()
 	if err != nil {
-		return nil, fmt.Errorf("cannot count messages in mailbox %v: %w", mbox.Name(), err)
+		return nil, fmt.Errorf("cannot read the status of mailbox %v: %w", mbox.Name(), err)
 	}
 
 	for _, name := range items {
 		switch name {
 		case imap.StatusMessages:
-			status.Messages = uint32(total)
+			status.Messages = s.Total
 		case imap.StatusUidNext:
-			uidNext, err := mbox.db.UidNext()
-			if err != nil {
-				return nil, err
-			}
-			status.UidNext = uidNext
+			status.UidNext = s.UidNext
 		case imap.StatusUidValidity:
-			uidValidity, err := mbox.db.UidValidity()
-			if err != nil {
-				return nil, err
-			}
-			status.UidValidity = uidValidity
+			status.UidValidity = s.UidValidity
 		case imap.StatusRecent:
 			status.Recent = 0
 		case imap.StatusUnseen:
-			status.Unseen = uint32(unread)
+			status.Unseen = s.Unread
 		case imap.StatusAppendLimit:
 			status.AppendLimit = appendLimit
 		}
@@ -173,23 +165,9 @@ func (mbox *mailbox) fetchFlags(msg *protonmail.Message) []string {
 	return flags
 }
 
-func (mbox *mailbox) fetchMessage(isUid bool, id uint32, items []imap.FetchItem) (*imap.Message, *protonmail.Message, error) {
-	var apiID string
-	var err error
-	if isUid {
-		apiID, err = mbox.db.FromUid(id)
-	} else {
-		apiID, err = mbox.db.FromSeqNum(id)
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-
-	seqNum, uid, err := mbox.db.FromApiID(apiID)
-	if err != nil {
-		return nil, nil, err
-	}
-
+// fetchMessage fetches items of the message apiID, which has seqNum and uid
+// in the mailbox.
+func (mbox *mailbox) fetchMessage(seqNum, uid uint32, apiID string, items []imap.FetchItem) (*imap.Message, *protonmail.Message, error) {
 	msg, err := mbox.u.db.Message(apiID)
 	if err != nil {
 		return nil, nil, err
@@ -315,49 +293,79 @@ func (mbox *mailbox) listMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fe
 	items = expandFetchItems(items)
 	opens := setsSeen(items)
 
-	for _, seq := range seqSet.Set {
-		start := seq.Start
-		if start == 0 {
-			start = 1
+	// The entries in one pass over the mailbox, in one read transaction, and
+	// the messages read after it ends (as in SearchMessages: a nested read
+	// transaction deadlocks with writers). Looking each up by number walked
+	// the mailbox twice per message.
+	entries, err := mbox.entries(uid, seqSet)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		fetched, msg, err := mbox.fetchMessage(e.seqNum, e.uid, e.apiID, items)
+		if errors.Is(err, errMessageGone) {
+			// Its delete event removes it, with an EXPUNGE, at the next
+			// poll: failing the FETCH would also drop the messages after it.
+			log.Printf("Message %v of %v skipped: %v", e.seqNum, mbox.Name(), err)
+			continue
+		} else if errors.Is(err, database.ErrNotFound) {
+			continue // deleted by an event since the entries were read
+		} else if err != nil {
+			return nil, err
 		}
-
-		stop := seq.Stop
-		if stop == 0 {
-			if uid {
-				uidNext, err := mbox.db.UidNext()
-				if err != nil {
-					return nil, err
-				}
-				stop = uidNext - 1
-			} else {
-				total, _, err := mbox.db.Count()
-				if err != nil {
-					return nil, fmt.Errorf("cannot count messages in mailbox %v: %w", mbox.Name(), err)
-				}
-				stop = uint32(total)
-			}
-		}
-
-		for i := start; i <= stop; i++ {
-			fetched, msg, err := mbox.fetchMessage(uid, i, items)
-			if errors.Is(err, errMessageGone) {
-				// Its delete event removes it, with an EXPUNGE, at the next
-				// poll: failing the FETCH would also drop the messages after it.
-				log.Printf("Message %v of %v skipped: %v", i, mbox.Name(), err)
-				continue
-			} else if errors.Is(err, database.ErrNotFound) {
-				continue
-			} else if err != nil {
-				return nil, err
-			}
-			ch <- fetched
-			if opens && msg.Unread == 1 {
-				opened = append(opened, msg.ID)
-			}
+		ch <- fetched
+		if opens && msg.Unread == 1 {
+			opened = append(opened, msg.ID)
 		}
 	}
 
 	return opened, nil
+}
+
+// mailboxEntry is a message of a mailbox with its numbers there.
+type mailboxEntry struct {
+	seqNum, uid uint32
+	apiID       string
+}
+
+// entries returns the messages of seqSet, by UID if isUID, else by sequence
+// number, in ascending order. "*" is the last message (RFC 3501 section 9,
+// seq-number), so "n:*" holds it even if n is past it.
+func (mbox *mailbox) entries(isUID bool, seqSet *imap.SeqSet) ([]mailboxEntry, error) {
+	var all []mailboxEntry
+	err := mbox.db.ForEach(func(seqNum, uid uint32, apiID string) error {
+		all = append(all, mailboxEntry{seqNum, uid, apiID})
+		return nil
+	})
+	if err != nil || len(all) == 0 {
+		return nil, err
+	}
+	last := all[len(all)-1].seqNum
+	if isUID {
+		last = all[len(all)-1].uid
+	}
+	var set imap.SeqSet
+	for _, seq := range seqSet.Set {
+		start, stop := seq.Start, seq.Stop
+		if start == 0 {
+			start = last
+		}
+		if stop == 0 {
+			stop = last
+		}
+		set.AddRange(min(start, stop), max(start, stop))
+	}
+	var picked []mailboxEntry
+	for _, e := range all {
+		id := e.seqNum
+		if isUID {
+			id = e.uid
+		}
+		if set.Contains(id) {
+			picked = append(picked, e)
+		}
+	}
+	return picked, nil
 }
 
 func matchString(s, substr string) bool {
@@ -524,20 +532,11 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 }
 
 func (mbox *mailbox) fromSeqSet(isUID bool, seqSet *imap.SeqSet) ([]string, error) {
-	var apiIDs []string
-	err := mbox.db.ForEach(func(seqNum, uid uint32, apiID string) error {
-		var id uint32
-		if isUID {
-			id = uid
-		} else {
-			id = seqNum
-		}
-
-		if seqSet.Contains(id) {
-			apiIDs = append(apiIDs, apiID)
-		}
-		return nil
-	})
+	entries, err := mbox.entries(isUID, seqSet)
+	apiIDs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		apiIDs = append(apiIDs, e.apiID)
+	}
 	return apiIDs, err
 }
 

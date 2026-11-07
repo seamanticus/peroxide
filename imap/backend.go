@@ -45,6 +45,11 @@ type backend struct {
 	sync.Mutex // protects everything below
 
 	users map[string]*user
+	// The connections logged in, by their remote and local addresses
+	// (connKey), to the user they logged in as: backend.disconnect matches
+	// connections by them, as reading go-imap's Context().User from another
+	// goroutine races with the connection writing it.
+	logins map[string]*user
 	// The server serving this backend, learnt from its first connection
 	// (Extension.NewConn): go-imap gives the backend no other way to reach
 	// the connections.
@@ -57,6 +62,15 @@ func (be *backend) setServer(s *imapserver.Server) {
 	be.server = s
 }
 
+// connKey identifies a connection by its addresses, which go-imap gives to
+// Login (ConnInfo) and to ForEachConn (Conn.Info) alike.
+func connKey(info *imap.ConnInfo) string {
+	if info == nil || info.RemoteAddr == nil || info.LocalAddr == nil {
+		return ""
+	}
+	return info.RemoteAddr.Network() + " " + info.RemoteAddr.String() + " " + info.LocalAddr.String()
+}
+
 // disconnect ends every connection logged in as u, as proton-bridge removes
 // its IMAP user. go-imap's conn.Close logs the user out, and serveConn closes
 // the connection again when it ends, which would log it out twice: so the
@@ -66,12 +80,18 @@ func (be *backend) setServer(s *imapserver.Server) {
 func (be *backend) disconnect(u *user) {
 	be.Lock()
 	s := be.server
+	keys := make(map[string]struct{})
+	for k, lu := range be.logins {
+		if lu == u {
+			keys[k] = struct{}{}
+		}
+	}
 	be.Unlock()
-	if s == nil {
+	if s == nil || len(keys) == 0 {
 		return
 	}
 	s.ForEachConn(func(c imapserver.Conn) {
-		if cu, ok := c.Context().User.(*user); !ok || cu != u {
+		if _, ok := keys[connKey(c.Info())]; !ok {
 			return
 		}
 		d, ok := c.(interface{ SetDeadline(time.Time) error })
@@ -91,7 +111,16 @@ func (be *backend) Login(info *imap.ConnInfo, username, password string) (imapba
 		return nil, err
 	}
 
-	return getUser(be, username, c, privateKeys)
+	u, err := getUser(be, username, c, privateKeys)
+	if err != nil {
+		return nil, err
+	}
+	if k := connKey(info); k != "" {
+		be.Lock()
+		be.logins[k] = u
+		be.Unlock()
+	}
+	return u, nil
 }
 
 func (be *backend) Updates() <-chan imapbackend.Update {
@@ -107,5 +136,6 @@ func New(sessions *auth.Manager, eventsManager *events.Manager, showAllMail bool
 		showAllMail:   showAllMail,
 		updates:       make(chan imapbackend.Update, 50),
 		users:         make(map[string]*user),
+		logins:        make(map[string]*user),
 	}
 }

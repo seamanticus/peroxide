@@ -194,11 +194,11 @@ func putMessage(tx *bolt.Tx, msg *protonmail.Message) (MessageChange, error) {
 			if mbox == nil {
 				continue
 			}
-			seqNum, err := mailboxDeleteMessage(mbox, labelID, msg.ID)
+			seqNum, deleted, err := mailboxDeleteMessage(mbox, labelID, msg.ID)
 			if err != nil {
 				return change, err
 			}
-			if seqNum != 0 {
+			if deleted {
 				change.Removed[labelID] = seqNum
 			}
 		}
@@ -339,19 +339,29 @@ func (u *User) SyncPage(msgs []*protonmail.Message) (changes []MessageChange, er
 	return changes, err
 }
 
-// SyncState returns where the download stands: the ID of the oldest message it
-// stored, empty before the first page, and whether it is done.
-func (u *User) SyncState() (cursor string, done bool, err error) {
-	err = u.db.View(func(tx *bolt.Tx) error {
+// SyncState is where the download stands.
+type SyncState struct {
+	// Cursor is the ID of the oldest message stored, if Started.
+	Cursor  string
+	Started bool // a page was stored
+	Done    bool // every message was stored
+}
+
+// SyncState returns where the download stands.
+func (u *User) SyncState() (SyncState, error) {
+	var s SyncState
+	err := u.db.View(func(tx *bolt.Tx) error {
 		meta := tx.Bucket(metaBucket)
 		if meta == nil {
 			return nil
 		}
-		cursor = string(meta.Get(syncCursorKey))
-		done = meta.Get(syncDoneKey) != nil
+		if v := meta.Get(syncCursorKey); v != nil {
+			s.Cursor, s.Started = string(v), true
+		}
+		s.Done = meta.Get(syncDoneKey) != nil
 		return nil
 	})
-	return cursor, done, err
+	return s, err
 }
 
 // SetSyncDone records that every message has been downloaded, and returns
@@ -499,11 +509,11 @@ func (u *User) UpdateMessage(apiID string, update *protonmail.EventMessageUpdate
 				continue
 			}
 
-			seqNum, err := mailboxDeleteMessage(mbox, labelID, apiID)
+			seqNum, deleted, err := mailboxDeleteMessage(mbox, labelID, apiID)
 			if err != nil {
 				return err
 			}
-			if seqNum != 0 {
+			if deleted {
 				deletedSeqNums[labelID] = seqNum
 			}
 		}
@@ -537,11 +547,11 @@ func (u *User) DeleteMessage(apiID string) (seqNums map[string]uint32, err error
 					continue
 				}
 
-				seqNum, err := mailboxDeleteMessage(mbox, labelID, msg.ID)
+				seqNum, deleted, err := mailboxDeleteMessage(mbox, labelID, msg.ID)
 				if err != nil {
 					return err
 				}
-				if seqNum != 0 {
+				if deleted {
 					seqNums[labelID] = seqNum
 				}
 			}

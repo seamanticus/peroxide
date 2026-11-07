@@ -71,8 +71,8 @@ func (u *user) download(stop <-chan struct{}, deliver func([]imapbackend.Update)
 	for {
 		pageStored, finished := u.downloadPage(ctx, stop, deliver)
 		if finished {
-			_, done, err := u.db.SyncState()
-			return err == nil && done
+			s, err := u.db.SyncState()
+			return err == nil && s.Done
 		}
 		if pageStored {
 			continue
@@ -94,15 +94,15 @@ func (u *user) download(stop <-chan struct{}, deliver func([]imapbackend.Update)
 func (u *user) downloadPage(ctx context.Context, stop <-chan struct{}, deliver func([]imapbackend.Update)) (pageStored, finished bool) {
 	// Only the download writes the cursor: reading it without syncSem is
 	// safe, and a Wipe stops the download first.
-	cursor, done, err := u.db.SyncState()
+	state, err := u.db.SyncState()
 	if err != nil {
 		log.Printf("cannot read where the download of %q stands: %v", u.u.Name, err)
 		return false, false
 	}
-	if done {
+	if state.Done {
 		return false, true
 	}
-	if cursor == "" {
+	if !state.Started {
 		// Before the first request: every event applied after this one may
 		// be undone by a page fetched before it. Under syncSem, so that no
 		// event page is half applied. SetSyncStart keeps the first start of
@@ -121,16 +121,17 @@ func (u *user) downloadPage(ctx context.Context, stop <-chan struct{}, deliver f
 		}
 	}
 
-	page, err := u.c.MessageMetadataPage(ctx, cursor, protonmail.MetadataPageSize)
+	// No cursor before the first page: the newest messages are asked for.
+	page, err := u.c.MessageMetadataPage(ctx, state.Cursor, protonmail.MetadataPageSize)
 	if ctx.Err() != nil {
 		return false, true // stopped
 	}
 	if err != nil {
-		log.Printf("cannot download messages of %q before %q: %v (retrying in %v)", u.u.Name, cursor, err, downloadRetryDelay)
+		log.Printf("cannot download messages of %q before %q: %v (retrying in %v)", u.u.Name, state.Cursor, err, downloadRetryDelay)
 		return false, false
 	}
 	// The message the page ends at comes first if Proton still has it.
-	if len(page) > 0 && cursor != "" && page[0].ID == cursor {
+	if len(page) > 0 && state.Started && page[0].ID == state.Cursor {
 		page = page[1:]
 	}
 

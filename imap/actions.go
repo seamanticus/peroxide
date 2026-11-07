@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
+	"slices"
 
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
@@ -43,20 +45,21 @@ func (u *user) applyUpdate(apiID string, update *protonmail.EventMessageUpdate) 
 	}
 
 	var updates []imapbackend.Update
-	for labelID, seqNum := range createdSeqNums {
+	// Label ID order, not map order: logs and tests see the same each time.
+	for _, labelID := range slices.Sorted(maps.Keys(createdSeqNums)) {
 		if mbox := u.getMailboxByLabel(labelID); mbox != nil {
 			up := new(imapbackend.MailboxUpdate)
 			up.Update = newMailboxUpdate(u.u.Name, mbox)
 			up.MailboxStatus = imap.NewMailboxStatus(mbox.Name(), []imap.StatusItem{imap.StatusMessages})
-			up.MailboxStatus.Messages = seqNum
+			up.MailboxStatus.Messages = createdSeqNums[labelID]
 			updates = append(updates, up)
 		}
 	}
-	for labelID, seqNum := range deletedSeqNums {
+	for _, labelID := range slices.Sorted(maps.Keys(deletedSeqNums)) {
 		if mbox := u.getMailboxByLabel(labelID); mbox != nil {
 			up := new(imapbackend.ExpungeUpdate)
 			up.Update = newMailboxUpdate(u.u.Name, mbox)
-			up.SeqNum = seqNum
+			up.SeqNum = deletedSeqNums[labelID]
 			updates = append(updates, up)
 		}
 	}
@@ -103,11 +106,11 @@ func (u *user) applyDelete(apiID string) ([]imapbackend.Update, error) {
 	}
 
 	var updates []imapbackend.Update
-	for labelID, seqNum := range seqNums {
+	for _, labelID := range slices.Sorted(maps.Keys(seqNums)) {
 		if mbox := u.getMailboxByLabel(labelID); mbox != nil {
 			up := new(imapbackend.ExpungeUpdate)
 			up.Update = newMailboxUpdate(u.u.Name, mbox)
-			up.SeqNum = seqNum
+			up.SeqNum = seqNums[labelID]
 			updates = append(updates, up)
 		}
 	}

@@ -431,6 +431,7 @@ func (u *user) closeAfterLogout() {
 	defer u.Unlock()
 
 	delete(u.backend.users, u.username)
+	maps.DeleteFunc(u.backend.logins, func(_ string, lu *user) bool { return lu == u })
 	u.c = nil
 	u.u = nil
 	u.privateKeys = nil
@@ -704,11 +705,11 @@ const unknownMessageTimeout = 30 * time.Second
 // proton-bridge creates a message an update finds missing. It returns the
 // updates telling clients. A network error is retryable.
 func (u *user) updateUnknownMessage(apiID string) ([]imapbackend.Update, error) {
-	_, done, err := u.db.SyncState()
+	state, err := u.db.SyncState()
 	if err != nil {
 		return nil, fmt.Errorf("cannot read where the download stands: %w", err)
 	}
-	if !done {
+	if !state.Done {
 		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), unknownMessageTimeout)

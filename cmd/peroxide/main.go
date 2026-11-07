@@ -499,8 +499,8 @@ func main() {
 			log.Fatal(err)
 		}
 
-		// The download needs the session only, not the keys: metadata isn't
-		// decrypted.
+		// Auth unlocks the keys too, as every command does; the download
+		// uses only the session, as metadata isn't decrypted.
 		c, _, err := auth.NewManager(newClient).Auth(username, bridgePassword)
 		if err != nil {
 			log.Fatal(err)

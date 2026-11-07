@@ -196,47 +196,61 @@ func mailboxCreateMessage(b *bolt.Bucket, labelID, apiID string) (seqNum uint32,
 	return c.total, true, err
 }
 
-// seqNumOf returns the sequence number of uid in uids, 0 if it isn't there.
-func seqNumOf(uids *bolt.Bucket, uid uint32) uint32 {
+// seqNumOf returns the sequence number of uid in uids, and whether uids has
+// it.
+func seqNumOf(uids *bolt.Bucket, uid uint32) (uint32, bool) {
+	want := serializeUID(uid)
 	var n uint32 = 1
 	c := uids.Cursor()
 	for k, _ := c.First(); k != nil; k, _ = c.Next() {
-		if unserializeUID(k) == uid {
-			return n
+		if string(k) == string(want) {
+			return n, true
 		}
 		n++
 	}
-	return 0
+	return 0, false
+}
+
+// storedUID decodes a UID read from the ids index of mailbox labelID.
+func storedUID(v []byte, labelID string) (uint32, error) {
+	if len(v) != 4 {
+		return 0, fmt.Errorf("mailbox %v holds a UID of %v bytes, not 4: the database is damaged", labelID, len(v))
+	}
+	return unserializeUID(v), nil
 }
 
 // mailboxDeleteMessage removes apiID from the mailbox, and returns the sequence
-// number it had, or 0 if it wasn't there.
-func mailboxDeleteMessage(b *bolt.Bucket, labelID, apiID string) (seqNum uint32, err error) {
+// number it had, and whether it was there.
+func mailboxDeleteMessage(b *bolt.Bucket, labelID, apiID string) (seqNum uint32, deleted bool, err error) {
 	uids, ids, err := mailboxIndexes(b)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	k := []byte(apiID)
-	uid := ids.Get(k)
-	if uid == nil {
-		return 0, nil
+	v := ids.Get(k)
+	if v == nil {
+		return 0, false, nil
 	}
-	seqNum = seqNumOf(uids, unserializeUID(uid))
-	if seqNum == 0 {
-		return 0, fmt.Errorf("message %v has UID %v in mailbox %v, which lists no such UID", apiID, unserializeUID(uid), labelID)
+	uid, err := storedUID(v, labelID)
+	if err != nil {
+		return 0, false, err
+	}
+	seqNum, ok := seqNumOf(uids, uid)
+	if !ok {
+		return 0, false, fmt.Errorf("message %v has UID %v in mailbox %v, which lists no such UID", apiID, uid, labelID)
 	}
 
 	unread, err := messageUnread(b.Tx().Bucket(messagesBucket), apiID)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	if err := uids.Delete(uid); err != nil {
-		return 0, err
+	if err := uids.Delete(v); err != nil {
+		return 0, false, err
 	}
 	if err := ids.Delete(k); err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return seqNum, adjustCounts(b.Tx(), labelID, -1, -unreadCount(unread))
+	return seqNum, true, adjustCounts(b.Tx(), labelID, -1, -unreadCount(unread))
 }
 
 type Mailbox struct {
@@ -268,40 +282,54 @@ func (mbox *Mailbox) indexes(tx *bolt.Tx) (uids, ids *bolt.Bucket, err error) {
 	return uids, ids, nil
 }
 
-// UidNext returns the UID the next message added will get.
-func (mbox *Mailbox) UidNext() (uint32, error) {
-	var uid uint32
-	err := mbox.u.db.View(func(tx *bolt.Tx) error {
-		uids, _, err := mbox.indexes(tx)
-		if err != nil {
-			return err
-		}
-		seq := uids.Sequence()
-		if seq >= math.MaxUint32 {
-			return fmt.Errorf("no UID left in mailbox %v", mbox.labelID)
-		}
-		uid = uint32(seq + 1)
-		return nil
-	})
-	return uid, err
+// MailboxStatus is what STATUS and SELECT report of a mailbox, read in one
+// transaction, so that no change falls between its fields.
+type MailboxStatus struct {
+	Total, Unread uint32
+	UidNext       uint32 // the UID the next message added will get
+	UidValidity   uint32 // given when the mailbox was created
 }
 
-// UidValidity returns the mailbox's UIDVALIDITY, given when it was created.
-func (mbox *Mailbox) UidValidity() (uint32, error) {
-	var uidValidity uint32
+// Status returns the mailbox's counts, UIDNEXT and UIDVALIDITY.
+func (mbox *Mailbox) Status() (MailboxStatus, error) {
+	var s MailboxStatus
 	err := mbox.u.db.View(func(tx *bolt.Tx) error {
 		b, err := mbox.bucket(tx)
 		if err != nil {
 			return err
 		}
+		uids, _, err := mailboxIndexes(b)
+		if err != nil {
+			return fmt.Errorf("mailbox %v: %w", mbox.labelID, err)
+		}
+		seq := uids.Sequence()
+		if seq >= math.MaxUint32 {
+			return fmt.Errorf("no UID left in mailbox %v", mbox.labelID)
+		}
 		v := b.Get(uidValidityKey)
 		if len(v) != 4 {
 			return fmt.Errorf("mailbox %v has no UIDVALIDITY", mbox.labelID)
 		}
-		uidValidity = unserializeUID(v)
+		c, err := getCounts(tx, mbox.labelID)
+		if err != nil {
+			return err
+		}
+		s = MailboxStatus{Total: c.total, Unread: c.unread, UidNext: uint32(seq + 1), UidValidity: unserializeUID(v)}
 		return nil
 	})
-	return uidValidity, err
+	return s, err
+}
+
+// UidNext returns the UID the next message added will get.
+func (mbox *Mailbox) UidNext() (uint32, error) {
+	s, err := mbox.Status()
+	return s.UidNext, err
+}
+
+// UidValidity returns the mailbox's UIDVALIDITY, given when it was created.
+func (mbox *Mailbox) UidValidity() (uint32, error) {
+	s, err := mbox.Status()
+	return s.UidValidity, err
 }
 
 // Count returns the number of messages in the mailbox, which is also its
@@ -315,44 +343,6 @@ func (mbox *Mailbox) Count() (total, unread int, err error) {
 	return total, unread, err
 }
 
-func (mbox *Mailbox) FromUid(uid uint32) (apiID string, err error) {
-	err = mbox.u.db.View(func(tx *bolt.Tx) error {
-		uids, _, err := mbox.indexes(tx)
-		if err != nil {
-			return err
-		}
-		v := uids.Get(serializeUID(uid))
-		if v == nil {
-			return ErrNotFound
-		}
-		apiID = string(v)
-		return nil
-	})
-	return
-}
-
-func (mbox *Mailbox) FromSeqNum(seqNum uint32) (apiID string, err error) {
-	err = mbox.u.db.View(func(tx *bolt.Tx) error {
-		uids, _, err := mbox.indexes(tx)
-		if err != nil {
-			return err
-		}
-
-		c := uids.Cursor()
-		var n uint32 = 1
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			if seqNum == n {
-				apiID = string(v)
-				return nil
-			}
-			n++
-		}
-
-		return ErrNotFound
-	})
-	return
-}
-
 func (mbox *Mailbox) FromApiID(apiID string) (seqNum uint32, uid uint32, err error) {
 	err = mbox.u.db.View(func(tx *bolt.Tx) error {
 		uids, ids, err := mbox.indexes(tx)
@@ -363,8 +353,11 @@ func (mbox *Mailbox) FromApiID(apiID string) (seqNum uint32, uid uint32, err err
 		if v == nil {
 			return ErrNotFound
 		}
-		uid = unserializeUID(v)
-		if seqNum = seqNumOf(uids, uid); seqNum == 0 {
+		if uid, err = storedUID(v, mbox.labelID); err != nil {
+			return err
+		}
+		var ok bool
+		if seqNum, ok = seqNumOf(uids, uid); !ok {
 			return fmt.Errorf("message %v has UID %v in mailbox %v, which lists no such UID", apiID, uid, mbox.labelID)
 		}
 		return nil

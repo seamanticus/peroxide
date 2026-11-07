@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	bolt "go.etcd.io/bbolt"
+
+	"github.com/seamanticus/peroxide/config"
 	"github.com/seamanticus/peroxide/protonmail"
 )
 
@@ -192,6 +195,55 @@ func TestPutMessageIdempotent(t *testing.T) {
 	}
 }
 
+// A database of another schema version (any before 2, which has no version)
+// is wiped when opened, with the version then stamped; one held open by
+// another handle fails with ErrInUse rather than waiting.
+func TestOpenWipesOldSchemaAndRefusesSecondOpener(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("AppData", dir)
+	p, err := config.Path("old.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What a peroxide before schema version 2 leaves: buckets, no meta.
+	old, err := bolt.Open(p, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucket([]byte("mailboxes"))
+		if err != nil {
+			return err
+		}
+		_, err = b.CreateBucket([]byte("0"))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open("old.db")
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	inbox, err := db.Mailbox("0")
+	if err != nil {
+		t.Fatalf("Mailbox() = %v", err)
+	}
+	if s, err := inbox.Status(); err != nil || s.Total != 0 || s.UidValidity == 0 {
+		t.Errorf("Status() of the wiped INBOX = %+v, %v; want empty with a UIDVALIDITY", s, err)
+	}
+
+	if _, err := Open("old.db"); !errors.Is(err, ErrInUse) {
+		t.Errorf("second Open() = %v, want ErrInUse", err)
+	}
+}
+
 // The download's cursor is stored with each page, so it resumes after a
 // restart; Wipe forgets it, the event ID, the messages and the rebuild asked
 // for, and mailboxes made again get a higher UIDVALIDITY.
@@ -213,8 +265,8 @@ func TestWipe(t *testing.T) {
 	_, validity := uidsOf(t, inbox)
 
 	db = reopen()
-	if cursor, done, err := db.SyncState(); err != nil || cursor != "a" || done {
-		t.Errorf("SyncState() = %q, %v, %v after a restart; want a, false", cursor, done, err)
+	if s, err := db.SyncState(); err != nil || s != (SyncState{Cursor: "a", Started: true}) {
+		t.Errorf("SyncState() = %+v, %v after a restart; want cursor a, started", s, err)
 	}
 	if rebuild, err := db.NeedsRebuild(); err != nil || !rebuild {
 		t.Errorf("NeedsRebuild() = %v, %v after a restart; want true", rebuild, err)
@@ -223,8 +275,8 @@ func TestWipe(t *testing.T) {
 	if err := db.Wipe(); err != nil {
 		t.Fatalf("Wipe() = %v", err)
 	}
-	if cursor, done, err := db.SyncState(); err != nil || cursor != "" || done {
-		t.Errorf("SyncState() = %q, %v, %v after Wipe; want empty, false", cursor, done, err)
+	if s, err := db.SyncState(); err != nil || s != (SyncState{}) {
+		t.Errorf("SyncState() = %+v, %v after Wipe; want not started", s, err)
 	}
 	if rebuild, err := db.NeedsRebuild(); err != nil || rebuild {
 		t.Errorf("NeedsRebuild() = %v, %v after Wipe; want false", rebuild, err)

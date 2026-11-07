@@ -261,27 +261,6 @@ type MessageCount struct {
 	Unread  int
 }
 
-func (c *Client) CountMessages(address string) ([]*MessageCount, error) {
-	v := url.Values{}
-	if address != "" {
-		v.Set("Address", address)
-	}
-	req, err := c.newRequest(http.MethodGet, "/messages/count?"+v.Encode(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var respData struct {
-		resp
-		Counts []*MessageCount
-	}
-	if err := c.doJSON(req, &respData); err != nil {
-		return nil, err
-	}
-
-	return respData.Counts, nil
-}
-
 func (c *Client) GetMessage(id string) (*Message, error) {
 	req, err := c.newRequest(http.MethodGet, "/messages/"+id, nil)
 	if err != nil {

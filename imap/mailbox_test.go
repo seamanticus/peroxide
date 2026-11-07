@@ -1,12 +1,17 @@
 package imap
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"maps"
+	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -16,6 +21,7 @@ import (
 
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
+	imapserver "github.com/emersion/go-imap/server"
 
 	"github.com/seamanticus/peroxide/imap/database"
 	"github.com/seamanticus/peroxide/protonmail"
@@ -276,6 +282,111 @@ func mailboxNames(u *user) map[string]string {
 	return names
 }
 
+// A folder created by a Labels event after its messages were stored (moved
+// into it in the same page, or downloaded first) opens holding them, its
+// counts with it.
+func TestLabelEventFolderHoldsStoredMessages(t *testing.T) {
+	inbox, db := newTestMailbox(t, nil)
+	if _, err := db.CreateMessage(&protonmail.Message{ID: "a", Unread: 1, LabelIDs: []string{"f"}}); err != nil {
+		t.Fatal(err)
+	}
+	u := inbox.u
+	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
+	u.flags = map[string]string{}
+	events := make(chan *protonmail.Event, 1)
+	events <- &protonmail.Event{ID: "e1", Labels: []*protonmail.EventLabel{{
+		ID: "f", Action: protonmail.EventCreate,
+		Label: &protonmail.Label{ID: "f", Name: "Work", Type: protonmail.LabelMessage, Exclusive: 1},
+	}}}
+	close(events)
+	u.receiveEvents(make(chan imapbackend.Update, 10), events)
+
+	folder := u.getMailboxByLabel("f")
+	if folder == nil {
+		t.Fatal("no mailbox for the folder created")
+	}
+	checkStatus(t, folder, 1, 1)
+}
+
+// "*" is the last message, by UID or sequence number (RFC 3501 section 9),
+// so "n:*" holds it even when n is past it, and ranges are taken either way
+// round. Gaps in UIDs (expunged messages) are not filled.
+// evidence: witnesses
+func TestEntriesStar(t *testing.T) {
+	mbox, db := newTestMailbox(t, []*protonmail.Message{inboxMessage("a", 0), inboxMessage("b", 0), inboxMessage("c", 0)})
+	if _, err := db.DeleteMessage("b"); err != nil {
+		t.Fatal(err)
+	}
+	// a: seq 1 UID 1; c: seq 2 UID 3.
+	for _, tc := range []struct {
+		set  string
+		uid  bool
+		want []string
+	}{
+		{"1:*", false, []string{"a", "c"}},
+		{"*", false, []string{"c"}},
+		{"5:*", false, []string{"c"}},
+		{"2:1", false, []string{"a", "c"}},
+		{"3", false, nil},
+		{"2", true, nil},
+		{"3", true, []string{"c"}},
+		{"10:*", true, []string{"c"}},
+		{"*:1", true, []string{"a", "c"}},
+	} {
+		seqSet, err := imap.ParseSeqSet(tc.set)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := mbox.fromSeqSet(tc.uid, seqSet)
+		if err != nil || !slices.Equal(got, tc.want) {
+			t.Errorf("fromSeqSet(uid %v, %v) = %v, %v; want %v", tc.uid, tc.set, got, err, tc.want)
+		}
+	}
+}
+
+// BenchmarkFetchFlags is FETCH 1:* (FLAGS) of a mailbox of 5000 messages,
+// the database's part of what aerc asks when it opens a folder.
+func BenchmarkFetchFlags(b *testing.B) {
+	dir := b.TempDir()
+	b.Setenv("XDG_CONFIG_HOME", dir)
+	b.Setenv("HOME", dir)
+	b.Setenv("AppData", dir)
+	db, err := database.Open("bench.db")
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { db.Close() })
+	mboxDB, err := db.Mailbox(protonmail.LabelInbox)
+	if err != nil {
+		b.Fatal(err)
+	}
+	var page []*protonmail.Message
+	for i := range 5000 {
+		page = append(page, inboxMessage(fmt.Sprintf("m%05d", i), i%2))
+	}
+	if _, err := db.SyncPage(page); err != nil {
+		b.Fatal(err)
+	}
+	mbox := &mailbox{
+		name: imap.InboxName, label: protonmail.LabelInbox, db: mboxDB, deleted: make(map[string]struct{}),
+		u: &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), flags: map[string]string{}},
+	}
+	all, err := imap.ParseSeqSet("1:*")
+	if err != nil {
+		b.Fatal(err)
+	}
+	for b.Loop() {
+		ch := make(chan *imap.Message)
+		go func() {
+			for range ch {
+			}
+		}()
+		if _, err := mbox.listMessages(false, all, []imap.FetchItem{imap.FetchFlags}, ch); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // Folders and labels created, renamed and deleted in Proton change mailboxes
 // and flags without waiting for the next login, and without telling clients.
 func TestLabelEvents(t *testing.T) {
@@ -407,6 +518,52 @@ func TestAddressEvents(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// disconnect finds the connections logged in as a user by their addresses,
+// as go-imap gives them to Login, and ends them through the deadline: the
+// client sees the connection close, and other connections stay.
+func TestDisconnectClosesItsConnections(t *testing.T) {
+	be := &backend{users: make(map[string]*user), logins: make(map[string]*user), updates: make(chan imapbackend.Update)}
+	s := imapserver.New(be)
+	s.Enable(Extension{})
+	s.ErrorLog = log.New(io.Discard, "", 0)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go s.Serve(l)
+	t.Cleanup(func() { s.Close() })
+
+	dial := func() net.Conn {
+		t.Helper()
+		c, err := net.Dial("tcp", l.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		// The greeting: the server has the connection from then on.
+		if _, err := bufio.NewReader(c).ReadString('\n'); err != nil {
+			t.Fatalf("read greeting: %v", err)
+		}
+		return c
+	}
+	kept, ended := dial(), dial()
+
+	bob := &user{username: "bob"}
+	// What Login records, with the addresses as the server sees them.
+	key := "tcp " + ended.LocalAddr().String() + " " + ended.RemoteAddr().String()
+	be.logins[key] = bob
+	be.disconnect(bob)
+
+	ended.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.ReadAll(ended); err != nil {
+		t.Errorf("reading the ended connection: %v, want EOF", err)
+	}
+	kept.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, err := kept.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("reading the other connection = %v, want it still open", err)
+	}
+}
 
 // The last Logout can come while the events goroutine is still applying a
 // page, blocked sending its updates: go-imap calls Logout with its server
@@ -694,8 +851,8 @@ func TestDownloadAndEventsInterleave(t *testing.T) {
 			t.Errorf("UIDs = %v, want %v", got, want)
 		}
 		checkStatus(t, inbox, 6, 2)
-		if _, done, err := u.db.SyncState(); err != nil || !done {
-			t.Errorf("SyncState() done = %v, %v; want true", done, err)
+		if s, err := u.db.SyncState(); err != nil || !s.Done {
+			t.Errorf("SyncState() = %+v, %v; want done", s, err)
 		}
 		rw.mu.Lock()
 		rewinds, polls := slices.Clone(rw.rewinds), rw.polls
