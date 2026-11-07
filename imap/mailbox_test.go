@@ -93,7 +93,7 @@ func newTestMailbox(t *testing.T, msgs []*protonmail.Message, extraLabels ...str
 	return &mailbox{
 		name:    imap.InboxName,
 		label:   protonmail.LabelInbox,
-		u:       &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), syncSem: make(chan struct{}, 1), sendSem: make(chan struct{}, 1)},
+		u:       &user{db: db, u: &protonmail.User{Name: "bob"}, syncSem: make(chan struct{}, 1), sendSem: make(chan struct{}, 1)},
 		db:      mboxDB,
 		deleted: make(map[string]struct{}),
 	}, db
@@ -376,7 +376,7 @@ func BenchmarkFetchFlags(b *testing.B) {
 	}
 	mbox := &mailbox{
 		name: imap.InboxName, label: protonmail.LabelInbox, db: mboxDB, deleted: make(map[string]struct{}),
-		u: &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), flags: map[string]string{}},
+		u: &user{db: db, u: &protonmail.User{Name: "bob"}, flags: map[string]string{}},
 	}
 	all, err := imap.ParseSeqSet("1:*")
 	if err != nil {
@@ -1117,7 +1117,7 @@ func TestInitSessionAsksLatestEventFirst(t *testing.T) {
 				"/events/latest": `{"Code":1000,"EventID":"latest1","More":0}`,
 				"/labels":        `{"Code":1000,"Labels":[]}`,
 			}
-			u := &user{db: db, u: &protonmail.User{Name: "bob"}, messages: newMessageCache(), syncSem: make(chan struct{}, 1), sendSem: make(chan struct{}, 1)}
+			u := &user{db: db, u: &protonmail.User{Name: "bob"}, syncSem: make(chan struct{}, 1), sendSem: make(chan struct{}, 1)}
 			u.c = &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{
 				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 					requests = append(requests, r.URL.Path)

@@ -166,42 +166,54 @@ func (mbox *mailbox) fetchFlags(msg *protonmail.Message) []string {
 }
 
 // fetchMessage fetches items of the message apiID, which has seqNum and uid
-// in the mailbox.
+// in the mailbox. FLAGS, INTERNALDATE and UID come from the metadata; every
+// other item from the message as stored, which is built and stored first if
+// it isn't, so that what is served never changes under a UID.
 func (mbox *mailbox) fetchMessage(seqNum, uid uint32, apiID string, items []imap.FetchItem) (*imap.Message, *protonmail.Message, error) {
+	sections, err := parseSections(items)
+	if err != nil {
+		return nil, nil, err
+	}
 	msg, err := mbox.u.db.Message(apiID)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	var rec *database.BodyRecord
+	var literal []byte
+	if needsContent(items) {
+		if rec, literal, err = mbox.u.storedMessage(apiID); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	fetched := imap.NewMessage(seqNum, items)
 	for _, item := range items {
 		switch item {
 		case imap.FetchEnvelope:
-			fetched.Envelope = fetchEnvelope(msg)
-		case imap.FetchBody, imap.FetchBodyStructure:
-			bs, err := mbox.fetchBodyStructure(msg, item == imap.FetchBodyStructure)
-			if err != nil {
-				return nil, nil, err
-			}
-			fetched.BodyStructure = bs
+			fetched.Envelope = rec.Envelope
+		case imap.FetchBodyStructure:
+			fetched.BodyStructure = rec.BodyStructure
+		case imap.FetchBody:
+			fetched.BodyStructure = withoutExtension(rec.BodyStructure)
 		case imap.FetchFlags:
 			fetched.Flags = mbox.fetchFlags(msg)
 		case imap.FetchInternalDate:
 			fetched.InternalDate = msg.Time.Time()
 		case imap.FetchRFC822Size:
-			fetched.Size = uint32(msg.Size)
+			fetched.Size = rec.Size
 		case imap.FetchUid:
 			fetched.Uid = uid
-		case imap.FetchRFC822, imap.FetchRFC822Header, imap.FetchRFC822Text:
-			// Old names of BODY[], BODY.PEEK[HEADER] and BODY[TEXT].
-			if err := mbox.fetchSection(fetched, msg, item); err != nil {
-				return nil, nil, err
-			}
 		case imap.FetchAll, imap.FetchFast, imap.FetchFull:
 			panic("invariant: ListMessages expands FETCH macros")
+		case imap.FetchRFC822, imap.FetchRFC822Header, imap.FetchRFC822Text:
+			// The old names of BODY[], BODY.PEEK[HEADER] and BODY[TEXT].
+			if err := addSection(fetched, sections[item], literal, rec, apiID); err != nil {
+				return nil, nil, err
+			}
 		default:
 			// BODY[...] and BODY.PEEK[...], which name any section.
-			if err := mbox.fetchSection(fetched, msg, item); err != nil {
+			if err := addSection(fetched, sections[item], literal, rec, apiID); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -210,20 +222,61 @@ func (mbox *mailbox) fetchMessage(seqNum, uid uint32, apiID string, items []imap
 	return fetched, msg, nil
 }
 
-// fetchSection adds the body section item names to fetched. An item that
-// names no section is an error: answering without it would drop it silently.
-func (mbox *mailbox) fetchSection(fetched *imap.Message, msg *protonmail.Message, item imap.FetchItem) error {
-	section, err := imap.ParseBodySectionName(item)
+// addSection adds section of the stored message literal, of record rec, to
+// fetched.
+func addSection(fetched *imap.Message, section *imap.BodySectionName, literal []byte, rec *database.BodyRecord, apiID string) error {
+	l, err := bodySection(literal, rec.BodyStructure, section)
 	if err != nil {
-		return fmt.Errorf("unknown FETCH item %v: %w", item, err)
-	}
-
-	l, err := mbox.fetchBodySection(msg, section)
-	if err != nil {
-		return err
+		return fmt.Errorf("cannot fetch %v of message %v: %w", section.FetchItem(), apiID, err)
 	}
 	fetched.Body[section] = l
 	return nil
+}
+
+// parseSections returns the body sections items name, by item. An item that
+// is neither a known one nor a section is an error: answering without it
+// would drop it silently.
+func parseSections(items []imap.FetchItem) (map[imap.FetchItem]*imap.BodySectionName, error) {
+	sections := make(map[imap.FetchItem]*imap.BodySectionName)
+	for _, item := range items {
+		switch item {
+		case imap.FetchEnvelope, imap.FetchBody, imap.FetchBodyStructure, imap.FetchFlags,
+			imap.FetchInternalDate, imap.FetchRFC822Size, imap.FetchUid,
+			imap.FetchAll, imap.FetchFast, imap.FetchFull:
+			continue
+		case imap.FetchRFC822, imap.FetchRFC822Header, imap.FetchRFC822Text:
+			// Sections under their old names, which ParseBodySectionName
+			// reads as the sections they name.
+		default:
+			// BODY[...] and BODY.PEEK[...], or an item go-imap doesn't
+			// know.
+		}
+		section, err := imap.ParseBodySectionName(item)
+		if err != nil {
+			return nil, fmt.Errorf("unknown FETCH item %v: %w", item, err)
+		}
+		sections[item] = section
+	}
+	return sections, nil
+}
+
+// needsContent reports whether fetching items reads the message's contents,
+// not only its metadata.
+func needsContent(items []imap.FetchItem) bool {
+	for _, item := range items {
+		switch item {
+		case imap.FetchFlags, imap.FetchInternalDate, imap.FetchUid:
+		case imap.FetchEnvelope, imap.FetchBody, imap.FetchBodyStructure, imap.FetchRFC822Size,
+			imap.FetchRFC822, imap.FetchRFC822Header, imap.FetchRFC822Text:
+			return true
+		case imap.FetchAll, imap.FetchFast, imap.FetchFull:
+			panic("invariant: ListMessages expands FETCH macros")
+		default:
+			// BODY[...] and BODY.PEEK[...].
+			return true
+		}
+	}
+	return false
 }
 
 // expandFetchItems replaces the FETCH macros ALL, FAST and FULL in items by

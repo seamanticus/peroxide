@@ -1,20 +1,15 @@
 package imap
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"slices"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	pgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
-	"github.com/emersion/go-imap"
-	"github.com/emersion/go-imap/backend/backendutil"
 	"github.com/emersion/go-message"
-	"github.com/emersion/go-message/textproto"
 
 	"github.com/seamanticus/peroxide/protonmail"
 )
@@ -45,15 +40,15 @@ import (
 // the encrypted data (go-crypto openpgp.ReadMessage). A body encrypted to an
 // account key that isn't unlocked isn't passed through: the user's own
 // client couldn't open it either.
-func (mbox *mailbox) passThrough(msg *protonmail.Message) bool {
+func (u *user) passThrough(msg *protonmail.Message) bool {
 	if len(msg.Attachments) > 0 {
 		return false
 	}
-	_, err := msg.Read(mbox.u.privateKeys, nil)
+	_, err := msg.Read(u.privateKeys, nil)
 	if !errors.Is(err, pgperrors.ErrKeyIncorrect) {
 		return false
 	}
-	toAccount, err := mbox.encryptedToAccount(msg)
+	toAccount, err := u.encryptedToAccount(msg)
 	if err != nil {
 		log.Printf("cannot read the keys message %v is encrypted to: %v", msg.ID, err)
 		return false
@@ -63,12 +58,12 @@ func (mbox *mailbox) passThrough(msg *protonmail.Message) bool {
 
 // encryptedToAccount reports whether the body of msg is encrypted to a key of
 // the account, unlocked or not. A hidden recipient (key ID 0) names no key.
-func (mbox *mailbox) encryptedToAccount(msg *protonmail.Message) (bool, error) {
+func (u *user) encryptedToAccount(msg *protonmail.Message) (bool, error) {
 	keyIDs, err := msg.EncryptedTo()
 	if err != nil {
 		return false, err
 	}
-	account := mbox.u.accountKeys()
+	account := u.accountKeys()
 	for _, id := range keyIDs {
 		if id != 0 && len(account.KeysById(id)) > 0 {
 			return true, nil
@@ -123,7 +118,7 @@ func passThroughMessage(msg *protonmail.Message) ([]byte, error) {
 	var versionHeader message.Header
 	versionHeader.SetContentType("application/pgp-encrypted", nil)
 	versionHeader.Set("Content-Description", "PGP/MIME version identification")
-	if err := writePart(w, versionHeader, "Version: 1\r\n"); err != nil {
+	if err := writePart(w, versionHeader, []byte("Version: 1\r\n")); err != nil {
 		return nil, fmt.Errorf("cannot write PGP/MIME version part: %w", err)
 	}
 
@@ -131,7 +126,7 @@ func passThroughMessage(msg *protonmail.Message) ([]byte, error) {
 	dataHeader.SetContentType("application/octet-stream", map[string]string{"name": "encrypted.asc"})
 	dataHeader.SetContentDisposition("inline", map[string]string{"filename": "encrypted.asc"})
 	dataHeader.Set("Content-Description", "OpenPGP encrypted message")
-	if err := writePart(w, dataHeader, msg.Body); err != nil {
+	if err := writePart(w, dataHeader, []byte(msg.Body)); err != nil {
 		return nil, fmt.Errorf("cannot write PGP/MIME data part: %w", err)
 	}
 
@@ -141,49 +136,14 @@ func passThroughMessage(msg *protonmail.Message) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-func writePart(w *message.Writer, h message.Header, body string) error {
+// writePart writes a part of header h and body to w, encoded as h says.
+func writePart(w *message.Writer, h message.Header, body []byte) error {
 	pw, err := w.CreatePart(h)
 	if err != nil {
 		return err
 	}
-	if _, err := io.WriteString(pw, body); err != nil {
+	if _, err := pw.Write(body); err != nil {
 		return err
 	}
 	return pw.Close()
-}
-
-// readPassThrough returns the header and body of passThroughMessage(msg),
-// for go-imap's helpers, which compute sections and structures from them.
-func readPassThrough(msg *protonmail.Message) (textproto.Header, *bytes.Reader, error) {
-	raw, err := passThroughMessage(msg)
-	if err != nil {
-		return textproto.Header{}, nil, err
-	}
-	br := bufio.NewReader(bytes.NewReader(raw))
-	h, err := textproto.ReadHeader(br)
-	if err != nil {
-		return textproto.Header{}, nil, fmt.Errorf("cannot read PGP/MIME header: %w", err)
-	}
-	rest, err := io.ReadAll(br)
-	if err != nil {
-		return textproto.Header{}, nil, err
-	}
-	return h, bytes.NewReader(rest), nil
-}
-
-func (mbox *mailbox) passThroughBodyStructure(msg *protonmail.Message, extended bool) (*imap.BodyStructure, error) {
-	log.Printf("Message %v is encrypted to a key Proton doesn't have: passed through as PGP/MIME", msg.ID)
-	h, body, err := readPassThrough(msg)
-	if err != nil {
-		return nil, err
-	}
-	return backendutil.FetchBodyStructure(h, body, extended)
-}
-
-func (mbox *mailbox) passThroughBodySection(msg *protonmail.Message, section *imap.BodySectionName) (imap.Literal, error) {
-	h, body, err := readPassThrough(msg)
-	if err != nil {
-		return nil, err
-	}
-	return backendutil.FetchBodySection(h, body, section)
 }

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
@@ -973,16 +974,28 @@ func TestSearchMessages(t *testing.T) {
 // evidence: witnesses
 func TestNoSender(t *testing.T) {
 	msg := inboxMessage("a", 0)
-	if env := fetchEnvelope(msg); env.From != nil {
-		t.Errorf("fetchEnvelope().From = %v, want nil", env.From)
+	if env := builtEnvelope(t, msg); env.From != nil {
+		t.Errorf("ENVELOPE From = %v, want nil", env.From)
 	}
 	if h := messageHeader(msg); h.Has("From") {
 		t.Errorf("messageHeader() has From %q, want none", h.Get("From"))
 	}
 }
 
+// builtEnvelope returns the ENVELOPE of msg as built and stored.
+func builtEnvelope(t *testing.T, msg *protonmail.Message) *imap.Envelope {
+	t.Helper()
+	mbox, _ := newTestMailbox(t, []*protonmail.Message{msg})
+	built, err := mbox.u.buildMessage(msg)
+	if err != nil {
+		t.Fatalf("buildMessage() = %v", err)
+	}
+	return built.info.Envelope
+}
+
 // RFC 3501 section 7.4.2: Sender and Reply-To default to From, and the
-// envelope's Message-Id is the header's, brackets included.
+// envelope's Message-Id is the header's, brackets included. The original
+// header's Sender and In-Reply-To are kept (TODO section 9 step 8).
 // evidence: witnesses
 func TestEnvelopeDefaults(t *testing.T) {
 	from := &protonmail.MessageAddress{Name: "Bob", Address: "bob@example.org"}
@@ -1000,7 +1013,7 @@ func TestEnvelopeDefaults(t *testing.T) {
 		msg.Sender = from
 		msg.ReplyTos = tt.replyTos
 		msg.ExternalID = "abc@example.org"
-		env := fetchEnvelope(msg)
+		env := builtEnvelope(t, msg)
 		if len(env.Sender) != 1 || env.Sender[0].Address() != "bob@example.org" {
 			t.Errorf("%v: Sender = %v, want From", tt.name, env.Sender)
 		}
@@ -1010,6 +1023,25 @@ func TestEnvelopeDefaults(t *testing.T) {
 		if h := messageHeader(msg); env.MessageId != h.Get("Message-Id") || env.MessageId != "<abc@example.org>" {
 			t.Errorf("%v: envelope Message-Id %q, header %q, want <abc@example.org>", tt.name, env.MessageId, h.Get("Message-Id"))
 		}
+	}
+
+	msg := inboxMessage("a", 0)
+	msg.Sender = from
+	msg.Header = "Sender: list-owner@example.org\r\n" +
+		"In-Reply-To: <parent@example.org>\r\n" +
+		"Date: Mon, 02 Nov 2026 10:00:00 +1300\r\n"
+	env := builtEnvelope(t, msg)
+	if len(env.Sender) != 1 || env.Sender[0].Address() != "list-owner@example.org" {
+		t.Errorf("Sender = %v, want the header's", env.Sender)
+	}
+	if len(env.From) != 1 || env.From[0].Address() != "bob@example.org" {
+		t.Errorf("From = %v, want the metadata's", env.From)
+	}
+	if env.InReplyTo != "<parent@example.org>" {
+		t.Errorf("In-Reply-To = %q, want the header's", env.InReplyTo)
+	}
+	if want := time.Date(2026, 11, 1, 21, 0, 0, 0, time.UTC); !env.Date.Equal(want) {
+		t.Errorf("Date = %v, want the header's %v", env.Date, want)
 	}
 }
 
@@ -1090,7 +1122,7 @@ func TestFetchHeaderFields(t *testing.T) {
 		"Received: from a\r\n" +
 		"Received: from b\r\n"
 	mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{msg})
-	cacheFull(mbox, msg)
+	cacheFull(t, mbox, msg)
 
 	const whole = "BODY.PEEK[HEADER]"
 	wholeHeader := sectionBytes(t, fetchItems(t, mbox, whole), whole)
@@ -1146,11 +1178,18 @@ func TestFetchHeaderFields(t *testing.T) {
 	}
 }
 
-// cacheFull puts msgs in mbox's full-message cache, as if fetched already, so
-// fetching their bodies makes no API request.
-func cacheFull(mbox *mailbox, msgs ...*protonmail.Message) {
+// cacheFull builds msgs and stores them, as if fetched already, so fetching
+// their contents makes no API request.
+func cacheFull(t *testing.T, mbox *mailbox, msgs ...*protonmail.Message) {
+	t.Helper()
 	for _, msg := range msgs {
-		mbox.u.messages.put(msg)
+		built, err := mbox.u.buildMessage(msg)
+		if err != nil {
+			t.Fatalf("buildMessage(%v) = %v", msg.ID, err)
+		}
+		if _, stored, err := mbox.u.db.PutBody(msg.ID, built.literal, built.info); err != nil || !stored {
+			t.Fatalf("PutBody(%v) = %v, %v; want stored", msg.ID, stored, err)
+		}
 	}
 }
 
@@ -1207,7 +1246,7 @@ func TestFetchBodyReadOnlyLeavesUnread(t *testing.T) {
 	api := &fakeAPI{t: t}
 	msg := fetchTestMessage("a", 1)
 	mbox, sent := newActionTestMailbox(t, api, []*protonmail.Message{msg})
-	cacheFull(mbox, msg)
+	cacheFull(t, mbox, msg)
 
 	if _, err := fetchWith(t, mbox, true, "BODY[HEADER]"); err != nil {
 		t.Fatalf("FETCH in a read-only mailbox: %v", err)
@@ -1267,7 +1306,7 @@ func TestFetchBodySetsSeen(t *testing.T) {
 		api := &fakeAPI{t: t}
 		msg := fetchTestMessage("a", tt.unread)
 		mbox, sent := newActionTestMailbox(t, api, []*protonmail.Message{msg})
-		cacheFull(mbox, msg)
+		cacheFull(t, mbox, msg)
 
 		msgs, err := fetchAll(t, mbox, tt.item)
 		if err != nil {
@@ -1340,7 +1379,7 @@ func TestFetchMacros(t *testing.T) {
 		api := &fakeAPI{t: t}
 		msg := fetchTestMessage("a", 0)
 		mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{msg})
-		cacheFull(mbox, msg)
+		cacheFull(t, mbox, msg)
 
 		msgs, err := fetchAll(t, mbox, tt.macro)
 		if err != nil {

@@ -57,7 +57,7 @@ type user struct {
 
 	db             *database.User
 	eventsReceiver eventsReceiver
-	messages       *messageCache // full messages, safe for concurrent use
+	builds         builds // messages being built and stored
 
 	done      chan struct{} // closed by the last Logout
 	eventSent chan struct{}
@@ -159,7 +159,6 @@ func newUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 		syncSem:     make(chan struct{}, 1),
 		sendSem:     make(chan struct{}, 1),
 		numClients:  1,
-		messages:    newMessageCache(),
 	}
 
 	db, keyChanged, err := database.Open(u.Name, storeKey)
@@ -680,8 +679,11 @@ func (u *user) applyMessageEvent(eventMessage *protonmail.EventMessage) ([]imapb
 	case protonmail.EventUpdate, protonmail.EventUpdateFlags:
 		log.Println("Received update event for message", eventMessage.ID)
 		if eventMessage.Action == protonmail.EventUpdate {
-			// Its contents may have changed, e.g. a draft edited.
-			u.messages.remove(eventMessage.ID)
+			// Its contents may have changed, e.g. a draft edited: built
+			// again at the next FETCH.
+			if err := u.builds.drop(u.db, eventMessage.ID); err != nil {
+				return nil, fmt.Errorf("cannot drop the stored message: %w", err)
+			}
 		}
 		ups, err := u.applyUpdate(eventMessage.ID, eventMessage.Updated)
 		if errors.Is(err, database.ErrNotFound) {

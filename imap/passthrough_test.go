@@ -99,7 +99,7 @@ func TestEncryptedToOtherKeyPassedThrough(t *testing.T) {
 	api := &fakeAPI{t: t}
 	mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{msg})
 	mbox.u.privateKeys = openpgp.EntityList{account}
-	cacheFull(mbox, msg)
+	cacheFull(t, mbox, msg)
 
 	fetched := fetchItems(t, mbox, imap.FetchBodyStructure, "BODY.PEEK[]", "BODY.PEEK[2]")
 
@@ -176,7 +176,7 @@ func TestBodyStructureOfDecryptedBody(t *testing.T) {
 	api := &fakeAPI{t: t}
 	mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{msg})
 	mbox.u.privateKeys = openpgp.EntityList{account}
-	cacheFull(mbox, msg)
+	cacheFull(t, mbox, msg)
 
 	fetched := fetchItems(t, mbox, imap.FetchBodyStructure, "BODY.PEEK[1]")
 	part := sectionBytes(t, fetched, "BODY.PEEK[1]")
@@ -328,7 +328,7 @@ func TestEncryptedToOtherKeyWithAttachmentsKept(t *testing.T) {
 	mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{msg})
 	mbox.u.privateKeys = openpgp.EntityList{account}
 	mbox.u.u.Keys = []*protonmail.PrivateKey{publicKey(t, "k1", account)}
-	cacheFull(mbox, msg)
+	cacheFull(t, mbox, msg)
 
 	fetched := fetchItems(t, mbox, imap.FetchBodyStructure, "BODY.PEEK[]")
 
@@ -379,7 +379,7 @@ func TestEncryptedToLockedAccountKey(t *testing.T) {
 	mbox.u.privateKeys = openpgp.EntityList{unlocked}
 	mbox.u.u.Keys = []*protonmail.PrivateKey{publicKey(t, "k1", unlocked)}
 	mbox.u.addrs = []*protonmail.Address{{ID: "a1", Email: "bob@example.org", Keys: []*protonmail.PrivateKey{publicKey(t, "k2", locked)}}}
-	cacheFull(mbox, msg)
+	cacheFull(t, mbox, msg)
 
 	fetched := fetchItems(t, mbox, imap.FetchBodyStructure, "BODY.PEEK[1]")
 	if bs := fetched.BodyStructure; bs.MIMESubType == "encrypted" {
@@ -399,7 +399,7 @@ func TestFetchSkipsMessageDeletedInProton(t *testing.T) {
 		"/messages/gone": {http.StatusUnprocessableEntity, "application/json", `{"Code":2501,"Error":"Message does not exist"}`},
 	}}
 	mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{gone, kept})
-	cacheFull(mbox, kept)
+	cacheFull(t, mbox, kept)
 
 	msgs, err := fetchAll(t, mbox, imap.FetchBodyStructure)
 	if err != nil {

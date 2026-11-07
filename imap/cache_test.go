@@ -1,39 +1,75 @@
 package imap
 
 import (
-	"fmt"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/seamanticus/peroxide/imap/database"
 	"github.com/seamanticus/peroxide/protonmail"
 )
 
-func TestMessageCacheEvictsLeastRecentlyUsed(t *testing.T) {
-	c := newMessageCache()
-	for i := range messageCacheSize {
-		c.put(&protonmail.Message{ID: fmt.Sprint(i)})
+// A second build of a message waits for the first: start makes one owner,
+// and finish releases the others and lets the next build start.
+// evidence: witnesses
+func TestBuildsOneAtATime(t *testing.T) {
+	var b builds
+	bd, owner := b.start("a")
+	if !owner {
+		t.Fatal("first start() is not the owner")
 	}
-	// Using 0 makes 1 the least recently used.
-	if _, ok := c.get("0"); !ok {
-		t.Fatal("get(0) missed")
+	waited, owner := b.start("a")
+	if owner || waited != bd {
+		t.Fatal("second start() of the same message is an owner, or waits on another build")
 	}
-	c.put(&protonmail.Message{ID: "new"})
-
-	if _, ok := c.get("1"); ok {
-		t.Error("get(1) hit, want it evicted")
+	if _, owner := b.start("b"); !owner {
+		t.Error("start() of another message waits")
 	}
-	for _, id := range []string{"0", "2", "new"} {
-		if _, ok := c.get(id); !ok {
-			t.Errorf("get(%v) missed", id)
-		}
+	b.finish("a")
+	select {
+	case <-waited.done:
+	default:
+		t.Error("finish() didn't release the waiting build")
+	}
+	if _, owner := b.start("a"); !owner {
+		t.Error("start() after finish() is not the owner")
 	}
 }
 
-// A message fetched once isn't fetched again until it's deleted.
-func TestFullMessageCached(t *testing.T) {
+// A build running when its message is dropped (an update event) was made
+// from what Proton had before: it isn't stored, and the next build is.
+// evidence: witnesses
+func TestDroppedBuildNotStored(t *testing.T) {
+	mbox, db := newTestMailbox(t, []*protonmail.Message{inboxMessage("a", 0)})
+	u := mbox.u
+	built := builtMessage{literal: []byte("Subject: old\r\n\r\nold\r\n")}
+
+	bd, _ := u.builds.start("a")
+	if err := u.builds.drop(db, "a"); err != nil {
+		t.Fatalf("drop() = %v", err)
+	}
+	if _, stored, err := u.builds.store(db, "a", bd, built); err != nil || stored {
+		t.Errorf("store() of a dropped build = %v, %v; want not stored", stored, err)
+	}
+	u.builds.finish("a")
+	if _, _, err := db.Body("a"); !errors.Is(err, database.ErrNotFound) {
+		t.Errorf("Body() = %v, want ErrNotFound", err)
+	}
+
+	bd, _ = u.builds.start("a")
+	if _, stored, err := u.builds.store(db, "a", bd, built); err != nil || !stored {
+		t.Errorf("store() of a new build = %v, %v; want stored", stored, err)
+	}
+	u.builds.finish("a")
+}
+
+// A message is downloaded and built once, then served from the store, across
+// sessions too; once deleted it is gone from the store, and Proton is asked
+// again if a FETCH still wants it.
+func TestStoredMessageBuiltOnce(t *testing.T) {
 	var mu sync.Mutex
 	gets := 0
 	fetched := func() int {
@@ -51,33 +87,38 @@ func TestFullMessageCached(t *testing.T) {
 		gets++
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"Code":1000,"Message":{"ID":"a","Body":"body"}}`))
+		w.Write([]byte(`{"Code":1000,"Message":{"ID":"a","Body":"body","MIMEType":"text/plain"}}`))
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	mbox, _ := newTestMailbox(t, []*protonmail.Message{inboxMessage("a", 0)})
 	u := mbox.u
 	u.c = &protonmail.Client{RootURL: srv.URL}
-	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: mbox}
 
 	for range 2 {
-		msg, err := u.fullMessage("a")
+		rec, literal, err := u.storedMessage("a")
 		if err != nil {
-			t.Fatalf("fullMessage() = %v", err)
+			t.Fatalf("storedMessage() = %v", err)
 		}
-		if !strings.Contains(msg.Body, "body") {
-			t.Errorf("fullMessage().Body = %q", msg.Body)
+		if !strings.Contains(string(literal), "body") || rec.Size != uint32(len(literal)) {
+			t.Errorf("storedMessage() = %+v, %q; want the body, its size", rec, literal)
 		}
 	}
 	if n := fetched(); n != 1 {
 		t.Errorf("fetched the message %v times, want 1", n)
 	}
+	if _, _, err := u.db.Body("a"); err != nil {
+		t.Errorf("Body() = %v, want the message stored", err)
+	}
 
 	if _, err := u.applyDelete("a"); err != nil {
 		t.Fatalf("applyDelete() = %v", err)
 	}
-	if _, err := u.fullMessage("a"); err != nil {
-		t.Fatalf("fullMessage() after delete = %v", err)
+	if _, _, err := u.db.Body("a"); !errors.Is(err, database.ErrNotFound) {
+		t.Errorf("Body() after delete = %v, want ErrNotFound", err)
+	}
+	if _, _, err := u.storedMessage("a"); err != nil {
+		t.Fatalf("storedMessage() after delete = %v", err)
 	}
 	if n := fetched(); n != 2 {
 		t.Errorf("fetched the message %v times, want 2: deleting it drops it", n)

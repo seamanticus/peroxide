@@ -9,13 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log"
-	nettextproto "net/textproto"
-	"slices"
 	"strings"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
-	pgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-message"
 	"github.com/emersion/go-message/mail"
@@ -73,164 +70,9 @@ func imapAddressList(addresses []*protonmail.MessageAddress) []*imap.Address {
 	return l
 }
 
-func fetchEnvelope(msg *protonmail.Message) *imap.Envelope {
-	env := &imap.Envelope{
-		Date:    msg.Time.Time(),
-		Subject: msg.Subject,
-		To:      imapAddressList(msg.ToList),
-		Cc:      imapAddressList(msg.CCList),
-		Bcc:     imapAddressList(msg.BCCList),
-		ReplyTo: imapAddressList(msg.ReplyTos),
-		// In the same form as the Message-Id header, angle brackets included.
-		MessageId: "<" + messageID(msg) + ">",
-	}
-	// Sender is decoded from the API and may be missing: From is then NIL.
-	if msg.Sender != nil {
-		env.From = []*imap.Address{imapAddress(msg.Sender)}
-	}
-	// RFC 3501 section 7.4.2: the server sets Sender and Reply-To to From
-	// when the header has none. The metadata keeps no Sender header, so
-	// Sender is always From, as proton-bridge's is for most mail.
-	env.Sender = env.From
-	if len(env.ReplyTo) == 0 {
-		env.ReplyTo = env.From
-	}
-	return env
-}
-
 func msgBoundary(msg *protonmail.Message) string {
 	h := sha1.Sum([]byte(msg.ID))
 	return hex.EncodeToString(h[:])
-}
-
-func hasLabel(msg *protonmail.Message, labelID string) bool {
-	return slices.Contains(msg.LabelIDs, labelID)
-}
-
-func splitMIMEType(t string) (string, string) {
-	parts := strings.SplitN(t, "/", 2)
-	if len(parts) < 2 {
-		return "text", "plain"
-	}
-	return parts[0], parts[1]
-}
-
-func (mbox *mailbox) fetchBodyStructure(msg *protonmail.Message, extended bool) (*imap.BodyStructure, error) {
-	// The local database keeps neither the body nor its MIME type: guessing
-	// them made a text/plain body a text/html part of size 0.
-	msg, err := mbox.u.fullMessage(msg.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	if mbox.passThrough(msg) {
-		return mbox.passThroughBodyStructure(msg, extended)
-	}
-
-	inlineHeader, body, err := mbox.encodedInlinePart(msg)
-	if err != nil {
-		return nil, err
-	}
-	// Described from the header the part is sent with, which is the
-	// decrypted body's or, when that fails, the armored fallback's.
-	inlineType, inlineSubType := "text", "plain"
-	var params map[string]string
-	if t, p, err := inlineHeader.ContentType(); err == nil {
-		inlineType, inlineSubType = splitMIMEType(t)
-		params = p
-	}
-	inline := &imap.BodyStructure{
-		MIMEType:    inlineType,
-		MIMESubType: inlineSubType,
-		Params:      params,
-		Encoding:    inlineHeader.Get("Content-Transfer-Encoding"),
-		Extended:    extended,
-		Disposition: "inline",
-	}
-	// Size and Lines are of the part as sent, after its encoding.
-	inline.Size = uint32(len(body))
-	if inlineType == "text" {
-		inline.Lines = uint32(bytes.Count(body, []byte("\n")))
-		if len(body) > 0 && body[len(body)-1] != '\n' {
-			inline.Lines++
-		}
-	}
-	parts := []*imap.BodyStructure{inline}
-
-	for _, att := range msg.Attachments {
-		attType, attSubType := splitMIMEType(att.MIMEType)
-		name := att.Name
-		if !att.Decryptable(mbox.u.privateKeys) {
-			attType, attSubType, name = "application", "octet-stream", armoredAttachmentName(att)
-		}
-		parts = append(parts, &imap.BodyStructure{
-			MIMEType:          attType,
-			MIMESubType:       attSubType,
-			Id:                att.ContentID,
-			Encoding:          "base64",
-			Size:              uint32(att.Size),
-			Extended:          extended,
-			Disposition:       "attachment",
-			DispositionParams: map[string]string{"filename": name},
-		})
-	}
-
-	return &imap.BodyStructure{
-		MIMEType:    "multipart",
-		MIMESubType: "mixed",
-		Params:      map[string]string{"boundary": msgBoundary(msg)},
-		// TODO: Size
-		Parts:    parts,
-		Extended: extended,
-	}, nil
-}
-
-// inlinePart returns the header and the body, decrypted, of the inline part
-// of msg (not passed through). It is read whole, so that a failure anywhere
-// in it, the integrity check at its end included, is known before anything
-// is sent: the body is then served as bridge does, still armored, with a
-// comment saying why (writeCustomTextPart). A FETCH thus never fails on one
-// message, and the client may still decrypt it.
-func (mbox *mailbox) inlinePart(msg *protonmail.Message) (message.Header, []byte) {
-	body, err := mbox.decryptBody(msg)
-	if err == nil {
-		return inlineHeader(msg), body
-	}
-	if errors.Is(err, pgperrors.ErrKeyIncorrect) {
-		if toAccount, _ := mbox.encryptedToAccount(msg); toAccount {
-			err = fmt.Errorf("encrypted to a key of the account that peroxide hasn't unlocked (one added since it started?): %w", err)
-		} else {
-			// Not passed through as PGP/MIME as it has attachments.
-			err = fmt.Errorf("encrypted end to end to a key Proton doesn't have: %w", err)
-		}
-	}
-	log.Printf("Message %v served encrypted: %v", msg.ID, err)
-
-	// Armor is text whatever the body was: a multipart type would make
-	// clients parse it as parts.
-	contentType := "text/plain"
-	if strings.HasPrefix(msg.MIMEType, "text/") {
-		contentType = msg.MIMEType
-	}
-	var h mail.InlineHeader
-	h.SetContentType(contentType, nil)
-	h.Set("Content-Transfer-Encoding", "7bit")
-	armored, armorErr := rearmor(strings.NewReader(msg.Body), "This message could not be decrypted: "+err.Error())
-	if armorErr != nil {
-		// Not armor at all: what Proton stored is all there is.
-		log.Printf("cannot armor message %v again: %v", msg.ID, armorErr)
-		return h.Header, []byte(msg.Body)
-	}
-	return h.Header, armored
-}
-
-func (mbox *mailbox) decryptBody(msg *protonmail.Message) ([]byte, error) {
-	md, err := msg.Read(mbox.u.privateKeys, nil)
-	if err != nil {
-		return nil, err
-	}
-	// TODO: check signature
-	return io.ReadAll(md.UnverifiedBody)
 }
 
 // rearmor returns the armored PGP message r, decoded and armored again with
@@ -261,66 +103,6 @@ func writeArmored(w io.Writer, r io.Reader, comment string) error {
 	return aw.Close()
 }
 
-// encodedInlinePart returns the header of the inline part of msg and its body
-// as written in a FETCH, encoded as the header says.
-func (mbox *mailbox) encodedInlinePart(msg *protonmail.Message) (message.Header, []byte, error) {
-	h, body := mbox.inlinePart(msg)
-	var b bytes.Buffer
-	w, err := message.CreateWriter(&b, h)
-	if err != nil {
-		return h, nil, err
-	}
-	b.Reset() // keep the body only
-	if _, err := w.Write(body); err != nil {
-		return h, nil, err
-	}
-	if err := w.Close(); err != nil {
-		return h, nil, err
-	}
-	return h, b.Bytes(), nil
-}
-
-// attachmentPartHeader returns the header of the part of att. One no unlocked
-// key of the account opens is served as bridge does, still encrypted, as an
-// armored <name>.pgp file whose comment says why (writeCustomAttachmentPart),
-// so the client may decrypt it. Only att's key packets are read for that.
-func (mbox *mailbox) attachmentPartHeader(att *protonmail.Attachment) message.Header {
-	if att.Decryptable(mbox.u.privateKeys) {
-		return attachmentHeader(att)
-	}
-	var h mail.AttachmentHeader
-	h.SetContentType("application/octet-stream", nil)
-	h.Set("Content-Transfer-Encoding", "base64")
-	h.SetFilename(armoredAttachmentName(att))
-	return h.Header
-}
-
-// attachmentBody downloads att and returns the body of its part, decrypted
-// or armored as attachmentPartHeader says.
-func (mbox *mailbox) attachmentBody(att *protonmail.Attachment) (io.Reader, error) {
-	rc, err := mbox.u.c.GetAttachment(att.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	if att.Decryptable(mbox.u.privateKeys) {
-		md, err := att.Read(rc, mbox.u.privateKeys, nil)
-		if err != nil {
-			return nil, err
-		}
-		// TODO: check signature
-		return md.UnverifiedBody, nil
-	}
-
-	defer rc.Close()
-	log.Printf("Attachment %v of message %v served encrypted: no unlocked key of the account opens it", att.ID, att.MessageID)
-	var b bytes.Buffer
-	if err := writeArmored(&b, att.PGPMessage(rc), "This attachment could not be decrypted: no key peroxide has unlocked opens it"); err != nil {
-		return nil, fmt.Errorf("cannot armor attachment %v: %w", att.ID, err)
-	}
-	return &b, nil
-}
-
 func armoredAttachmentName(att *protonmail.Attachment) string {
 	return att.Name + ".pgp"
 }
@@ -336,10 +118,17 @@ func inlineHeader(msg *protonmail.Message) message.Header {
 	return h.Header
 }
 
+// attachmentHeader returns the header of the part of att. An attached message
+// (message/rfc822) has no transfer encoding, as in bridge
+// (getAttachmentPartHeader): RFC 2046 section 5.2.1 allows only 7bit, 8bit
+// or binary for it, and its structure can then be described in
+// BODYSTRUCTURE (RFC 3501 section 7.4.2). Any other is base64.
 func attachmentHeader(att *protonmail.Attachment) message.Header {
 	var h mail.AttachmentHeader
 	h.SetContentType(att.MIMEType, nil)
-	h.Set("Content-Transfer-Encoding", "base64")
+	if !strings.EqualFold(att.MIMEType, "message/rfc822") {
+		h.Set("Content-Transfer-Encoding", "base64")
+	}
 	h.SetFilename(att.Name)
 	if att.ContentID != "" {
 		h.Set("Content-Id", att.ContentID)
@@ -416,164 +205,6 @@ func originalHeader(s string) (textproto.Header, error) {
 		return textproto.Header{}, err
 	}
 	return h, nil
-}
-
-func (mbox *mailbox) fetchBodySection(msg *protonmail.Message, section *imap.BodySectionName) (imap.Literal, error) {
-	// Only the encrypted body says whether the message is passed through, and
-	// then its header too differs (its Content-Type), so every section of a
-	// PGP message needs the full message. The cache keeps the cost to one
-	// request per message.
-	full, err := mbox.u.fullMessage(msg.ID)
-	if err != nil {
-		return nil, err
-	}
-	if mbox.passThrough(full) {
-		return mbox.passThroughBodySection(full, section)
-	}
-
-	b := new(bytes.Buffer)
-
-	if len(section.Path) == 0 {
-		w, err := message.CreateWriter(b, messageHeader(full))
-		if err != nil {
-			return nil, err
-		}
-
-		if section.Specifier == imap.TextSpecifier {
-			b.Reset()
-		}
-
-		switch section.Specifier {
-		case imap.EntireSpecifier, imap.TextSpecifier:
-			ih, body := mbox.inlinePart(full)
-			pw, err := w.CreatePart(ih)
-			if err != nil {
-				return nil, err
-			}
-			if _, err := pw.Write(body); err != nil {
-				return nil, err
-			}
-			pw.Close()
-
-			for _, att := range full.Attachments {
-				pw, err := w.CreatePart(mbox.attachmentPartHeader(att))
-				if err != nil {
-					return nil, err
-				}
-				pr, err := mbox.attachmentBody(att)
-				if err != nil {
-					return nil, err
-				}
-				if _, err := io.Copy(pw, pr); err != nil {
-					return nil, err
-				}
-				pw.Close()
-			}
-		}
-
-		w.Close()
-	} else {
-		if len(section.Path) > 1 {
-			return nil, errors.New("invalid body section path length")
-		}
-
-		var h message.Header
-		var getBody func() (io.Reader, error)
-		if part := section.Path[0]; part == 1 {
-			ih, body := mbox.inlinePart(full)
-			h = ih
-			getBody = func() (io.Reader, error) {
-				return bytes.NewReader(body), nil
-			}
-		} else {
-			i := part - 2
-			if i < 0 || i >= len(full.Attachments) {
-				return nil, errors.New("invalid attachment section path")
-			}
-
-			att := full.Attachments[i]
-			h = mbox.attachmentPartHeader(att)
-			getBody = func() (io.Reader, error) {
-				return mbox.attachmentBody(att)
-			}
-		}
-
-		w, err := message.CreateWriter(b, h)
-		if err != nil {
-			return nil, err
-		}
-
-		switch section.Specifier {
-		case imap.TextSpecifier:
-			// The header hasn't been requested. Discard it.
-			b.Reset()
-		case imap.EntireSpecifier:
-			if len(section.Path) > 0 {
-				// When selecting a specific part by index, IMAP servers
-				// return only the text, not the associated MIME header.
-				b.Reset()
-			}
-		}
-
-		// Write the body, if requested
-		switch section.Specifier {
-		case imap.EntireSpecifier, imap.TextSpecifier:
-			r, err := getBody()
-			if err != nil {
-				return nil, err
-			}
-
-			if _, err := io.Copy(w, r); err != nil {
-				return nil, err
-			}
-		}
-
-		w.Close()
-	}
-
-	if section.Specifier == imap.HeaderSpecifier && section.Fields != nil {
-		// b holds the header alone, as BODY[HEADER] sends it: keep the fields
-		// asked for from it, so both agree.
-		h, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(b.Bytes())))
-		if err != nil {
-			return nil, fmt.Errorf("cannot read header of message %v: %w", msg.ID, err)
-		}
-		b = new(bytes.Buffer)
-		if err := textproto.WriteHeader(b, headerFields(h, section)); err != nil {
-			return nil, err
-		}
-	}
-
-	var l imap.Literal = b
-	if section.Partial != nil {
-		l = bytes.NewReader(section.ExtractPartial(b.Bytes()))
-	}
-
-	return l, nil
-}
-
-// headerFields returns h with only the fields section names, or all but those
-// with HEADER.FIELDS.NOT (RFC 3501 section 6.4.5), matched without case. It
-// filters as go-imap's backendutil.FetchBodySection, which pass-through uses,
-// so both paths answer alike.
-func headerFields(h textproto.Header, section *imap.BodySectionName) textproto.Header {
-	h = h.Copy()
-	if section.NotFields {
-		for _, k := range section.Fields {
-			h.Del(k)
-		}
-		return h
-	}
-	keep := make(map[string]struct{}, len(section.Fields))
-	for _, k := range section.Fields {
-		keep[nettextproto.CanonicalMIMEHeaderKey(k)] = struct{}{}
-	}
-	for f := h.Fields(); f.Next(); {
-		if _, ok := keep[f.Key()]; !ok {
-			f.Del()
-		}
-	}
-	return h
 }
 
 func createMessage(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.EntityList, addrs []*protonmail.Address, r io.Reader) (*protonmail.Message, error) {

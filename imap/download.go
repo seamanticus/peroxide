@@ -238,7 +238,6 @@ func DownloadAccount(c *protonmail.Client, storeKey auth.StoreKey, discard bool)
 		u:        pu,
 		username: pu.Name,
 		db:       db,
-		messages: newMessageCache(),
 		syncSem:  make(chan struct{}, 1),
 		sendSem:  make(chan struct{}, 1),
 		done:     make(chan struct{}),
