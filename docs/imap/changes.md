@@ -54,14 +54,11 @@ No `COPYUID` is returned (no UIDPLUS).
 RFC 6851 asks that each message end in the source or the destination,
 never in neither, and not in both, even if the command fails.
 
-**Between two folders** (INBOX, Archive, Sent, Drafts, Spam, Trash, and
-your own folders) a MOVE is **one call**: label with the destination.
-A message is in at most one folder in Proton, so that takes it out of
-the source too. A message the call fails for is where it was; nothing
-can end in both.
-
-**Out of or into Starred**, which isn't a folder, it is two calls:
-label with the destination, then unlabel from the source. peroxide:
+A MOVE is two calls, as in proton-bridge: label with the destination,
+then unlabel from the source. Proton keeps a message in one folder, so
+labelling it into a folder already takes it out of the previous one,
+and the unlabel then answers "does not exist", which counts as done.
+peroxide:
 
 - unlabels only the messages that were labelled (one the label call
   failed for stays where it was);
@@ -73,10 +70,17 @@ label with the destination, then unlabel from the source. peroxide:
   remove it from one by hand. If only the check fails, the local view
   shows both until the next events tell what Proton did.
 
-**Refused**, before any call: out of All Mail (no message leaves it
-but by being deleted), into All Mail (every message is there), and
-between INBOX and Sent, as proton-bridge refuses them. A MOVE into the
-mailbox itself does nothing.
+**Refused**, before any call:
+
+- into or out of **All Mail** (every message is there; none leaves it
+  but by being deleted), and between INBOX and Sent, as proton-bridge
+  refuses them;
+- into or out of **Starred**, which, like All Mail, shows messages that
+  stay in their folders. A move into it would take the message out of
+  its folder, a move out of it would file it elsewhere to unstar it.
+  Star and unstar with the `\Flagged` flag (or COPY to Starred).
+
+A MOVE into the mailbox itself does nothing.
 
 ## EXPUNGE
 
@@ -134,11 +138,16 @@ import API.
   library, which keeps the mailbox state in its own store. Labels are
   mailboxes there, so COPY to `Labels/x` adds a label and MOVE out of
   one removes it. Its MOVE has two forms behind a feature flag
-  (connector.go): one that unlabels the source only when it is a label
-  (`moveMessagesWithoutUnlabelCallOnFolders`), which peroxide follows
-  for moves between folders, and one that unlabels always, kept since
-  removing the call broke clients (BRIDGE-451). Both refuse MOVE
-  between INBOX and Sent and into or out of All Mail and Scheduled.
+  (connector.go, unleash `FolderUnlabelCallDisabled`, off unless
+  Proton's server turns it on): by default
+  `moveMessagesWithUnlabelCallOnFolders`, label then unlabel, which
+  peroxide follows; the other, `moveMessagesWithoutUnlabelCallOnFolders`,
+  skips the unlabel between folders. Bridge dropped the call in 3.24.0
+  (BRIDGE-451) and restored it under the flag in 3.24.1 (BRIDGE-522), as
+  its comment says "removing the unlabel call resulted in a lot of
+  client issues". Both forms refuse MOVE between INBOX and Sent and into
+  or out of All Mail and Scheduled. Bridge allows MOVE into and out of
+  Starred; peroxide refuses it (above).
 - **EXPUNGE**: bridge unlabels first, then deletes for good, from Trash
   and Drafts, what no other shown label holds; All Mail refuses.
   peroxide decides the same, in the other order, so that a failed

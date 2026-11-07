@@ -732,13 +732,14 @@ Small, independent, found reviewing branch `labels-events`.
     record the status and Code of `GET /events/...`. If it is none of
     those, add it to `refused` and to `TestRefused`; if it is a 2xx with
     `Refresh` set, nothing to do (`EventRefreshMail` is handled).
-11. (done: MOVE between folders is one label call, as proton-bridge's
-    `moveMessagesWithoutUnlabelCallOnFolders`; INBOX/Sent and All Mail
-    moves refused.) Left open: bridge keeps the two-call form as its
-    default because removing the unlabel broke clients (BRIDGE-451,
-    unexplained in its code). If a client misbehaves after a folder
-    MOVE (the source still listing the message until the next events),
-    compare a `-debug` log of it with the event that follows.
+11. (done: MOVE is label then unlabel, proton-bridge's default
+    `moveMessagesWithUnlabelCallOnFolders`; INBOX/Sent, All Mail and
+    Starred moves refused.) Left open: the unlabel after a move into a
+    folder only answers "does not exist", a 0.4 s round trip. Bridge
+    skipped it in 3.24.0 (BRIDGE-451) and restored it in 3.24.1
+    (BRIDGE-522) after client trouble its code doesn't describe. Revisit
+    if bridge's flag (`FolderUnlabelCallDisabled`) is ever turned on by
+    default.
 12. **Make the SMTP domain configurable.** `listenAndServeSMTP`
     (cmd/peroxide/main.go) sets `s.Domain = "localhost"`. go-smtp uses it
     only in the greeting (`220 localhost ESMTP Service Ready`, go-smtp
