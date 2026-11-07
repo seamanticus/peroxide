@@ -502,7 +502,7 @@ func main() {
 
 		// Auth unlocks the keys too, as every command does; the download
 		// uses only the session, as metadata isn't decrypted.
-		c, _, err := auth.NewManager(newClient).Auth(username, bridgePassword)
+		c, _, _, err := auth.NewManager(newClient).Auth(username, bridgePassword)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -527,7 +527,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		c, privateKeys, err := auth.NewManager(newClient).Auth(username, bridgePassword)
+		c, privateKeys, _, err := auth.NewManager(newClient).Auth(username, bridgePassword)
 		if err != nil {
 			log.Fatal(err)
 		}

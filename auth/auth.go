@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"crypto/hkdf"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -200,10 +202,33 @@ func GeneratePassword() (secretKey *[32]byte, password string, err error) {
 	return &key, password, nil
 }
 
+// storeKeyInfo labels the store key's derivation, so that it differs from
+// the secret key sealing auth.json, which it is derived from.
+const storeKeyInfo = "peroxide message store v1"
+
+// StoreKey is the key sealing an account's stored messages.
+type StoreKey [32]byte
+
+// deriveStoreKey derives the key of the message store of the account userID
+// from the secret key the bridge password encodes: HKDF-SHA256, salted with
+// the account's immutable Proton user ID, so one key per account, never
+// stored. The secret key is 32 random bytes: no slow KDF is needed.
+func deriveStoreKey(secretKey *[32]byte, userID string) (StoreKey, error) {
+	if userID == "" {
+		return StoreKey{}, errors.New("cannot derive the message store key: no user ID")
+	}
+	b, err := hkdf.Key(sha256.New, secretKey[:], []byte(userID), storeKeyInfo, len(StoreKey{}))
+	if err != nil {
+		return StoreKey{}, fmt.Errorf("cannot derive the message store key: %w", err)
+	}
+	return StoreKey(b), nil
+}
+
 type session struct {
 	hashedSecretKey []byte
 	c               *protonmail.Client
 	privateKeys     openpgp.EntityList
+	storeKey        StoreKey
 }
 
 var ErrUnauthorized = errors.New("Invalid username or password")
@@ -213,11 +238,14 @@ type Manager struct {
 	sessions  map[string]*session
 }
 
-func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.EntityList, error) {
+// Auth logs username in with its bridge password, once per process, and
+// returns its API client, its unlocked keys and the key sealing its stored
+// messages.
+func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.EntityList, StoreKey, error) {
 	var secretKey [32]byte
 	passwordBytes, err := base64.StdEncoding.DecodeString(password)
 	if err != nil || len(passwordBytes) != len(secretKey) {
-		return nil, nil, ErrUnauthorized
+		return nil, nil, StoreKey{}, ErrUnauthorized
 	}
 	copy(secretKey[:], passwordBytes)
 
@@ -225,27 +253,27 @@ func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.E
 	if ok {
 		err := bcrypt.CompareHashAndPassword(s.hashedSecretKey, secretKey[:])
 		if err != nil {
-			return nil, nil, ErrUnauthorized
+			return nil, nil, StoreKey{}, ErrUnauthorized
 		}
 	} else {
 		auths, err := readCachedAuths()
 		if err != nil && !os.IsNotExist(err) {
-			return nil, nil, err
+			return nil, nil, StoreKey{}, err
 		}
 
 		encrypted, ok := auths[username]
 		if !ok {
-			return nil, nil, ErrUnauthorized
+			return nil, nil, StoreKey{}, ErrUnauthorized
 		}
 
 		decrypted, err := decrypt(encrypted, &secretKey)
 		if err != nil {
-			return nil, nil, ErrUnauthorized
+			return nil, nil, StoreKey{}, ErrUnauthorized
 		}
 
 		var cachedAuth CachedAuth
 		if err := json.Unmarshal(decrypted, &cachedAuth); err != nil {
-			return nil, nil, err
+			return nil, nil, StoreKey{}, err
 		}
 
 		c := m.newClient()
@@ -259,27 +287,40 @@ func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.E
 		// authenticate updates cachedAuth with the new refresh token
 		privateKeys, err := authenticate(c, &cachedAuth, username)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, StoreKey{}, err
 		}
 
 		if err := EncryptAndSave(&cachedAuth, username, &secretKey); err != nil {
-			return nil, nil, err
+			return nil, nil, StoreKey{}, err
+		}
+
+		// The user ID from the account itself: the cached Auth holds what
+		// the last /auth/refresh returned, which need not carry it. One
+		// request per account and process.
+		pu, err := c.GetCurrentUser()
+		if err != nil {
+			return nil, nil, StoreKey{}, fmt.Errorf("cannot get the account: %w", err)
+		}
+		storeKey, err := deriveStoreKey(&secretKey, pu.ID)
+		if err != nil {
+			return nil, nil, StoreKey{}, err
 		}
 
 		hashed, err := bcrypt.GenerateFromPassword(secretKey[:], bcrypt.DefaultCost)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, StoreKey{}, err
 		}
 
 		s = &session{
 			c:               c,
 			privateKeys:     privateKeys,
 			hashedSecretKey: hashed,
+			storeKey:        storeKey,
 		}
 		m.sessions[username] = s
 	}
 
-	return s.c, s.privateKeys, nil
+	return s.c, s.privateKeys, s.storeKey, nil
 }
 
 func NewManager(newClient func() *protonmail.Client) *Manager {
