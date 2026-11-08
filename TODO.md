@@ -574,8 +574,10 @@ with it.**
   an aerc listing of a mailbox the download hasn't reached costs one
   request per message, as it did; no metadata fallback was kept.
 - The memory to build: a message and its attachments are held whole
-  (the store seals in one shot); the downloader bounds what is in
-  flight at 64 MB by Proton's sizes, a FETCH doesn't.
+  (the store seals in one shot). Every build of an account (download,
+  FETCH, edited draft) shares one 64 MB budget by Proton's sizes
+  (memBudget, 2026-11-09); a big message waits until the others leave
+  it room, not first come first served.
 - `refreshMessage` holds syncSem for its request (bounded by
   `unknownMessageTimeout`), as `updateUnknownMessage` does; a burst of
   draft autosaves delays other events by one round trip each.

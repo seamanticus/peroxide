@@ -76,8 +76,9 @@ since. The requests are paced as TCP paces its traffic (AIMD): 2 at
 once to start, one more per round that succeeds, up to 32 (what
 Proton's API team recommends to proton-bridge); a 429 or 5xx halves
 that and pauses every request for Proton's `Retry-After`, or for 1-2 s
-doubling up to a minute, with jitter. Messages being downloaded take at
-most 64 MB (by Proton's sizes) at once. A message that fails for
+doubling up to a minute, with jitter. Messages being downloaded and built take at
+most 64 MB (by Proton's sizes) at once, a FETCH's included: one alone
+always may. A message that fails for
 another reason goes in the failed set and isn't tried again by the
 background download.
 
