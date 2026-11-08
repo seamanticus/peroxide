@@ -6,6 +6,12 @@ observed, and the steps a fix needs.
 
 ## 1. Folders and labels: names, and what `Labels` events leave open
 
+**Done (labels-events: ecddff4, 058cd3a, aeddcb7, ca6d297; bc32862).**
+Folders and labels created, renamed or deleted in Proton are applied
+from `Labels` events without a restart; system-label updates are
+skipped by label ID; FLAGS lists labels in label-ID order. The items
+under "Left open" remain.
+
 `Labels` events are handled (`user.handleLabelEvent`, imap/user.go):
 folders and labels created, renamed or deleted in Proton change
 `u.mailboxes` and `u.flags` without a restart. Clients are not told:
@@ -132,7 +138,7 @@ go-proton-api message_import.go), with:
    with BAD before it is read; one within it but whose encrypted import
    exceeds 50 MB still needs NO [TOOBIG] from CreateMessage.
 
-## 4. (done: `-debug` is the raw mode, to one stream; described in docs/debug.md)
+## 4. (done: `-debug` is the raw mode, to one stream; described in docs/debug.md; 64febb9, 1f840c6, 509744c, 0a17156, 6a03626)
 
 Left open: the request line logs `req.URL.RequestURI()`
 (protonmail/protonmail.go, `newRequest`) unredacted, so query values
@@ -143,13 +149,16 @@ If logs are ever to be shared without editing, redact query values
 whose key is `Email` or `Address`, as `redactedJSONFields` does for
 bodies. Test: a `GetPublicKeys` request logs `Email=<removed>`.
 
-## 5. (done: import-messages and export-messages removed; clients use APPEND and FETCH)
+## 5. (done: import-messages and export-messages removed; clients use APPEND and FETCH; 1a0d637, b170307, 9546a78)
 
 ## 6. Captcha solution
 
 Attempt a more elegant workaround or optimise the Captcha implementation.
 
 ## 7. Unlock keys added by `Addresses` events
+
+Done so far (da1f6f3): `Addresses` events update the address list; the
+keys themselves are still unlocked only at login.
 
 **Problem.** `user.handleAddressEvent` (imap/addresses.go) applies
 addresses created, changed and deleted in Proton to the address list, but
@@ -194,551 +203,87 @@ everything is in memory, the trade-off ruled out above.
 4. Tests: an address event with a new key makes it usable for
    decryption without restarting.
 
-## 8. The All Mail Problem
+## 8. (done: The All Mail Problem; 1f0bfb4, 2e372dd, 1476ca8, cfbc46b)
 
-**What it is.** Proton keeps every message in the system label All Mail
-(`"5"`, plus `"15"` Almost All Mail, which excludes Spam and Trash), and
-peroxide shows it as the mailbox `All Mail` (`\All`, imap/user.go,
-`systemMailboxes`). A client sees every message twice or more: once in
-its folder, once in All Mail. Some want that, to search everything in one
-place (people, and LLM tools reading a mailbox over IMAP); others don't.
+All Mail (`"5"`) holds every message, so a client sees each one twice,
+and before the account download its bucket stayed empty while messages
+still listed it, so a STORE in INBOX logged "cannot get sequence number
+... in All Mail". `serve -show-all-mail` (default on, as bridge's
+`ShowAllMail`) now hides it from LIST only, SELECT and STATUS still
+opening it (1f0bfb4); the account download of 1476ca8 fills every
+mailbox once per database, All Mail included, so no mailbox is
+unsynced (cfbc46b decided it as section 9.1). Tests:
+`TestStoreTellsEveryMailbox`, `TestListShowAllMail`.
 
-**Observed** (2026-11-05 `-debug-raw` log, line 4504):
+Left open: Almost All Mail (`"15"`) and the categories (`"24"`...) have
+no mailbox; bridge shows none either. Add one only if asked.
 
-    cannot get sequence number of message kPAWhk... in All Mail:
-    message not found in local database
+## 9. (done: the message store; labels-events f82e989, 5e88ab3, d6657fd, 49b614e; uid-persist e6562e9..b34f15e)
 
-logged by `user.applyUpdate` (imap/actions.go) for a `STORE +FLAGS
-(\Seen)` in INBOX. The STORE succeeded and the client got its FETCH.
+Every FETCH of a body or BODYSTRUCTURE used to download the full message
+again (f82e989 passed end-to-end mail through as PGP/MIME with a real
+BODYSTRUCTURE; d6657fd made a FETCH never fail on a part it can't
+decrypt). Now each message is built once, as bridge's `BuildRFC822Into`,
+and sealed with AES-256-GCM under a key HKDF-derived from the bridge
+password, never stored, one file per version under
+`$XDG_DATA_HOME/peroxide/<user>/` (c12f3d2, c2f4c0b, 516c292). Every
+FETCH item but FLAGS, UID and INTERNALDATE is served from the stored
+bytes, so content never changes under a UID, sizes are what is served
+and ENVELOPE comes from the original header (2e1a0f4); SEARCH reads the
+stored message (fef89f1).
 
-**Cause (before 1476ca8).** A mailbox was synced into the local database
-only when a client first opened it (`mailbox.init`, from SELECT, FETCH,
-SEARCH...); STATUS used the API's counts until then. aerc STATUSes All
-Mail but never selects it, so its bucket stayed empty, while each
-message still lists `"5"` in `LabelIDs`. `applyUpdate` walked every
-label of the message, found the All Mail mailbox, and didn't find the
-message in it. Since 1476ca8 one download fills every mailbox, so the
-message is always there.
+After the metadata, a background download stores every body, newest
+first and the selected mailbox first, paced by AIMD shared with FETCH,
+which builds unstored messages in parallel; one 64 MB memory budget
+covers every build, and messages that fail go to a failed set as in
+bridge (ecdb1e5, 6ee0c62, 6197a97, c9c6fc1, 0910cfa). Edited drafts and
+messages a newly unlocked key opens are rebuilt outside `syncSem` and get
+new UIDs only when their bytes differ, as gluon (d95611c, ab3215f).
 
-**Also (before 1476ca8).**
+Body and attachment signatures are checked with the sender's trusted
+Proton keys and the verdict written in `X-Peroxide-Signature`
+(8bf8ea4, a3e260e, 5ffb4e7, b34f15e; docs/imap/messages.md#signatures).
+SMTP signs attachments, encrypts to a recipient's first active key and
+signs mail to recipients without a key when "Sign external messages" is
+on (2d8b69d, a33d7ce, c7e66f0).
 
-- Syncing All Mail meant listing every message of the account
-  (`mailbox.sync`, 150 per page, from 0) at every login. The download
-  now lists the account once per database, and a message is stored once
-  with an entry per mailbox.
-- proton-bridge has a setting for it, `ShowAllMail`, on by default
-  (internal/vault/types_settings.go): off, All Mail is hidden from LIST
-  (`Connector.GetMailboxVisibility`, connector.go). It also refuses APPEND
-  and moves into All Mail (`isAllMailOrScheduled`, helpers.go).
-- Almost All Mail (`"15"`) and the categories (`"24"` Default and the
-  others, seen in every message's `LabelIDs` in the log) have no mailbox
-  in peroxide.
+The decisions are in 1ec3084, d855c30, 3621274 and e6562e9; the full
+plan as written is in TODO.md at b34f15e; docs/imap/messages.md,
+sync.md and security.md describe the result.
 
-**Steps.**
+Left open:
 
-1. (done, superseded by 1476ca8) `applyUpdate` skipped mailboxes not
-   synced yet. Every mailbox is now filled by the account download, so
-   none is skipped.
-2. (done) All Mail is shown unless `serve -show-all-mail=false`, as
-   bridge's `ShowAllMail` (on by default): off, it is left out of LIST
-   only (`user.ListMailboxes`), and SELECT/STATUS still open it by name,
-   as gluon does. Open: Almost All Mail (`"15"`) has no mailbox, and
-   bridge shows none either (`WantLabel`); add one only if asked.
-3. (done, 1476ca8) One background download of the whole account after
-   login, newest first, as bridge's sync (section 9.1), whatever
-   `-show-all-mail` says: like `ShowAllMail`, it only changes LIST.
-   `syncSem` is held per page; events interleave (decided 2026-11-08).
-4. (done) Tests: `TestStoreTellsEveryMailbox` (was
-   `TestStoreSkipsUnsyncedMailbox`) and `TestListShowAllMail`.
-
-## 9. Fetch full messages in the background (BODYSTRUCTURE cost)
-
-**Done (2026-11-09, commits c12f3d2 to d95611c)**, as decided below:
-store key derived in `auth` (c12f3d2); sealed store under
-`$XDG_DATA_HOME/peroxide/<user>/`, one file per version (c2f4c0b,
-516c292); FETCH from the stored message with bridge's builds (2e1a0f4);
-SEARCH on stored messages (fef89f1); failed set (ecdb1e5); background
-body download with AIMD (6ee0c62); edited drafts and new keys renewed
-under new UIDs (d95611c). docs/imap/messages.md, sync.md, security.md
-describe it. Open, below the plan: the leftovers at the end of this
-section. What follows is the record of how it was decided.
-
-**Problem.** Since commit f82e989, BODYSTRUCTURE and every body section
-need the full message (`GET /messages/{id}`): the local database has
-neither the body nor its MIME type, and only the decrypted body says
-whether a message is passed through as PGP/MIME. aerc fetches
-BODYSTRUCTURE for every message of its list (`UID FETCH 1:3
-(BODYSTRUCTURE ENVELOPE INTERNALDATE FLAGS UID RFC822.SIZE
-BODY.PEEK[HEADER])`), so opening a folder costs one request per message
-not in the 32-message memory cache (`messageCache`, imap/cache.go). The
-2026-11-05 log shows 3 requests for `1:3` and 2 for `4:5`, each 0-1 s.
-A folder of 500 messages opened for the first time in a session waits
-for 500 sequential requests, and again after every restart: the cache
-is in memory only.
-
-**More found in the 2026-11-06 audit.**
-
-- `BODY.PEEK[HEADER]` and `HEADER.FIELDS` cost a request too: since
-  f82e989 `fetchBodySection` gets the full message for every section,
-  as the top-level Content-Type depends on pass-through. Before, a
-  header fetch of a message without attachments needed none. So does
-  every section of a message that isn't a PGP message at all.
-- The cache holds 32 messages, fewer than one aerc list batch (the
-  default `aerc` window is 50 and more on a tall terminal): listing
-  evicts the messages just listed, and opening one downloads it again.
-- Each item of one FETCH decrypts again: `passThrough` (msg.Read, the
-  session key; since d6657fd also the key packets, and every account
-  key parsed from armor, `accountKeys`), then BODYSTRUCTURE decrypts and
-  quoted-printable-encodes the whole body to give its size and line
-  count (`encodedInlinePart`), then `BODY[]` decrypts it once more.
-  `BODYSTRUCTURE BODY.PEEK[]` of one message is three decryptions.
-- What would make header fetches and BODYSTRUCTURE DB-only again,
-  without storing bodies: on first full fetch, store in the message's
-  bolt record the pass-through decision, the inline part's header
-  (type, encoding: it differs for the armored fallback), its encoded
-  size and line count, and per attachment whether it is decryptable.
-  That is step 1's second option, narrowed; it must be invalidated as
-  step 5 says, and cleared when keys change (a restart unlocking a new
-  key turns an armored fallback into a decrypted body).
-- Attachment `Size` in BODYSTRUCTURE is the decrypted size from the
-  API, not the base64 size sent (RFC 3501 section 7.4.2, size "in its
-  transfer encoding"); the inline part does it right. Fix with step 1.
-
-**How proton-bridge does it** (internal/services/syncservice): one sync
-after login, as a pipeline of four stages, persisted and resumable:
-
-1. Metadata (stage_metadata.go): `GetMessageMetadataPage` 128 per page
-   (`MetadataPageSize`), newest first (`Desc: true`, then `EndID` = last
-   ID of the previous page, which comes back as the first result and is
-   skipped). Batches of at most 64 messages (`MetadataMaxMessages`) and
-   at most `DownloadRequestMem` (40-128 MB, from `MaxSyncMemory`, 2 GB by
-   default) of message and attachment sizes.
-2. Download (stage_download.go): `GetMessage` for each message, then
-   every attachment, in parallel: up to `MaxParallelDownloads` (32, "the
-   maximum recommended by the API team", doubled to 64 in
-   `NewDownloadStage`). Each request retries with exponential cool-down
-   on 429 and 5xx (`network.ExpCoolDown`). Parallelism adapts per chunk
-   (`DefaultDownloadRateModifier`), and that is a bug, confirmed in
-   `autoDownloadRate` (stage_download.go:258): it passes "a 429 or 5xx
-   was seen" as `Apply`'s `wasSuccess`, so the parallelism doubles after
-   a chunk that hit 429 and falls to 2 after a clean one, and it starts
-   at the maximum (64). `TestAutoDownloadScale_429or500x` asserts that
-   behaviour. Don't copy it (decided 2026-11-08, step 3 below).
-3. Build (stage_build.go): decrypt and build the RFC 822 message
-   (`DecryptAndBuildRFC822Into`, `IgnoreDecryptionErrors`: an
-   undecryptable body becomes the PGP/MIME fallback peroxide now uses),
-   parse its structure (`imap.NewParsedMessage`).
-4. Apply (stage_apply.go): store the literal and the parsed structure in
-   gluon's on-disk store, so later FETCHes make no request. The store
-   (gluon store/disk.go) seals each literal with AES-256-GCM under a key
-   hashed from the user's gluon passphrase (vault `GluonKey`), in blocks,
-   compressed first; a file per message, named by gluon's internal ID.
-
-Progress is saved (`syncservice.Status`: `LastSyncedMessageID`,
-`NumSyncedMessages`, `FailedMessages`): a sync stopped halfway resumes,
-and messages that failed are retried later. `StartSyncEventID` is the
-event ID when the sync began: events received meanwhile go to a reduced
-handler (messages only, `newSyncEventHandler`, service_sync_events.go),
-and once the sync ends the events are rewound to that ID and applied
-again (service.go:463-525). peroxide does this for the metadata since
-3b67642.
-
-**Decided 2026-11-08** (not started):
-
-- Store the built message, as bridge: (a). Not the API's encrypted
-  message (b), nor only the computed BODYSTRUCTURE (c).
-- Download every body and every attachment in the sync, as bridge: (a).
-  It costs a full download at the first sync, but the mail is then on
-  disk, readable offline, the user's own copy.
-- Parallelism: AIMD as proposed in step 3 (decided 2026-11-08, second
-  round).
-- Sealing key: derived from the bridge password (decided 2026-11-08,
-  third round, replacing the second round's random key kept in
-  `auth.json`). A lost or replaced bridge password loses the store: it
-  is rebuilt. Chosen as the safest and simplest, with the smallest
-  attack surface: no key is stored anywhere, nothing to carry over into
-  a new `auth.json` entry, and a new bridge password also cuts off
-  whoever had the old one from the store, which a random key kept in
-  `auth.json` would not (whoever read the old entry kept that key).
-  Details in step 1.
-
-**Decided 2026-11-09** (fourth round, after a review of every check
-the FETCH path makes today):
-
-- Key hand-over: `auth.Manager.Auth` returns a third value, the
-  store key (`[32]byte`), derived inside `auth` from the secret key and
-  the account's `UserID`; the cached session keeps the `UserID`. SMTP
-  and `sendmail` ignore it.
-- Where: one sealed file per message (AES-256-GCM, one shot, the
-  message ID as additional data, no compression), named by the hex of
-  the message ID, under `$XDG_DATA_HOME/peroxide/<user>/` when that is
-  set and absolute, else `~/.local/share/peroxide/<user>/`
-  (`config.DataPath`): mail is data, not cache, and is backed up as
-  such. `<user>.db` stays in `~/.config/peroxide/`. Linux only. The
-  per-message record (size, BODYSTRUCTURE, envelope, fallback flag)
-  goes in a bolt bucket, sealed under the same key.
-- One serving path: the message is built once, stored, and every FETCH
-  item that depends on content (ENVELOPE, BODYSTRUCTURE, RFC822.SIZE,
-  `BODY[...]`) is served from the stored bytes through go-imap's
-  `backendutil`. A message not stored yet is built and stored first
-  (one request, as aerc's list FETCH costs today); only FLAGS, UID and
-  INTERNALDATE stay metadata-only. Content never changes under a UID.
-  This retires the hand-built BODYSTRUCTURE and sections in
-  imap/message.go and the memory cache, and fixes 11.2 (RFC822.SIZE)
-  and 12.6 (attachment size); 12.5's logs happen once, at build.
-- Unlocked keys change: messages stored as a fallback (armored body,
-  `.pgp` attachment, PGP/MIME pass-through) are built again and, when
-  their bytes differ, get new UIDs, by the same path as an edited
-  draft.
-- Edited drafts and sent messages (`EventUpdate`): as gluon
-  (`applyMessageUpdated`): fetch, build, compare with the stored bytes,
-  new UIDs only when they differ. A message not stored keeps its UIDs.
-- Last resort: built bytes that `backendutil` can't parse are replaced
-  by a safe message, a text part saying why and the content as an
-  `application/octet-stream` attachment.
-- Received PGP/MIME (`MIMEType` multipart/mixed: the decrypted body is
-  a whole MIME entity): bridge's `buildPGPRFC822`, its header merged
-  into the message's, `multipart/signed` when signatures are extracted.
-  Today it is wrapped in a `multipart/mixed` part without a boundary.
-- Attached messages (`message/rfc822`): no transfer encoding, as
-  bridge, so their BODYSTRUCTURE carries the envelope and structure
-  RFC 3501 requires.
-- An attachment that fails to decrypt after its key packets opened is
-  served as `<name>.pgp`, as bridge, instead of failing the FETCH.
-- A section that doesn't exist answers an empty string, as Dovecot and
-  gluon, instead of failing the FETCH.
-- SEARCH: on stored messages HEADER, SENTBEFORE/SENTSINCE (the
-  header's Date), LARGER/SMALLER and BODY/TEXT (the decoded text parts)
-  read the stored message; unstored ones answer from the metadata, so
-  results may change as the download goes. Today BODY and TEXT read the
-  metadata's empty `Body` and never match.
-- Failed messages: as bridge, a set of message IDs that failed to
-  build or download (other than 2501, 429, 5xx, network), in bolt
-  under `meta`, cleared by `Wipe`. The background download skips them;
-  an interactive FETCH, an event or `download-mailbox` retries them,
-  and success removes them. Unlike bridge, the message stays listed
-  (its metadata is stored).
-- Commits, each building alone: (1) `auth` derives the key; (2) sealed
-  store, records, key check in `meta`, Wipe removes the files; (3)
-  FETCH from the store, single-flight per message, deletes, ENVELOPE
-  from the header, SEARCH; (4) body downloader with AIMD
-  (`APIError` gets `Retry-After`), `download-mailbox` too; (5) edited
-  drafts and key changes; (6) docs and TODO. Then 9.1's step 8.
-
-**Found in the 2026-11-08 audit of uid-persist, to settle first or
-with it.**
-
-- Done before this section, in 3b67642 and 6c5f64b: updates reach
-  clients in order (`user.sendSem`); the download holds no lock across
-  requests, replaying events once done; events failing on the network,
-  429 or 5xx are retried, not rebuilt; FETCH walks the mailbox once.
-  The body download inherits all four: its requests must hold no lock,
-  and store under `syncSem`.
-- An edited draft (`EventUpdate`) keeps its UID while its body changes
-  (`applyMessageEvent`, imap/user.go: only the memory cache is dropped;
-  `UpdateMessage` patches the metadata). RFC 3501 has a message's
-  content immutable under a UID, and clients cache bodies by UID; with
-  stored bodies the stale one would stay on disk. proton-bridge deletes
-  a draft or sent message and creates it again, with new UIDs
-  (`onMessageUpdateDraftOrSent`, service_message_events.go). Do it in
-  step 5: expunge the old entries, drop the stored body, create the
-  message again from `GET /messages/{id}`.
-- Each connection sees the shared state (no per-session snapshot): see
-  section 14. With stored bodies it doesn't get worse, but FETCH over a
-  range being filled by the download is where it shows.
-
-**What peroxide needs.**
-
-1. Storage: the message as served to clients (the RFC 822 bytes
-   `fetchBodySection` builds today, pass-through and fallbacks included),
-   its BODYSTRUCTURE and its envelope, sealed with AES-256-GCM as gluon's
-   store does, one file per message under `~/.config/peroxide/<user>/`,
-   named by message ID (bolt holds only the index). Keys never stored.
-   The sealing key (decided): derived, never stored. The bridge password
-   is the base64 of 32 random bytes (`auth.GeneratePassword`), the same
-   secret key that seals the `auth.json` entry (nacl/secretbox). The
-   store's key is HKDF-SHA256 (`crypto/hkdf`) of that secret key, with
-   the account's `UserID` (immutable at Proton) as salt and a fixed
-   label, e.g. "peroxide message store v1", as info: a different key
-   from the one sealing `auth.json`, and one per account. No slow KDF is
-   needed: the input is 32 random bytes, not a human password. It exists
-   in memory only while a login or `download-mailbox` holds the
-   password, never written, never logged.
-   - `auth.Manager.Auth` checks the password and drops the secret key
-     (it keeps a bcrypt hash only), so it must hand the derived key, or
-     the means to derive it, to its caller: an interface change in
-     auth/auth.go and its callers (imap backend, `download-mailbox`).
-   - Each stored file is AES-256-GCM with a fresh random nonce, its
-     message ID as additional data (a file renamed to another message's
-     name fails to open).
-   - The database records which key sealed the store: the `UserID` and
-     a key check value (HMAC-SHA256 of a fixed label under the key), in
-     `meta`. A key that doesn't match (a new bridge password from
-     `peroxide auth`, a lost one) rebuilds the database at that login,
-     by the same path as a Refresh (`Wipe`, then the download): one path,
-     and the user's choice of "lose the password, rebuild the mailbox".
-     Keeping the metadata and UIDs and dropping only the bodies would be
-     possible (the metadata isn't sealed), but is a second path for no
-     need: not planned.
-   - What it protects: the bodies at rest are as safe as the bridge
-     password. After a new bridge password (`peroxide auth` again) the
-     next login wipes the old store and rebuilds it under the new key,
-     so the old password opens nothing that stays on disk. Copies of
-     the old files taken before then remain readable with the old
-     password: no scheme can undo that. docs/security.md and
-     docs/commands.md (`auth`) say so; nothing to carry over.
-   - Tests: a store sealed under one key fails to open under another,
-     and a login with a new bridge password rebuilds the database; the
-     derived key differs from the secret key sealing `auth.json`, and
-     from another account's (salt); the key never appears in a
-     `-debug` log.
-2. A body downloader per user, after the metadata download (bridge's
-   download stage follows its metadata stage), at login, stopped with
-   the last logout (`u.done`), resumable: a message is downloaded when
-   it has no stored body, so the stored bodies are the progress. Newest
-   first. Every message body (`GET /messages/{id}`) and every attachment
-   (`GET /attachments/{id}`). Requests hold no lock; storing takes
-   `syncSem` and delivers in turn (`unlockSyncAndSend`). Bounded memory,
-   as bridge's `DownloadRequestMem`: a batch stops at a total of
-   message and attachment sizes, not only a count.
-3. Parallelism, the intent of bridge's `DefaultDownloadRateModifier`
-   fixed: start small, increase while requests succeed, decrease on a
-   429 or 5xx, with a cool-down. Decided: AIMD (additive increase,
-   multiplicative decrease, as TCP congestion control; it converges to
-   the largest rate the server allows without oscillating as doubling
-   does):
-   - start at 2 parallel requests; at most 32 (bridge's
-     `MaxParallelDownloads` before its doubling: "the maximum
-     recommended by the API team");
-   - every request that succeeds while no cool-down runs adds
-     1/parallelism (so +1 per round of requests);
-   - a 429 or 5xx halves it (at least 1) and starts a cool-down: the
-     `Retry-After` the response gives, else an exponential back-off from
-     2 s to 60 s with jitter (seeded, `rand.New(rand.NewPCG)`), the
-     request retried after it;
-   - another 429 during the cool-down halves again and restarts it; at
-     its end increase resumes;
-   - until every message is stored.
-   Tested in testing/synctest with a fake that answers 429 above a
-   given parallelism: the rate settles below it, no request is lost.
-4. Interactive FETCHes go first: a FETCH needing a message the
-   downloader hasn't reached fetches it at once (as now) and stores it,
-   and the downloader skips it. A FETCH and the downloader asking for
-   one message make one request.
-5. Invalidation: deletes remove the stored message; an edited draft or
-   sent message (`EventUpdate`) is deleted and created again with new
-   UIDs, as bridge (see the audit above); a rebuild deletes every
-   stored message (`Wipe`, and the files). Keys change: an address key
-   unlocked at a later login turns an armored fallback into a decrypted
-   body, so a stored body records which fallback it is, and those are
-   built again when the unlocked keys differ from the ones recorded.
-6. Resume: done for the metadata (9.1, 1476ca8); the bodies resume by
-   what is stored (step 2).
-7. Tests: a stored message makes BODYSTRUCTURE and BODY[] make no
-   request; an edited draft gets new UIDs and its new body; on 429 the
-   downloader backs off and the parallelism drops (testing/synctest); a
-   FETCH of a message being downloaded makes one request, not two; a
-   stored body can't be read with another key; `BenchmarkFetchFlags`
-   and a FETCH-BODYSTRUCTURE benchmark before and after.
-8. ENVELOPE from the original header (with the storage of step 1).
-   Since 49b614e `messageHeader` starts from the header Proton
-   received (`Message.Header`, sent only by `GET /messages/{id}`: the
-   metadata pages have neither it nor `ParsedHeaders`), so BODY[HEADER]
-   keeps References, In-Reply-To and the sent Date. `fetchEnvelope`
-   still reads the metadata only, as aerc asks ENVELOPE of every
-   listed message and a full message each would cost a request each:
-   - In-Reply-To is always NIL, so clients that thread by ENVELOPE (as
-     aerc does without the THREAD extension) can't link replies.
-   - Date is Proton's receive time (`Time`), not the header's Date.
-   - Sender is always From: a real `Sender` header (mailing lists,
-     sending on behalf) is lost.
-   - Message-Id is `<ExternalID>`; the original header's value could
-     differ in case or form.
-   proton-bridge builds ENVELOPE from the full header (gluon
-   imap/envelope.go, at sync, stored with the message), defaulting
-   Sender and Reply-To to From. Once full messages are stored, build it
-   from `messageHeader(full)` the same way: parse Date, In-Reply-To,
-   Message-Id and the address fields from it, keeping the metadata's
-   subject and addresses where the header has none, and fall back to the
-   metadata while a message isn't stored yet.
-   Tests: a stored message's ENVELOPE has the header's In-Reply-To,
-   Date and Sender; an unstored one the metadata's, without a request.
-
-**Left after 2026-11-09** (step numbers above):
-
-- 7. Not written: a test that a stored body can't be read with another
-  key at the imap level (the database tests cover it); the
-  FETCH-BODYSTRUCTURE benchmark before and after. Run by the human:
-  every test of these commits was compiled, none run in the sandbox.
-- 8. ENVELOPE of a message not stored yet: D1(a) builds it first, so
-  an aerc listing of a mailbox the download hasn't reached costs one
-  request per message, as it did; no metadata fallback was kept.
-- The memory to build: a message and its attachments are held whole
-  (the store seals in one shot). Every build of an account (download,
-  FETCH, edited draft) shares one 64 MB budget by Proton's sizes
-  (memBudget, 2026-11-09); a big message waits until the others leave
-  it room, not first come first served.
-- (done, ab3215f) `refreshMessage` no longer holds syncSem for its
-  request; updates of one message in an events page rebuild it once.
-  Not done: waiting for a draft to be quiet for a poll before
-  rebuilding it (decided against for now: the client would see the
-  previous version for up to a poll).
-- (done, c9c6fc1) Unstored messages: still one request each (Proton has
-  no batch endpoint for full messages), but a FETCH builds them in
-  parallel, 64 at a time, paced with the download, and a selected
-  mailbox goes to the front of the download.
+- Tests not written: an imap-level check that a stored body can't be
+  read with another key, and a FETCH BODYSTRUCTURE benchmark.
+- A message not stored yet is built before its first content FETCH:
+  one request each (Proton has no batch endpoint for full messages).
+- The memory budget isn't first come first served: a big message waits
+  until the running builds leave it room.
+- A draft is rebuilt at each events page that changes it; waiting for it
+  to be quiet was decided against for now.
 - go-imap's `backendutil` doesn't descend into attached messages:
   `BODY[2.1]` of a `message/rfc822` part answers empty.
-- (done, 8bf8ea4) Body signatures are checked with the sender's
-  Proton keys (GET /keys, cached a day) and the verdict written in
-  `X-Peroxide-Signature` (docs/imap/messages.md#signatures), for aerc
-  to show (aerc_implementation.md section 6). Open: messages stored
-  before 8bf8ea4 get no field until built again (decided: not
-  rebuilt); Proton's contact key pinning isn't read.
-- (done, a3e260e, 2d8b69d) Attachment signatures: checked (part fields
-  and `attachments=` on the message field); attachments sent through
-  SMTP signed and uploaded with their signature.
-- (done, a33d7ce, c7e66f0) SMTP encrypts to a recipient's first active
-  key and refuses one whose keys are all obsolete; recipients without
-  a key get the whole message signed (ClearMIME, multipart/signed)
-  when Proton's "Sign external messages" is on. Open: contacts' own
-  sign/encrypt/scheme preferences (vCards) aren't read; PGP/MIME to
-  external recipients with a key isn't sent (they get the internal
-  package).
-- 9.1 step 8 (one `syncSem` per mailbox) stays open.
+- Messages stored before 8bf8ea4 carry no verdict until rebuilt
+  (decided: not rebuilt); Proton's contact key pinning isn't read.
+- SMTP doesn't read contacts' own sign, encrypt and scheme preferences
+  (vCards), nor send PGP/MIME to external recipients with a key.
 
-### 9.1 Keep UIDs across sessions (option b)
+### 9.1 (done: keep UIDs across sessions; labels-events c3dc632, f52c088; uid-persist 1476ca8, 6019ec9, b2dfad8, 2bbb24d, 3b67642, 6c5f64b, 2b1110c)
 
-**Done (1476ca8), as proton-bridge v3 does it** (decisions of
-2026-11-08): one background download of the whole account at login,
-newest first (`POST /mail/v4/messages` `{Desc, EndID}`, 128 per page,
-cursor stored with each page, so it resumes), so synced mail gets UIDs
-in reverse arrival order as with bridge, left to clients to sort;
-`syncSem` per page with events applied between pages, creates
-idempotent; UIDVALIDITY per mailbox from gluon's epoch, refused before
-2023-02-01; a schema version that wipes older databases; counts kept;
-a UID index per mailbox. Repairs are rebuilds from a wiped database,
-never prunes: a Refresh, or a message event that fails, stores no event
-ID, marks the database (`meta/rebuild`, bridge's `ShouldResync`), sends
-BYE and disconnects the account's clients; the next login wipes and
-downloads again. `peroxide download-mailbox [-discard-local-copy]` runs
-the download from the command line. docs/imap/sync.md has the details.
-Bodies: done, section 9 (2026-11-09). What follows is the
-plan as written before, kept for the record.
+Each session resynced every mailbox from empty, renumbering UIDs from 1
+under UIDVALIDITY 1, against RFC 3501. Now, as bridge v3, one background
+download lists the whole account once per database, newest first and
+resumable; UIDs, UIDVALIDITY (from gluon's epoch) and counts persist;
+updates reach clients in order; requests hold no lock and events are
+rewound and replayed when the download ends; events failing on the
+network, 429 or 5xx are retried, others mark the database for a rebuild
+(BYE, wipe, download again). `peroxide download-mailbox` runs it from
+the command line. docs/imap/sync.md has the details.
 
-**Problem.** `mailbox.init` syncs a mailbox on its first use in every
-session (FETCH, SEARCH, STORE, COPY, MOVE, EXPUNGE, APPEND; not SELECT
-or STATUS, which use the API's counts until then), and `mailbox.sync`
-(imap/mailbox.go) starts with
-`mbox.db.Reset()`: it deletes the mailbox's bucket and recreates it,
-so its bolt sequence restarts and every message gets a new UID from 1.
-UIDVALIDITY stays 1 (`Status`, `StatusUidValidity`). RFC 3501 section
-2.3.1.1 forbids it: a UID may never name another message under the same
-UIDVALIDITY.
-
-**Observed** (2026-11-05 `-debug-raw` log, bob, INBOX):
-
-| Message | UID 21:50 | UID 21:56 |
-|---|---|---|
-| LOGOUT TEST (arrived 21:52:59, while logged out) | - | 1 |
-| Peroxide non-encrypted test | 1 | 2 |
-| PEROXIDE ENCRYPTED TEST 3 | 2 | 3 |
-| PEROXIDE ENCRYPT TEST 4 | 3 | 4 |
-
-The message got UID 1, below the older ones, so aerc (which orders by
-UID) showed it last. The cause was a race: its replayed create event was
-applied while the 21:56 sync had emptied INBOX. Commit c3dc632 serializes
-syncs, event pages and actions (`user.syncSem`), so the message now gets
-the next UID after the sync; but the renumbering of the others remains.
-
-**Why it matters.**
-
-- Clients that cache by UID see the wrong message: aerc's header cache
-  (`cache-headers`, worker/imap/cache.go) keys entries by mailbox,
-  UIDVALIDITY and UID (`header.<mailbox>.<uidvalidity>.<uid>`), so with
-  it on, a renumbered message shows another's headers. Any client with
-  an offline store keyed by UID is exposed the same way.
-- A client that stays connected across a Refresh event keeps UIDs that
-  `reset` then reuses (NOTIFY design question 3).
-- Every session lists every opened mailbox from Proton again: one
-  request per 150 messages, before the first command answers.
-- It blocks section 9 step 6: a background downloader would start over
-  each session.
-
-**How proton-bridge does it.** gluon keeps each mailbox's UIDs and its
-UIDVALIDITY in its database across sessions. A sync adds only messages
-it doesn't know and removes those gone; UIDVALIDITY is bumped only when
-the store must be rebuilt (`NewUIDValidityBumpedStateUpdate`, which also
-marks connected clients' state invalid so they get BYE and reconnect).
-
-**Steps.**
-
-1. Store per mailbox, in its bucket or the counts bucket: UIDVALIDITY
-   (start at a value derived from the time, as servers usually do, so
-   it never repeats after a database is deleted), and whether the
-   mailbox has ever been synced. `Status` and SELECT report the stored
-   UIDVALIDITY.
-2. `mailbox.sync`: no `Reset`. List the mailbox from Proton, add the
-   messages missing from the bucket (new UIDs, above the bolt sequence),
-   remove the entries no longer listed, and leave the others with their
-   UIDs. Messages missed while logged out arrive anyway as replayed
-   events (resume, commit dafd522); the listing then repairs what an
-   event couldn't (an event lost to a Refresh, a database from an older
-   peroxide).
-3. Order: Proton lists by ID (`Sort: "ID"`, ascending), which is roughly
-   arrival order; messages added during a sync get UIDs in that order.
-   A message older than ones already stored (moved in from another
-   folder) gets a higher UID, which is correct IMAP: UIDs order arrival
-   in the mailbox, not dates.
-4. `reset` (Refresh event) and any other case where UIDs can't be kept:
-   clear the bucket and increment UIDVALIDITY; tell connected clients
-   (a `* OK [UIDVALIDITY n]` is not enough for a selected mailbox: send
-   BYE, as gluon does, so they resync).
-5. Sync once per database, not per session: `initialized` comes from the
-   stored flag, and later sessions rely on events. Keep a way to force a
-   full listing (a new `peroxide -resync` flag, or on a Refresh event).
-6. Background sync of All Mail (section 8 step 3), when shown: started
-   after login, owned by the user and stopped at logout, resuming from
-   the stored progress. It takes `syncSem` one page at a time, and
-   message events for All Mail that arrive meanwhile are applied to it
-   only after the listing ends, so they still get the highest UIDs. A
-   client opening All Mail early waits for it rather than starting a
-   second sync. Its listing carries each message's `LabelIDs`, so it can
-   fill the other mailboxes' buckets too, as bridge's single pass does;
-   decide then whether it replaces their per-mailbox syncs.
-7. Tests (imap, database): a second session keeps the UIDs and
-   UIDVALIDITY of the first; a message added while logged out gets the
-   next UID; one removed is expunged; a Refresh changes UIDVALIDITY and
-   restarts UIDs; STATUS UIDVALIDITY matches SELECT; an event during the
-   background sync waits only one page and gets a UID above the listed
-   ones (`testing/synctest`); logout stops the sync.
-
-**Found in the 2026-11-06 audit; both get worse once syncs stop.**
-
-- A message event that fails to apply is lost for good. In
-  `receiveEvents` (imap/user.go) a create, update or delete that fails
-  in the database (`cannot handle create event ...`) is only logged,
-  and the page's ID is stored anyway (`SetLastEventID` after the page),
-  so the next session resumes after it. Today the resync of every
-  mailbox at its first use each session repairs it. With step 5 it
-  stays wrong until a full listing. Step 7: count the messages a page
-  failed to apply and, if any, store the page ID but mark the mailboxes
-  they belong to (by label ID) as needing a listing (the stored "synced"
-  flag of step 1 cleared), so their next use relists them; test that
-  a failed create makes the next session list INBOX.
-- `user.syncSem` (commit c3dc632) is one slot for the whole account,
-  held for a whole `mailbox.sync`: one request per 150 messages, so
-  minutes for a first sync of All Mail. Meanwhile every event page
-  waits, and so does every STORE, COPY, MOVE and EXPUNGE, and even the
-  `\Seen` that a FETCH of `BODY[]` sets (`setsSeen` goes through
-  `applyAction`), in every mailbox of the account. It was chosen for
-  correctness: without it a page applied while a sync had emptied
-  INBOX gave its message UID 1. With steps 2 and 5, syncs no longer
-  empty buckets, so step 8: make the semaphore per mailbox (an event
-  page then takes those of the mailboxes it touches, in label-ID order
-  to avoid deadlocks), or hold it per page of the listing rather than
-  for the whole sync; test that a STORE in INBOX answers while All Mail
-  syncs (testing/synctest, the listing blocked).
+Left open (step 8 of the plan): `syncSem` is one slot for the account,
+now held per page and per action, not per sync. A semaphore per mailbox
+(an event page taking those it touches, in label-ID order) would let a
+STORE in INBOX go ahead while Drafts is busy; test with synctest.
 
 ## 10. CREATE, DELETE and RENAME are not implemented
 
@@ -810,95 +355,28 @@ renamed or deleted. Through go-proton-api (label.go):
 
 Found in the 2026-11-06 audit; none is from branch `labels-events`.
 
-1. **Map order reaches clients.** `ListMailboxes` (imap/user.go) ranges
-   over `u.mailboxes`, so LIST orders mailboxes differently each time;
-   `Status` (imap/mailbox.go) ranges over `u.flags`, so FLAGS and
-   PERMANENTFLAGS of SELECT reorder labels. AGENTS.md wants
-   `slices.Sorted(maps.Keys(m))`. Fix: LIST in a fixed order, system
-   mailboxes first in their protonmail label order (INBOX, Drafts,
-   Sent, Starred, Archive, Spam, Trash, All Mail) then folders by name;
-   flags sorted by label ID behind `\Seen \Deleted`. `getMailbox` also
-   picks the first of two folders with the same name in map order
-   (section 1 covers the collision). Tests: LIST and FLAGS equal across
-   repeated calls and two users built from the same labels in different
-   insertion orders.
-2. (done, 2e1a0f4: RFC822.SIZE is the stored length; an unstored
-   message is built first) **RFC822.SIZE is Proton's size, not the size served.** `fetchMessage`
-   answers `msg.Size` (the API's, of the message as Proton stores it),
-   SEARCH LARGER/SMALLER uses it too, but `BODY[]` is what peroxide
-   builds: another header, quoted-printable, base64 attachments, or
-   PGP/MIME. RFC 3501 section 2.3.4 requires the size of what FETCH
-   `BODY[]` returns; clients size progress bars and partial fetches by
-   it. Fix: compute it as `len(BODY[])` the first time the full message
-   is built and store it in the message's bolt record with the facts of
-   section 9 ("more found"); until then answer the API size (no request
-   per message in a list fetch). Deterministic as long as the built
-   message is: multipart boundaries already derive from the message ID
-   (`messageHeader`, sha1), passThroughBoundary too; keep it so and test
-   that two builds of one message give equal bytes and RFC822.SIZE.
-3. (done, 1476ca8) **A Refresh rebuilds mailboxes under clients' feet.**
-   A Refresh now marks the database for a rebuild, sends BYE and
-   disconnects the account's clients, as proton-bridge removes its IMAP
-   user; the next login wipes and downloads again with new UIDVALIDITY
-   values, so no client keeps stale sequence numbers. What was written:
-   On
-   `EventRefreshMail`, `receiveEvents` resets every mailbox, then
-   `initMailboxes` replaces `u.mailboxes` with new `*mailbox` values,
-   making requests (ListLabels) while holding `u.Lock` (every
-   `getMailbox`, STATUS and LIST waits on the network). Clients that
-   had a mailbox selected keep the old value, whose `db` bucket was
-   reset: their sequence numbers no longer match anything and no
-   EXPUNGE was sent. Fix: keep the `*mailbox` values (reset them in
-   place, as now), fetch the labels before taking `u.Lock`, then apply
-   them as `handleLabelEvent` does (create, rename, delete) rather than
-   rebuilding. Then tell each client that has a mailbox selected that
-   its contents changed: go-imap v1.2.1 has no update for that, so send
-   an `ExpungeUpdate` for every message, from the highest sequence
-   number down, before the reset, and let the new EXISTS follow.
-   Section 9.1's UIDVALIDITY bump
-   on Refresh then tells UID-caching clients too. Test: a selected
-   mailbox gets the expunges and its new EXISTS after a Refresh, and
-   `getMailbox` doesn't wait on ListLabels.
-4. (done, 1476ca8: no sync holds the mailbox lock; STATUS takes none and
-   reads the stored counts) **STATUS waits for a sync.** `Status` takes `mbox.Lock` for the whole
-   count, and `init` holds that lock (and `syncSem`) for the whole sync:
-   a STATUS of a mailbox being synced (aerc's check-mail) waits minutes,
-   though `apiCountsLock` exists so counts don't need the mailbox lock.
-   Fix: read `initialized` under `mbox.Lock` and release it before
-   counting; the bolt `Count` is its own transaction, and an unsynced
-   mailbox answers `apiCounts()`. A sync in progress then reports API
-   counts until it ends. Test (testing/synctest): STATUS answers while
-   `sync` blocks on its listing.
-5. (done, 1476ca8: no API counts; every mailbox is counted locally and
-   only grows as the download goes) **SELECT of an unsynced mailbox can make EXISTS go down.** SELECT
-   calls `init` first, so SELECT itself is exact; but STATUS (and the
-   EXISTS go-imap derives from a `MailboxUpdate` for a mailbox not yet
-   synced) uses `apiCounts()`, then the first event sends EXISTS with
-   the local sequence number of a database that only holds what events
-   added. A client that STATUSed 40 then gets `* 3 EXISTS`, which RFC
-   3501 section 7.3.1 forbids below the known count without EXPUNGE.
-   Fix: send no `MailboxUpdate` for an uninitialized mailbox (nobody
-   can have it selected, as SELECT initializes it), and keep only the
-   API counts current (`fetchCounts`, already done). Test: a create
-   event for an unsynced mailbox sends no update; STATUS stays on API
-   counts until SELECT.
-6. **go-imap does not keep the order of updates.** Its update loop
-   (go-imap server.go, `listenUpdates`) starts one goroutine per update
-   and connection and takes the next update at once, so two updates for
-   one connection race to its response channel. `sendUpdates`
-   (imap/actions.go) queues all of an action's updates before waiting
-   for any, and `receiveEvents` (imap/user.go) all of a page's. For
-   EXPUNGE the order is the meaning: messages 1 and 3 removed are sent
-   as `EXPUNGE 1` then `EXPUNGE 2` (each renumbers what follows, RFC
-   3501 section 7.4.1); reversed, the client removes 2 then 1, the
-   wrong message, and its view is off until it reselects. EXISTS before
-   FETCH, and FETCH FLAGS after the EXPUNGE that renumbered it, race the
-   same way. Fix: in both places wait for each update's `Done()` before
-   queueing the next (a few ms per update on a local client; one
-   connection blocked on writing then delays the next update for all, as
-   it already delays `Done`). Test: an action expunging seq 1 and 3 hands
-   go-imap the second only after the first is done (a fake updates
-   channel that does not close Done until told).
+1. **Map order reaches clients.** FLAGS and PERMANENTFLAGS are in
+   label-ID order since bc32862 (`TestStatusFlagsSorted`). Still open:
+   `ListMailboxes` (imap/user.go) ranges over `u.mailboxes`, so LIST
+   orders mailboxes differently each time, and `getMailbox` picks the
+   first of two folders with the same name in map order (section 1
+   covers the collision). Fix: LIST system mailboxes first in their
+   protonmail label order (INBOX, Drafts, Sent, Starred, Archive, Spam,
+   Trash, All Mail), then folders by name; look names up in the same
+   order. Tests: LIST equal across repeated calls and two users built
+   from the same labels in different insertion orders.
+2. (done, 2e1a0f4) RFC822.SIZE is the length of the stored message
+   served, no longer Proton's size.
+3. (done, 1476ca8) A Refresh marks the database for a rebuild, sends BYE
+   and disconnects the account's clients; the next login downloads again
+   under new UIDVALIDITY values.
+4. (done, 1476ca8) STATUS takes no mailbox lock and reads the stored
+   counts; no sync holds it.
+5. (done, 1476ca8) No API counts: every mailbox is counted locally and
+   only grows as the download goes, so EXISTS never goes down.
+6. (done, 3b67642) Updates reach clients in the order of the changes:
+   each writer takes `sendSem` before releasing `syncSem`, and `sendOn`
+   hands go-imap one update at a time, each once it was written.
 7. **Untagged EXPUNGE during FETCH, STORE or SEARCH.** RFC 3501 section
    7.4.1 forbids it while a command not using UIDs runs (sequence
    numbers would shift under it), and section 5.5 asks the server to
@@ -913,8 +391,9 @@ Found in the 2026-11-06 audit; none is from branch `labels-events`.
    `COPYUID` (RFC 4315, RFC 6851 section 4.3), so clients that cache by
    UID look the copies up again; `Status` sets `UnseenSeqNum = 0 //
    TODO` (imap/mailbox.go), so SELECT has no `[UNSEEN n]`. Both need
-   the UIDs to persist first (section 9.1): a COPYUID naming UIDs the
-   next session reassigns would mislead the client's cache.
+   the UIDs to persist first (section 9.1, done in 1476ca8, so this is
+   no longer blocked): a COPYUID naming UIDs the next session reassigned
+   would have misled the client's cache.
 
 ## 12. Nits from the 2026-11-06 audit
 
@@ -953,18 +432,10 @@ Small, independent, found reviewing branch `labels-events`.
    Fix: remember the fingerprints already reported in `user` and log
    each once per session. Test: two updates of an address with one new
    key log once.
-5. (done, 2e1a0f4: they log once, when the message is built) **Pass-through and fallbacks log at every FETCH.**
-   `passThroughBodyStructure` (imap/passthrough.go) logs "Message ... is
-   encrypted to a key Proton doesn't have: passed through as PGP/MIME"
-   every time BODYSTRUCTURE is fetched, so every list fetch of a folder
-   with such mail repeats it; `inlinePart` ("served encrypted") and
-   `attachmentBody` ("Attachment ... served encrypted") likewise. Fix:
-   log once per message per session (a set in `user`, or log only when
-   the full message is first fetched, in `fullMessage`).
-6. (done, 2e1a0f4: sizes are computed from the bytes served) **Attachment size in BODYSTRUCTURE** is the API's decrypted size, not
-   the size of the base64 sent (RFC 3501 section 7.4.2); for an armored
-   fallback (`<name>.pgp`) it is further off, as armor and key packets
-   are added. Recorded under section 9 ("more found") with its fix.
+5. (done, 2e1a0f4) Pass-through and fallbacks log once, when the
+   message is built.
+6. (done, 2e1a0f4) Attachment sizes in BODYSTRUCTURE are computed from
+   the bytes served.
 7. **No charset without a MIME type.** `inlineHeader` (imap/message.go)
    sets no Content-Type when `msg.MIMEType` is empty (it logs "Sending an
    inline header without its proper MIME type"), and so no charset.
@@ -981,7 +452,7 @@ Small, independent, found reviewing branch `labels-events`.
    endpoint. Bridge and go-proton-api use `/core/v4/events`. Either
    correct the docs or move peroxide to the `core/v4` path, checking it
    with a `-debug` log first.
-9. (done: `go fix ./...` applied, `go fix -diff ./...` prints nothing)
+9. (done, 97af4f7: `go fix ./...` applied, `go fix -diff ./...` prints nothing)
 10. **What Proton answers for an expired event ID.** Since 5d1595f the
     receiver restarts from the latest event (and rebuilds every mailbox)
     only for a 400, 404 or 422 whose code is 2001, 2061 or 2501
@@ -993,7 +464,7 @@ Small, independent, found reviewing branch `labels-events`.
     record the status and Code of `GET /events/...`. If it is none of
     those, add it to `refused` and to `TestRefused`; if it is a 2xx with
     `Refresh` set, nothing to do (`EventRefreshMail` is handled).
-11. (done: MOVE is label then unlabel, proton-bridge's default
+11. (done, 87d4da7, c7983f8, deaf2a4: MOVE is label then unlabel, proton-bridge's default
     `moveMessagesWithUnlabelCallOnFolders`; INBOX/Sent, All Mail and
     Starred moves refused.) Left open: the unlabel after a move into a
     folder only answers "does not exist", a 0.4 s round trip. Bridge
