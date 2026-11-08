@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"maps"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -50,6 +52,20 @@ type fakeAPI struct {
 
 	mu       sync.Mutex
 	requests []string
+	// imports are the messages imported (POST /mail/v4/messages/import),
+	// each answered with the message ID "imported".
+	imports []fakeImport
+}
+
+// fakeImport is an import request: its metadata, and its message as sent.
+type fakeImport struct {
+	meta struct {
+		AddressID string
+		LabelIDs  []string
+		Unread    int
+		Flags     protonmail.MessageFlags
+	}
+	message []byte
 }
 
 type fakeResponse struct {
@@ -71,6 +87,10 @@ func (api *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost && r.URL.Path == "/mail/v4/messages" {
 		api.serveMetadata(w, r)
+		return
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/mail/v4/messages/import" {
+		api.serveImport(w, r)
 		return
 	}
 	if r.Method != http.MethodPut || !strings.HasPrefix(r.URL.Path, "/messages/") {
@@ -116,6 +136,53 @@ func (api *fakeAPI) madeRequests() []string {
 	api.mu.Lock()
 	defer api.mu.Unlock()
 	return append([]string(nil), api.requests...)
+}
+
+// madeImports returns the imports made so far.
+func (api *fakeAPI) madeImports() []fakeImport {
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	return slices.Clone(api.imports)
+}
+
+// serveImport records an import request of one message, named "0" as
+// protonmail.ImportMessage names it, and answers its success.
+func (api *fakeAPI) serveImport(w http.ResponseWriter, r *http.Request) {
+	var imp fakeImport
+	_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil {
+		api.t.Errorf("import Content-Type: %v", err)
+	}
+	mr := multipart.NewReader(r.Body, params["boundary"])
+	for {
+		p, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			api.t.Errorf("read the import: %v", err)
+			break
+		}
+		b, _ := io.ReadAll(p)
+		switch p.FormName() {
+		case "Metadata":
+			var meta map[string]json.RawMessage
+			if err := json.Unmarshal(b, &meta); err != nil {
+				api.t.Errorf("import Metadata %q: %v", b, err)
+			}
+			if err := json.Unmarshal(meta["0"], &imp.meta); err != nil {
+				api.t.Errorf("import Metadata %q: %v", b, err)
+			}
+		case "0":
+			imp.message = b
+		default:
+			api.t.Errorf("import part %q", p.FormName())
+		}
+	}
+	api.mu.Lock()
+	api.imports = append(api.imports, imp)
+	api.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	io.WriteString(w, `{"Code":1001,"Responses":[{"Name":"0","Response":{"Code":1000,"MessageID":"imported"}}]}`)
 }
 
 // serveMetadata answers the metadata of the messages asked for by ID, those

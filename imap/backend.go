@@ -12,14 +12,18 @@ import (
 
 	"github.com/seamanticus/peroxide/auth"
 	"github.com/seamanticus/peroxide/events"
+	"github.com/seamanticus/peroxide/protonmail"
+	"github.com/seamanticus/peroxide/sendrecord"
 )
 
 var errNotYetImplemented = errors.New("not yet implemented")
 
-// appendLimit is the largest message APPEND accepts, in octets: Proton refuses
-// messages over 50 MB (go-proton-api ErrImportSizeExceeded; APPEND makes a
-// draft today, TODO section 3 moves it to the import API).
-const appendLimit = 50 << 20
+// appendLimit is the largest message APPEND accepts, in octets: the import
+// API's limit, which it applies once the message is encrypted (Proton's 50 MB
+// of attachments, base64-encoded). Encrypting a message keeps its size, give
+// or take, unless it is encrypted whole (armored, a third larger): then
+// CreateMessage refuses it with TOOBIG after encrypting it.
+const appendLimit = protonmail.MaxImportSize
 
 // MaxLiteralSize is the largest literal the server must accept: an APPENDed
 // message, the largest there is. Set it as go-imap's Server.MaxLiteralSize,
@@ -38,7 +42,10 @@ var _ imapbackend.AppendLimitUser = (*user)(nil) // proof: compile-time
 type backend struct {
 	sessions      *auth.Manager
 	eventsManager *events.Manager
-	updates       chan imapbackend.Update
+	// The messages the SMTP server sent, which APPEND finds instead of
+	// importing them again.
+	sends   *sendrecord.Recorder
+	updates chan imapbackend.Update
 	// Whether LIST shows All Mail, as proton-bridge's ShowAllMail setting.
 	showAllMail bool
 
@@ -127,12 +134,14 @@ func (be *backend) Updates() <-chan imapbackend.Update {
 	return be.updates
 }
 
-// New returns the IMAP backend. showAllMail false leaves All Mail out of LIST
+// New returns the IMAP backend. sends are the messages the SMTP server sent,
+// shared with it (sendrecord). showAllMail false leaves All Mail out of LIST
 // (user.ListMailboxes).
-func New(sessions *auth.Manager, eventsManager *events.Manager, showAllMail bool) imapbackend.Backend {
+func New(sessions *auth.Manager, eventsManager *events.Manager, sends *sendrecord.Recorder, showAllMail bool) imapbackend.Backend {
 	return &backend{
 		sessions:      sessions,
 		eventsManager: eventsManager,
+		sends:         sends,
 		showAllMail:   showAllMail,
 		updates:       make(chan imapbackend.Update, 50),
 		users:         make(map[string]*user),

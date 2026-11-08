@@ -26,6 +26,7 @@ import (
 	"github.com/seamanticus/peroxide/events"
 	imapbackend "github.com/seamanticus/peroxide/imap"
 	"github.com/seamanticus/peroxide/protonmail"
+	"github.com/seamanticus/peroxide/sendrecord"
 	smtpbackend "github.com/seamanticus/peroxide/smtp"
 )
 
@@ -113,8 +114,8 @@ func tlsConfigFor(tlsConfig *tls.Config, proto string) *tls.Config {
 	return c
 }
 
-func listenAndServeSMTP(addr string, debug bool, authManager *auth.Manager, tlsConfig *tls.Config) error {
-	be := smtpbackend.New(authManager)
+func listenAndServeSMTP(addr string, debug bool, authManager *auth.Manager, sends *sendrecord.Recorder, tlsConfig *tls.Config) error {
+	be := smtpbackend.New(authManager, sends)
 	s := smtp.NewServer(be)
 	s.Addr = addr
 	s.Domain = "localhost" // TODO: make this configurable
@@ -135,8 +136,8 @@ func listenAndServeSMTP(addr string, debug bool, authManager *auth.Manager, tlsC
 	return s.ListenAndServe()
 }
 
-func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, eventsManager *events.Manager, tlsConfig *tls.Config, showAllMail bool) error {
-	be := imapbackend.New(authManager, eventsManager, showAllMail)
+func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, eventsManager *events.Manager, sends *sendrecord.Recorder, tlsConfig *tls.Config, showAllMail bool) error {
+	be := imapbackend.New(authManager, eventsManager, sends, showAllMail)
 	s := imapserver.New(be)
 	s.Enable(imapbackend.Extension{})
 	// A larger literal is refused before it is read: the client gets BAD, as
@@ -462,28 +463,31 @@ func main() {
 	case "smtp":
 		addr := *smtpHost + ":" + *smtpPort
 		authManager := auth.NewManager(newClient)
-		log.Fatal(listenAndServeSMTP(addr, debug, authManager, tlsConfig))
+		log.Fatal(listenAndServeSMTP(addr, debug, authManager, sendrecord.New(), tlsConfig))
 	case "imap":
 		addr := *imapHost + ":" + *imapPort
 		authManager := auth.NewManager(newClient)
 		eventsManager := events.NewManager()
-		log.Fatal(listenAndServeIMAP(addr, debug, authManager, eventsManager, tlsConfig, *showAllMail))
+		log.Fatal(listenAndServeIMAP(addr, debug, authManager, eventsManager, sendrecord.New(), tlsConfig, *showAllMail))
 	case "serve":
 		smtpAddr := *smtpHost + ":" + *smtpPort
 		imapAddr := *imapHost + ":" + *imapPort
 
 		authManager := auth.NewManager(newClient)
 		eventsManager := events.NewManager()
+		// What SMTP sends, APPEND into Sent finds there instead of importing
+		// it again: only within one process.
+		sends := sendrecord.New()
 
 		done := make(chan error, 2)
 		if !*disableSMTP {
 			go func() {
-				done <- listenAndServeSMTP(smtpAddr, debug, authManager, tlsConfig)
+				done <- listenAndServeSMTP(smtpAddr, debug, authManager, sends, tlsConfig)
 			}()
 		}
 		if !*disableIMAP {
 			go func() {
-				done <- listenAndServeIMAP(imapAddr, debug, authManager, eventsManager, tlsConfig, *showAllMail)
+				done <- listenAndServeIMAP(imapAddr, debug, authManager, eventsManager, sends, tlsConfig, *showAllMail)
 			}()
 		}
 		log.Fatal(<-done)
@@ -541,8 +545,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		err = smtpbackend.SendMail(c, u, privateKeys, addrs, rcpt, os.Stdin)
-		if err != nil {
+		if _, err := smtpbackend.SendMail(c, u, privateKeys, addrs, rcpt, os.Stdin); err != nil {
 			log.Fatal(err)
 		}
 	default:

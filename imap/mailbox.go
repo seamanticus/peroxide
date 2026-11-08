@@ -469,22 +469,6 @@ func (mbox *mailbox) entries(isUID bool, seqSet *imap.SeqSet) ([]mailboxEntry, e
 	return picked, nil
 }
 
-func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Literal) error {
-	if body.Len() > appendLimit {
-		return imapbackend.ErrTooBig
-	}
-	if mbox.label != protonmail.LabelDraft {
-		return errors.New("cannot create messages outside the Drafts mailbox")
-	}
-
-	_, err := createMessage(mbox.u.c, mbox.u.u, mbox.u.privateKeys, mbox.u.addresses(), body)
-	if err != nil {
-		return err
-	}
-
-	return mbox.Poll()
-}
-
 func (mbox *mailbox) fromSeqSet(isUID bool, seqSet *imap.SeqSet) ([]string, error) {
 	entries, err := mbox.entries(isUID, seqSet)
 	apiIDs := make([]string, 0, len(entries))
