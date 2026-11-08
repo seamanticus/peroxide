@@ -597,9 +597,14 @@ with it.**
   rebuilt); Proton's contact key pinning isn't read.
 - (done, a3e260e, 2d8b69d) Attachment signatures: checked (part fields
   and `attachments=` on the message field); attachments sent through
-  SMTP signed and uploaded with their signature. Open, awaiting a
-  decision: signing the body sent to recipients without a key, whom
-  Proton delivers plain mail with no signature today.
+  SMTP signed and uploaded with their signature.
+- (done, a33d7ce, c7e66f0) SMTP encrypts to a recipient's first active
+  key and refuses one whose keys are all obsolete; recipients without
+  a key get the whole message signed (ClearMIME, multipart/signed)
+  when Proton's "Sign external messages" is on. Open: contacts' own
+  sign/encrypt/scheme preferences (vCards) aren't read; PGP/MIME to
+  external recipients with a key isn't sent (they get the internal
+  package).
 - 9.1 step 8 (one `syncSem` per mailbox) stays open.
 
 ### 9.1 Keep UIDs across sessions (option b)

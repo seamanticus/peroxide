@@ -47,13 +47,23 @@ Proton's limits apply when it uploads.
    inline part is refused ("message doesn't contain a body part").
 7. **Look up every recipient's key** (`GET /keys?Email=...`). Proton
    answers with the keys it knows for that address: a Proton user's,
-   and possibly others it has. peroxide uses the first key returned,
-   if any.
+   and possibly others it has. peroxide uses the first key Proton marks
+   active (not obsolete). A recipient whose keys are all obsolete makes
+   the send fail, naming them, rather than getting in clear what they
+   expect encrypted (as proton-bridge refuses too).
 8. **Send** (`POST /messages/<id>`), with up to two packages:
    - recipients with a key: the body's session key encrypted to each
      recipient's key (Proton's "internal" scheme), signed;
-   - recipients without: the session key in clear for Proton to
-     encrypt-at-rest and deliver as normal mail, unsigned.
+   - recipients without: as your Proton setting **Sign external
+     messages** says (read with `GET /mail/v4/settings` at each such
+     send). On: the whole message as you wrote it, attachments
+     included, but for its `Bcc`, signed with your key, which Proton
+     delivers as PGP/MIME `multipart/signed` (RFC 3156): the recipient's
+     client can check your signature over the text and every file, and
+     a client without OpenPGP shows a `signature.asc` attachment. Off:
+     the body and attachments as normal mail, unsigned. Either way the
+     session key goes to Proton in clear, for it to deliver and encrypt
+     at rest.
 9. Proton sends, and files the message in **Sent**. Don't have your
    client also save a copy (see [imap/changes.md](imap/changes.md#append)).
 
@@ -67,11 +77,11 @@ web app and send it from there.
 - **No PGP/MIME or inline PGP to external recipients.** Every
   recipient with a key gets the "internal" package, Proton's scheme for
   mail between Proton users. Proton's contact settings (encrypt, sign,
-  scheme) are not read.
-- **No signature for unencrypted recipients**: Proton delivers them
-  the body as plain mail. Attachments are signed, but only a Proton
-  recipient's client checks that signature.
-- Only the first key of a recipient is used, whatever its `Send` flag.
+  scheme) are not read: a contact's own "sign" choice doesn't override
+  the account setting.
+- Attachments to recipients with a key are signed apart (above), but
+  only a Proton recipient's client checks that signature.
+- Only one key of a recipient is used, the first active one.
 - Only `In-Reply-To` sets the parent, as a reply: forwards are sent as
   new messages.
 - No duplicate check: a client that retries a send (after a timeout)
