@@ -373,8 +373,9 @@ func (u *User) Fallbacks() ([]string, error) {
 
 // MissingBody is a message whose body isn't stored.
 type MissingBody struct {
-	ID   string
-	Size int64 // Proton's, an estimate of what downloading it takes
+	ID       string
+	Size     int64 // Proton's, an estimate of what downloading it takes
+	LabelIDs []string
 }
 
 // MissingBodies returns the messages whose body isn't stored, newest first
@@ -400,7 +401,7 @@ func (u *User) MissingBodies() ([]MissingBody, error) {
 			if err != nil {
 				return fmt.Errorf("cannot read message %s: %w", k, err)
 			}
-			all = append(all, missing{MissingBody{msg.ID, msg.Size}, int64(msg.Time)})
+			all = append(all, missing{MissingBody{msg.ID, msg.Size, msg.LabelIDs}, int64(msg.Time)})
 			return nil
 		})
 	})

@@ -343,8 +343,11 @@ func (mbox *mailbox) listMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fe
 	defer close(ch)
 
 	// Every message is fetched with the same items, so an unknown one fails
-	// the first message found, before any is sent.
+	// the FETCH before any message is built or sent.
 	items = expandFetchItems(items)
+	if _, err := parseSections(items); err != nil {
+		return nil, err
+	}
 	opens := setsSeen(items)
 
 	// The entries in one pass over the mailbox, in one read transaction, and
@@ -355,7 +358,12 @@ func (mbox *mailbox) listMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fe
 	if err != nil {
 		return nil, err
 	}
-	for _, e := range entries {
+	content := needsContent(items)
+	for i, e := range entries {
+		if content && i%fetchChunk == 0 {
+			// The next chunk's unstored messages, built at once.
+			mbox.u.prefetch(entries[i:min(i+fetchChunk, len(entries))])
+		}
 		fetched, msg, err := mbox.fetchMessage(e.seqNum, e.uid, e.apiID, items)
 		if errors.Is(err, errMessageGone) {
 			// Its delete event removes it, with an EXPUNGE, at the next
@@ -374,6 +382,45 @@ func (mbox *mailbox) listMessages(uid bool, seqSet *imap.SeqSet, items []imap.Fe
 	}
 
 	return opened, nil
+}
+
+// fetchChunk is how many messages of a FETCH are built at once before they
+// are sent: twice the most requests the account may make at once, so that
+// the requests stay busy, and the response starts after one chunk rather
+// than after the whole FETCH.
+const fetchChunk = 2 * maxParallel
+
+// prefetch builds and stores the messages of entries that aren't stored
+// yet, in parallel, paced by the account's limiter as the background
+// download is. Each would otherwise cost the FETCH a round trip in turn.
+// Each is tried once: a message that fails (throttled included, which also
+// slows the download) is left to fetchMessage, which builds it again and
+// reports why, as a FETCH always did; one already being built (by the
+// download) is waited for there too.
+func (u *user) prefetch(entries []mailboxEntry) {
+	ctx := context.Background() // go-imap v1 gives a backend no context
+	limiter := u.pacer()
+	var wg sync.WaitGroup
+	for _, e := range entries {
+		if _, err := u.db.BodyRecord(e.apiID); !errors.Is(err, database.ErrNotFound) {
+			continue // stored, or an error fetchMessage reports
+		}
+		if failed, err := u.db.Failed(e.apiID); err != nil || failed {
+			continue // left to fetchMessage: one try per FETCH, as before
+		}
+		if err := limiter.acquire(ctx); err != nil {
+			panic("invariant: acquire fails only when its context ends")
+		}
+		wg.Go(func() {
+			_, _, err := u.storedMessage(ctx, e.apiID)
+			var after time.Duration
+			if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok {
+				after = apiErr.RetryAfter
+			}
+			limiter.release(err != nil && retryable(err), after)
+		})
+	}
+	wg.Wait()
 }
 
 // mailboxEntry is a message of a mailbox with its numbers there.

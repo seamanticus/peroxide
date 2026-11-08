@@ -12,6 +12,10 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/emersion/go-imap"
+	imapserver "github.com/emersion/go-imap/server"
+
+	"github.com/seamanticus/peroxide/imap/database"
 	"github.com/seamanticus/peroxide/protonmail"
 )
 
@@ -152,6 +156,107 @@ func TestMemBudget(t *testing.T) {
 			t.Errorf("acquire() of the whole budget, nothing held = %v", err)
 		}
 		b.release(maxInFlightBytes)
+	})
+}
+
+// A selected mailbox's messages go first, each part keeping newest first;
+// All Mail moves nothing.
+// evidence: witnesses
+func TestPrioritized(t *testing.T) {
+	m := func(id string, labels ...string) database.MissingBody {
+		return database.MissingBody{ID: id, LabelIDs: labels}
+	}
+	missing := []database.MissingBody{m("a", "0"), m("b", "x"), m("c", "0", "x"), m("d", "0")}
+	ids := func(ms []database.MissingBody) []string {
+		var out []string
+		for _, m := range ms {
+			out = append(out, m.ID)
+		}
+		return out
+	}
+	if got := ids(prioritized(missing, "x")); !slices.Equal(got, []string{"b", "c", "a", "d"}) {
+		t.Errorf("prioritized(x) = %v, want [b c a d]", got)
+	}
+	if got := ids(prioritized(missing, protonmail.LabelAllMail)); !slices.Equal(got, []string{"a", "b", "c", "d"}) {
+		t.Errorf("prioritized(All Mail) = %v, want the order unchanged", got)
+	}
+}
+
+// selectConn is a connection that takes any response.
+type selectConn struct {
+	imapserver.Conn
+	ctx *imapserver.Context
+}
+
+func (c *selectConn) Context() *imapserver.Context  { return c.ctx }
+func (c *selectConn) WriteResp(imap.WriterTo) error { return nil }
+
+// SELECT and EXAMINE through Extension open the mailbox as go-imap does, and
+// make it the body download's priority; each selection counts, the same
+// mailbox again included.
+func TestSelectPrioritizes(t *testing.T) {
+	mbox, _ := newTestMailbox(t, nil)
+	u := mbox.u
+	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: mbox}
+	u.flags = map[string]string{}
+	for i, name := range []string{"SELECT", "EXAMINE"} {
+		cmd := Extension{}.Command(name)()
+		sel, ok := cmd.(*selectCommand)
+		if !ok {
+			t.Fatalf("Extension doesn't handle %v", name)
+		}
+		sel.Mailbox = "INBOX"
+		conn := &selectConn{ctx: &imapserver.Context{User: u}}
+		if err := sel.Handle(conn); err != nil {
+			t.Fatalf("%v = %v", name, err)
+		}
+		if conn.ctx.Mailbox == nil || conn.ctx.MailboxReadOnly != (name == "EXAMINE") {
+			t.Errorf("%v selected %v, read-only %v", name, conn.ctx.Mailbox, conn.ctx.MailboxReadOnly)
+		}
+		if label, gen := u.priority(); label != protonmail.LabelInbox || gen != uint64(i+1) {
+			t.Errorf("after %v priority = %q, %v; want INBOX, %v", name, label, gen, i+1)
+		}
+	}
+}
+
+// A FETCH of unstored messages builds them several at once, as the
+// download does, rather than one round trip each in turn: with every
+// request taking 100 ms, 8 messages take far less than 800 ms.
+func TestFetchBuildsInParallel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setBubbleClock()
+		var msgs []*protonmail.Message
+		for i := range 8 {
+			msgs = append(msgs, inboxMessage("m"+strconv.Itoa(i), 0))
+		}
+		var mu sync.Mutex
+		inFlight, most := 0, 0
+		api := &fakeMetadata{t: t, msgs: msgs}
+		api.full = func(r *http.Request, id string) (*http.Response, error) {
+			mu.Lock()
+			inFlight++
+			most = max(most, inFlight)
+			mu.Unlock()
+			time.Sleep(100 * time.Millisecond)
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+			return jsonResponse(r, http.StatusOK, `{"Code":1000,"Message":{"ID":"`+id+`","MIMEType":"text/plain","Body":"b"}}`), nil
+		}
+		u, inbox, _, _ := newDownloadTestUser(t, api)
+		syncTestMailbox(t, u.db, protonmail.LabelInbox, msgs)
+
+		start := time.Now()
+		got, err := fetchAll(t, inbox, imap.FetchRFC822Size)
+		if err != nil || len(got) != len(msgs) {
+			t.Fatalf("FETCH = %v messages, %v; want %v", len(got), err, len(msgs))
+		}
+		if took := time.Since(start); took >= 800*time.Millisecond {
+			t.Errorf("FETCH of %v unstored messages took %v, want them built at once", len(msgs), took)
+		}
+		if most < 2 {
+			t.Errorf("at most %v requests at once, want several", most)
+		}
 	})
 }
 

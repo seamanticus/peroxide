@@ -29,13 +29,39 @@ func (Extension) NewConn(c imapserver.Conn) imapserver.Conn {
 	return c
 }
 
-// Command replaces FETCH. UID FETCH looks its inner command up by the same
-// name (go-imap server.Uid), so it gets this one too.
+// Command replaces FETCH, SELECT and EXAMINE. UID FETCH looks its inner
+// command up by the same name (go-imap server.Uid), so it gets this one too.
 func (Extension) Command(name string) imapserver.HandlerFactory {
-	if name != "FETCH" {
-		return nil
+	switch name {
+	case "FETCH":
+		return func() imapserver.Handler { return new(fetchCommand) }
+	case "SELECT":
+		return func() imapserver.Handler { return new(selectCommand) }
+	case "EXAMINE":
+		return func() imapserver.Handler {
+			cmd := new(selectCommand)
+			cmd.ReadOnly = true
+			return cmd
+		}
 	}
-	return func() imapserver.Handler { return new(fetchCommand) }
+	return nil
+}
+
+// selectCommand is go-imap's SELECT, which then tells the account which
+// mailbox a client opened, so that the background download stores its
+// messages first: the backend can't tell a SELECT from a STATUS.
+type selectCommand struct {
+	imapserver.Select
+}
+
+func (cmd *selectCommand) Handle(conn imapserver.Conn) error {
+	if err := cmd.Select.Handle(conn); err != nil {
+		return err
+	}
+	if mbox, ok := conn.Context().Mailbox.(*mailbox); ok {
+		mbox.u.prioritize(mbox.label)
+	}
+	return nil
 }
 
 // fetchCommand is go-imap's FETCH, plus what the backend can't learn from

@@ -59,6 +59,8 @@ type user struct {
 	eventsReceiver eventsReceiver
 	builds         builds    // messages being built and stored
 	mem            memBudget // memory the builds take
+	pacerOnce      sync.Once
+	pacerLimiter   *downloadLimiter // requests' pace; use pacer()
 
 	done      chan struct{} // closed by the last Logout
 	eventSent chan struct{}
@@ -99,6 +101,10 @@ type user struct {
 	// Replaced, never changed in place, by Addresses events: read it with
 	// addresses.
 	addrs []*protonmail.Address
+	// The mailbox a client selected last (prioritize), whose messages the
+	// body download stores first; priorityGen counts the selections.
+	priorityLabel string
+	priorityGen   uint64
 }
 
 func getUser(be *backend, username string, c *protonmail.Client, privateKeys openpgp.EntityList, storeKey auth.StoreKey) (*user, error) {

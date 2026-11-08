@@ -5,12 +5,24 @@ import (
 	"errors"
 	"log"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/seamanticus/peroxide/imap/database"
 	"github.com/seamanticus/peroxide/protonmail"
 )
+
+// pacer returns the account's request pacer, shared by the background
+// download and FETCH, so that both slow down together when Proton asks to.
+func (u *user) pacer() *downloadLimiter {
+	u.pacerOnce.Do(func() {
+		// Seeded from the account, so the jitter is the same in each run of
+		// a test.
+		u.pacerLimiter = newDownloadLimiter(rand.New(rand.NewPCG(uint64(len(u.username)), 1)))
+	})
+	return u.pacerLimiter
+}
 
 // downloadBodies downloads, builds and stores every message whose body isn't
 // stored, newest first, as many at once as the limiter allows (TODO section
@@ -25,6 +37,11 @@ import (
 // Requests hold no lock, and storing one message takes none of syncSem: a
 // body changes nothing clients were told, so there is nothing to deliver. A
 // FETCH wanting a message being downloaded waits for it (builds).
+//
+// A mailbox a client selects (prioritize) goes to the front: its messages
+// not stored yet are taken next, still newest first, then the rest. So the
+// mailbox in front of the user fills first, and its FETCHes rarely find a
+// message to build.
 func (u *user) downloadBodies(ctx context.Context, retryFailed bool) bool {
 	missing, err := u.db.MissingBodies()
 	if err != nil {
@@ -36,12 +53,18 @@ func (u *user) downloadBodies(ctx context.Context, retryFailed bool) bool {
 	}
 	log.Printf("Downloading %v messages of %q", len(missing), u.u.Name)
 
-	// Seeded from the account, so a run's jitter is the same in tests.
-	limiter := newDownloadLimiter(rand.New(rand.NewPCG(uint64(len(missing)), uint64(len(u.u.Name)))))
+	limiter := u.pacer()
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	stored, failed := 0, 0
-	for _, m := range missing {
+	var gen uint64
+	for len(missing) > 0 {
+		if label, g := u.priority(); g != gen {
+			gen = g
+			missing = prioritized(missing, label)
+		}
+		m := missing[0]
+		missing = missing[1:]
 		if !retryFailed {
 			if f, err := u.db.Failed(m.ID); err != nil {
 				log.Printf("cannot read whether message %v failed before: %v", m.ID, err)
@@ -66,11 +89,46 @@ func (u *user) downloadBodies(ctx context.Context, retryFailed bool) bool {
 	}
 	wg.Wait()
 	if ctx.Err() != nil {
-		log.Printf("Download of the messages of %q stopped: %v stored, %v to go", u.u.Name, stored, len(missing)-stored)
+		log.Printf("Download of the messages of %q stopped: %v stored, %v to go", u.u.Name, stored, len(missing))
 		return false
 	}
 	log.Printf("Downloaded %v messages of %q, %v failed", stored, u.u.Name, failed)
 	return failed == 0
+}
+
+// prioritize makes the messages of the mailbox labelID the next the body
+// download takes. Called when a client selects it.
+func (u *user) prioritize(labelID string) {
+	u.Lock()
+	defer u.Unlock()
+	u.priorityLabel = labelID
+	u.priorityGen++
+}
+
+// priority returns the mailbox prioritize named last, and how many times it
+// was called, so that the download sees a new selection of the same one.
+func (u *user) priority() (labelID string, gen uint64) {
+	u.Lock()
+	defer u.Unlock()
+	return u.priorityLabel, u.priorityGen
+}
+
+// prioritized returns missing with the messages of labelID first, each part
+// in the order it had. All Mail holds every message: nothing moves.
+func prioritized(missing []database.MissingBody, labelID string) []database.MissingBody {
+	if labelID == protonmail.LabelAllMail {
+		return missing
+	}
+	first := make([]database.MissingBody, 0, len(missing))
+	var rest []database.MissingBody
+	for _, m := range missing {
+		if slices.Contains(m.LabelIDs, labelID) {
+			first = append(first, m)
+		} else {
+			rest = append(rest, m)
+		}
+	}
+	return append(first, rest...)
 }
 
 // downloadBody stores the message m, holding one of limiter's slots, which it
