@@ -138,6 +138,9 @@ func (be *backend) Updates() <-chan imapbackend.Update {
 // shared with it (sendrecord). showAllMail false leaves All Mail out of LIST
 // (user.ListMailboxes).
 func New(sessions *auth.Manager, eventsManager *events.Manager, sends *sendrecord.Recorder, showAllMail bool) imapbackend.Backend {
+	if sends == nil {
+		panic("invariant: imap.New needs a sendrecord.Recorder")
+	}
 	return &backend{
 		sessions:      sessions,
 		eventsManager: eventsManager,

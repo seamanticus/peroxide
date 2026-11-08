@@ -276,18 +276,25 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 		return fmt.Errorf("cannot read the message: %w", err)
 	}
 	// go-imap v1 gives a backend no context: the requests run to their end.
+	// The client's date isn't kept, as proton-bridge ignores it too: Proton
+	// dates an import by its Date field.
 	ctx := context.Background()
 
 	h, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(literal)))
 	if err != nil {
 		return fmt.Errorf("cannot read the message header: %w", err)
 	}
-	existing, err := mbox.existingMessages(ctx, literal, h)
-	if err != nil {
-		return err
-	}
-	if len(existing) > 0 {
-		return mbox.alreadyThere(existing)
+	// A client saving a draft again may keep its Message-Id, and deletes the
+	// old draft once the APPEND answers OK: answered "already there", it
+	// would delete the only copy. So a draft is always imported.
+	if mbox.label != protonmail.LabelDraft {
+		existing, err := mbox.existingMessages(ctx, literal, h)
+		if err != nil {
+			return err
+		}
+		if len(existing) > 0 {
+			return mbox.alreadyThere(existing)
+		}
 	}
 
 	// Into Drafts the message is imported too, not made a Proton draft
@@ -328,20 +335,18 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 //     up to sentWait for a send under way (proton-bridge's sendrecorder);
 //   - the messages whose Message-Id is literal's (MessagesByExternalID).
 func (mbox *mailbox) existingMessages(ctx context.Context, literal []byte, h textproto.Header) ([]*protonmail.Message, error) {
-	if be := mbox.u.backend; be != nil && be.sends != nil {
-		// A message Hash can't read the SMTP server didn't record either.
-		if hash, err := sendrecord.Hash(literal); err == nil {
-			waitCtx, cancel := context.WithTimeout(ctx, sentWait)
-			apiID, ok := be.sends.SentMessage(waitCtx, mbox.u.username, hash, recipients(h))
-			cancel()
-			if ok {
-				msgs, err := mbox.u.c.MessagesByID(ctx, []string{apiID})
-				if err != nil {
-					return nil, fmt.Errorf("cannot look up the message just sent: %w", err)
-				}
-				if len(msgs) > 0 {
-					return msgs, nil
-				}
+	// A message Hash can't read the SMTP server didn't record either.
+	if hash, err := sendrecord.Hash(literal); err == nil {
+		waitCtx, cancel := context.WithTimeout(ctx, sentWait)
+		apiID, ok := mbox.u.backend.sends.SentMessage(waitCtx, mbox.u.username, hash, recipients(h))
+		cancel()
+		if ok {
+			msgs, err := mbox.u.c.MessagesByID(ctx, []string{apiID})
+			if err != nil {
+				return nil, fmt.Errorf("cannot look up the message just sent: %w", err)
+			}
+			if len(msgs) > 0 {
+				return msgs, nil
 			}
 		}
 	}
@@ -365,15 +370,18 @@ func (mbox *mailbox) existingMessages(ctx context.Context, literal []byte, h tex
 // it is, so NO, and a client moving it from another account keeps its copy.
 // Either way under ALERT, which clients must show (RFC 3501 section 7.1.1):
 // an OK text alone is shown by none of aerc, Thunderbird and Evolution.
+// The APPEND's flags aren't applied to the message found: it is the one
+// already there, flags and all.
 func (mbox *mailbox) alreadyThere(existing []*protonmail.Message) error {
+	name := mbox.Name()
 	if slices.ContainsFunc(existing, func(m *protonmail.Message) bool {
 		return slices.Contains(m.LabelIDs, mbox.label)
 	}) {
-		log.Printf("APPEND to %v of message %v, already there: not imported", mbox.name, existing[0].ID)
-		return appendAlert(imap.StatusRespOk, fmt.Sprintf("This message is already in %v: it was not copied again", mbox.name))
+		log.Printf("APPEND to %v of message %v, already there: not imported", name, existing[0].ID)
+		return appendAlert(imap.StatusRespOk, fmt.Sprintf("This message is already in %v: it was not copied again", name))
 	}
 	where := mbox.u.mailboxNames(existing)
-	log.Printf("APPEND to %v of message %v, already in %v: refused", mbox.name, existing[0].ID, where)
+	log.Printf("APPEND to %v of message %v, already in %v: refused", name, existing[0].ID, where)
 	return appendAlert(imap.StatusRespNo, fmt.Sprintf(
 		"This message is already in your Proton account, in %v: it was not copied, as Proton keeps one copy of a message",
 		where))
@@ -388,8 +396,10 @@ func (u *user) mailboxNames(msgs []*protonmail.Message) string {
 			if labelID == protonmail.LabelAllMail || labelID == protonmail.LabelStarred {
 				continue
 			}
-			if mbox := u.getMailboxByLabel(labelID); mbox != nil && !slices.Contains(names, mbox.name) {
-				names = append(names, mbox.name)
+			if mbox := u.getMailboxByLabel(labelID); mbox != nil {
+				if name := mbox.Name(); !slices.Contains(names, name) {
+					names = append(names, name)
+				}
 			}
 		}
 	}

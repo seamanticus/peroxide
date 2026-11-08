@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -378,7 +380,6 @@ func TestAppendExisting(t *testing.T) {
 			}
 			inbox, _ := newAppendTestMailbox(t, api, nil)
 			addTestMailbox(t, inbox.u, "Sent", protonmail.LabelSent, nil)
-			inbox.u.backend.sends = sendrecord.New()
 			if tt.sentTo != nil {
 				inbox.u.backend.sends.Start("bob", hash, tt.sentTo).Sent("e")
 			}
@@ -395,6 +396,52 @@ func TestAppendExisting(t *testing.T) {
 				t.Errorf("made requests %q, want %q", got, tt.wantRequests)
 			}
 		})
+	}
+}
+
+// A draft saved again under the Message-Id of one in the account is imported:
+// the client deletes the old draft once the APPEND answers OK, so an "already
+// there" answer would lose the edit. No lookup is made.
+// evidence: witnesses
+func TestAppendDraftKnownMessageID(t *testing.T) {
+	api := &fakeAPI{t: t,
+		labelIDs:    map[string][]string{"d": {protonmail.LabelDraft, protonmail.LabelAllMail}},
+		externalIDs: map[string]string{"d": "m1@example.org"},
+	}
+	inbox, _ := newAppendTestMailbox(t, api, nil)
+	drafts := addTestMailbox(t, inbox.u, "Drafts", protonmail.LabelDraft, nil)
+
+	if err := appendTo(drafts, []string{imap.DraftFlag}, "Message-Id: <m1@example.org>\r\n"+appendLiteral); err != nil {
+		t.Fatalf("CreateMessage() = %v", err)
+	}
+	if got, want := api.madeRequests(), []string{"POST /mail/v4/messages/import"}; !slices.Equal(got, want) {
+		t.Errorf("made requests %q, want %q", got, want)
+	}
+}
+
+// The answer for a message already there names the mailboxes as they are
+// while a rename goes on: run with -race, it reads names under their lock.
+// evidence: witnesses
+func TestAppendExistingDuringRename(t *testing.T) {
+	api := &fakeAPI{t: t,
+		labelIDs:    map[string][]string{"e": {"f1", protonmail.LabelAllMail}},
+		externalIDs: map[string]string{"e": "m1@example.org"},
+	}
+	inbox, _ := newAppendTestMailbox(t, api, nil)
+	work := addTestMailbox(t, inbox.u, "Work", "f1", nil)
+	dest := addTestMailbox(t, inbox.u, "Dest", protonmail.LabelArchive, nil)
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range 100 {
+			work.setName(fmt.Sprintf("Work %v", i))
+			dest.setName(fmt.Sprintf("Dest %v", i))
+		}
+	})
+	resp := statusResp(appendTo(dest, nil, "Message-Id: <m1@example.org>\r\n"+appendLiteral))
+	wg.Wait()
+	if resp.Type != imap.StatusRespNo || !strings.Contains(resp.Info, "in Work") {
+		t.Errorf("response %v %q, want NO naming Work", resp.Type, resp.Info)
 	}
 }
 

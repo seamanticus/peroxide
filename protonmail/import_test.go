@@ -270,6 +270,47 @@ func TestImportMessage(t *testing.T) {
 	}
 }
 
+// An import answered 401 is sent again, whole, after ReAuth: its body can be
+// read twice.
+// evidence: witnesses
+func TestImportMessageAfterReAuth(t *testing.T) {
+	key := newImportKey(t)
+	var bodies [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		bodies = append(bodies, b)
+		w.Header().Set("Content-Type", "application/json")
+		if len(bodies) == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, `{"Code":401,"Error":"expired"}`)
+			return
+		}
+		io.WriteString(w, `{"Code":1001,"Responses":[{"Name":"0","Response":{"Code":1000,"MessageID":"m1"}}]}`)
+	}))
+	defer srv.Close()
+	reauths := 0
+	c := &Client{RootURL: srv.URL, uid: "u", accessToken: "old"}
+	c.ReAuth = func() error {
+		reauths++
+		c.accessToken = "new"
+		return nil
+	}
+
+	id, err := c.ImportMessage(t.Context(), key, &ImportMetadata{AddressID: "a1"}, []byte("From: a@example.org\r\n\r\nbody\r\n"))
+	if err != nil || id != "m1" {
+		t.Fatalf("ImportMessage() = %q, %v, want m1", id, err)
+	}
+	if reauths != 1 || len(bodies) != 2 {
+		t.Fatalf("%v re-authentications, %v requests, want 1 and 2", reauths, len(bodies))
+	}
+	if len(bodies[1]) == 0 || !bytes.Equal(bodies[0], bodies[1]) {
+		t.Errorf("the request sent again differs: %v bytes, then %v", len(bodies[0]), len(bodies[1]))
+	}
+}
+
 // A message over MaxImportSize once encrypted is refused before any request.
 // evidence: witnesses
 func TestImportMessageTooBig(t *testing.T) {
