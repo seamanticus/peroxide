@@ -55,8 +55,22 @@ type PublicKeyResp struct {
 	Keys          []*PublicKey
 }
 
+// PublicKeyFlags are the states Proton gives a public key (go-proton-api
+// KeyState).
+type PublicKeyFlags int
+
+const (
+	// PublicKeyTrusted: not compromised; signatures made by it can be
+	// trusted.
+	PublicKeyTrusted PublicKeyFlags = 1 << iota
+	// PublicKeyActive: not obsolete; mail can be encrypted to it.
+	PublicKeyActive
+)
+
 type PublicKey struct {
+	// Send is not in Proton's answers (they carry Flags); unused.
 	Send      int
+	Flags     PublicKeyFlags
 	PublicKey string
 }
 

@@ -80,6 +80,13 @@ func (s *senderKeys) get(ctx context.Context, c *protonmail.Client, address stri
 	}
 	var keys openpgp.EntityList
 	for _, pub := range resp.Keys {
+		// Proton clears Trusted on a key the owner marked compromised:
+		// signatures it made no longer vouch for the sender, as in
+		// Proton's own clients. Left out: a body it signed is neutral beside
+		// the sender's other keys, permerror if it was the only one.
+		if pub.Flags&protonmail.PublicKeyTrusted == 0 {
+			continue
+		}
 		ent, err := pub.Entity()
 		if err != nil {
 			log.Printf("cannot read a public key of %v: %v", address, err)

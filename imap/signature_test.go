@@ -21,7 +21,7 @@ import (
 func keysResponse(t *testing.T, keys ...*openpgp.Entity) fakeResponse {
 	t.Helper()
 	type pub struct {
-		Send      int
+		Flags     int // trusted and active, as Proton marks a sender's key
 		PublicKey string
 	}
 	var pubs []pub
@@ -37,7 +37,7 @@ func keysResponse(t *testing.T, keys ...*openpgp.Entity) fakeResponse {
 		if err := aw.Close(); err != nil {
 			t.Fatal(err)
 		}
-		pubs = append(pubs, pub{1, b.String()})
+		pubs = append(pubs, pub{3, b.String()})
 	}
 	body, err := json.Marshal(struct {
 		Code int
@@ -47,6 +47,15 @@ func keysResponse(t *testing.T, keys ...*openpgp.Entity) fakeResponse {
 		t.Fatal(err)
 	}
 	return fakeResponse{http.StatusOK, "application/json", string(body)}
+}
+
+// untrusted is GET /keys for an address whose only key its owner marked
+// compromised: Flags without Trusted, as Proton answers then.
+func untrusted(t *testing.T, key *openpgp.Entity) fakeResponse {
+	t.Helper()
+	r := keysResponse(t, key)
+	r.body = strings.Replace(r.body, `"Flags":3`, `"Flags":2`, 1)
+	return r
 }
 
 // builtVerdict builds msg in a new mailbox whose API answers /keys with keys,
@@ -91,6 +100,7 @@ func TestSignatureVerdicts(t *testing.T) {
 		{"pass", signedBy(sender), keysResponse(t, sender), "pass header.from=sender@example.org key=" + fp(sender)},
 		{"by another key", signedBy(stranger), keysResponse(t, sender), "neutral (signed by a key the sender doesn't publish) header.from=sender@example.org"},
 		{"sender without keys", signedBy(sender), noKeys, "permerror (Proton publishes no key for the sender) header.from=sender@example.org"},
+		{"key marked compromised", signedBy(sender), untrusted(t, sender), "permerror (Proton publishes no key for the sender) header.from=sender@example.org"},
 		{"not signed", func() *protonmail.Message {
 			m := fetchTestMessage("a", 0)
 			m.Body = encryptBody(t, "plain\r\n", account)
