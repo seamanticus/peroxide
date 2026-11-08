@@ -172,7 +172,10 @@ func withTextPart(literal []byte) ([]byte, error) {
 		mediaType = ""
 	}
 	if mediaType != "multipart/mixed" {
-		if strings.HasPrefix(mediaType, "text/") {
+		// A PGP/MIME message is imported encrypted whole (encryptRFC822), so
+		// needs no text part; wrapped, clients would find its encrypted or
+		// signed part below a multipart/mixed, which none decrypts or checks.
+		if strings.HasPrefix(mediaType, "text/") || mediaType == "multipart/encrypted" || mediaType == "multipart/signed" {
 			return literal, nil
 		}
 		return wrapWithTextPart(h, body)

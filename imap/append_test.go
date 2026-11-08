@@ -258,6 +258,8 @@ func TestWithTextPart(t *testing.T) {
 	}{
 		{"text", head + "Content-Type: text/html\r\n\r\n<p>x</p>\r\n", nil},
 		{"no content type", head + "\r\nx\r\n", nil},
+		{"PGP/MIME encrypted", head + "Content-Type: multipart/encrypted; boundary=b; protocol=\"application/pgp-encrypted\"\r\n\r\n--b\r\nContent-Type: application/pgp-encrypted\r\n\r\nVersion: 1\r\n--b\r\nContent-Type: application/octet-stream\r\n\r\nx\r\n--b--\r\n", nil},
+		{"PGP/MIME signed", head + "Content-Type: multipart/signed; boundary=b; protocol=\"application/pgp-signature\"\r\n\r\n--b\r\nContent-Type: application/pdf\r\n\r\nx\r\n--b\r\nContent-Type: application/pgp-signature\r\n\r\ns\r\n--b--\r\n", nil},
 		{"mixed with text", head + "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nx\r\n--b--\r\n", nil},
 		{"mixed with an attachment only", head + "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=a.txt\r\n\r\nx\r\n--b--\r\n",
 			[]string{"text/plain", "text/plain"}},
