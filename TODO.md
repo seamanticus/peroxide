@@ -596,3 +596,45 @@ only, with SORT (aerc worker/imap/open.go, `handleFetchDirectoryContents`:
 neither peroxide nor gluon offers, so after the newest-first download it
 lists the oldest message at the top. Fixed in aerc, not here
 (aerc_implementation.md, item 5, outside this repository).
+
+## 17. EXPUNGE from a folder leaves the message in All Mail only
+
+**Problem.** EXPUNGE from a folder (INBOX, Sent, Archive, Spam, a
+custom folder) unlabels the messages from it (`PUT /messages/unlabel`,
+mailbox.Expunge, 46d246c, as proton-bridge does), and deletes nothing:
+Proton puts no folder in its place, so the message is left in All Mail
+only. Clients hiding All Mail (`-show-all-mail=false`, or a user who
+never opens it) lose sight of it, and the user believes it deleted.
+Seen 2026-11-09 (append-import test, log peroxide_1794131522.log):
+expunges in INBOX (line 19351), Sent, Archive and Drafts left 29
+messages with labels `[5, 15, 24]`, All Mail at 40 while every folder
+was empty, in peroxide and in Proton's web client alike. aerc's
+`:delete` expunges in place, so this is what deleting does from aerc.
+Only EXPUNGE from Trash or Drafts deletes for good.
+
+**Options**, for another day:
+
+1. **Move to Trash.** EXPUNGE from a folder labels the messages Trash
+   (`PUT /messages/label`, LabelID 3), which takes them out of the
+   folder, as Proton's web client "Delete" does; a second EXPUNGE in
+   Trash deletes them for good. Costs: still one request (label
+   replaces unlabel); Proton unstars messages filed in Trash
+   (labelUpdate already predicts it); a client expecting EXPUNGE to
+   remove the message from the folder only (RFC 3501 section 6.4.3)
+   finds it in Trash, which is what the user means. Differs from
+   bridge.
+2. **Refuse it, with an explanation.** `NO [ALERT] Expunging from INBOX
+   would leave the messages in All Mail only: move them to Trash`. The
+   client keeps them `\Deleted`. Safe and honest, but a client without
+   a Trash binding (aerc `:delete`) can't delete from a folder at all.
+3. **Only when nothing else holds the message.** Unlabel as today if
+   the message is in another folder or a user label (it stays visible
+   there), else move to Trash as in 1. Needs the metadata lookup
+   EXPUNGE from Trash already makes (`forGood`, one request per 150).
+4. **Keep bridge's behaviour** and document it, with the client
+   setting that makes delete a move (aerc: bind `:delete` to
+   `:move Trash`).
+
+Decide with: what Thunderbird, Evolution and aerc do on delete
+("move to Trash" settings), and whether EXPUNGE in Spam should
+follow Trash. docs/imap/changes.md#expunge describes today's rule.
