@@ -4,7 +4,7 @@ peroxide's IMAP server is go-imap v1's server (`github.com/emersion/go-imap`
 v1.2.1) with peroxide's backend behind it (package `imap`). It speaks
 IMAP4rev1 (RFC 3501) and announces:
 
-    IMAP4rev1 LITERAL+ SASL-IR CHILDREN UNSELECT MOVE IDLE APPENDLIMIT=52428800 AUTH=PLAIN
+    IMAP4rev1 LITERAL+ SASL-IR CHILDREN UNSELECT MOVE IDLE APPENDLIMIT=73400320 AUTH=PLAIN
 
 (`AUTH=PLAIN` before login; `STARTTLS` never, as TLS is implicit when
 enabled, see [../commands.md](../commands.md#listening-and-tls).)
@@ -39,8 +39,9 @@ and its own poll of Proton's events.
 
 ## Limits worth knowing
 
-- **APPEND size.** 50 MiB (52428800 bytes), Proton's limit for an
-  imported message. A larger literal is refused before it is read: the
+- **APPEND size.** 70 MiB (73400320 bytes), the limit of Proton's
+  import API on an encrypted message ([changes.md](changes.md#append)).
+  A larger literal is refused before it is read: the
   client gets `BAD`, as go-imap reads literals before the command sees
   them, and has no way to answer `NO [TOOBIG]` then.
 - **Memory.** go-imap reads every literal whole into memory. The cap

@@ -118,19 +118,56 @@ rely on EXAMINE to protect messages marked `\Deleted`.
 
 ## APPEND
 
-APPEND works only into `Drafts`: it creates a Proton draft from the
-message (its sender from the From address, which must be one of yours).
-Anywhere else it fails with "cannot create messages outside the Drafts
-mailbox". So a client can't copy mail from another account into
-Proton, or save its own copy of a sent message into `Sent`: the latter
-is unnecessary, as Proton files sent mail in Sent itself (see
-[../smtp.md](../smtp.md)). Configure your client not to save sent mail
-(aerc: no `copy-to`), or you will get an error after each send.
+APPEND works into every mailbox but **All Mail** and **Starred**, as
+in proton-bridge. So a client can copy or move mail from another
+account into Proton, and save its copy of what it sent.
 
-The limit is 50 MiB. APPEND waits for the next events before it
-answers, so the new draft is visible when it does.
-`TODO.md` section 3 plans APPEND into every mailbox through Proton's
-import API.
+**Into `Drafts`** it creates a Proton draft from the message (its
+sender from the From address, which must be one of yours).
+
+**Anywhere else** it imports the message (`POST
+/mail/v4/messages/import`), with what bridge sends:
+
+- **labels**: the mailbox, and Starred if the message has `\Flagged`;
+- **received or sent**: received into INBOX, sent into Sent; elsewhere
+  received if the message has a `Received` header field, sent if not;
+  replied if it has `\Answered`;
+- **unread** unless it has `\Seen`;
+- **address**: the From address (or Sender's, if there's no From) if it
+  is one of yours, a `+alias` ignored, and can send; your primary
+  address otherwise;
+- **encryption**: to the first unlocked active key of that address. As
+  go-proton-api does, each part is encrypted on its own, keeping the
+  MIME structure (text decoded to UTF-8), so that Proton can read the
+  text and list the attachments. A message already signed or
+  encrypted, or one with more than one text part, is encrypted whole as
+  PGP/MIME instead. A message without a text part gets an empty one
+  first, as bridge adds it: Proton reads a message's text from it.
+
+**A message the SMTP server just sent** isn't imported again. Proton
+filed it in Sent when it was sent, so a client that saves its copy
+(aerc's `copy-to`) would otherwise leave two. peroxide remembers each
+message it sent for 30 minutes, by a hash of its subject, addresses,
+parts and decoded bodies (the same as bridge's; boundaries, transfer
+encodings, `Date`, `Message-Id` and `Bcc` may differ), and its
+recipients. An APPEND of the same message, from the same account, to
+the same recipients, answers OK without an import: into Sent it is
+there already; into another mailbox the sent message is added to it,
+as COPY does. A send still under way is waited for, up to 90 seconds.
+This works when SMTP and IMAP run in one `peroxide serve`; separate
+`peroxide smtp` and `peroxide imap` processes don't share what was
+sent.
+
+**Size**: 70 MiB (73400320 bytes), the import API's limit as
+go-proton-api checks it, on the encrypted message: about 50 MB of
+attachments once base64-encoded, Proton's limit for received mail.
+Encrypted part by part, a message keeps about its size; encrypted
+whole it grows by a third, and over 70 MiB is refused with `NO
+[TOOBIG]`. A larger literal is refused with `BAD` before it is read
+([README.md](README.md#limits-worth-knowing)).
+
+APPEND waits for the next events before it answers, so the new message
+is visible when it does.
 
 ## How proton-bridge does it
 
@@ -153,7 +190,19 @@ import API.
   peroxide decides the same, in the other order, so that a failed
   delete leaves the message in Trash rather than only in All Mail,
   which bridge can hide ("Show All Mail" off).
-- **APPEND** imports the message into any mailbox (Proton's import
-  API), except All Mail; peroxide doesn't have that client yet.
-- proton-bridge also refuses APPEND into All Mail and Scheduled.
+- **APPEND** (`Connector.CreateMessage`) imports the message into any
+  mailbox but All Mail and Scheduled, through go-proton-api's
+  `ImportMessages`, with the labels, flags, address and encryption
+  above; Drafts makes a draft. peroxide decides the same, and also
+  refuses Starred, as it refuses moves into it: bridge imports there
+  with the Starred label alone, leaving the message in no folder.
   peroxide shows no Scheduled mailbox.
+- **Sent duplicates**: bridge's `sendrecorder` remembers sends for 30
+  minutes, by gluon's `GetMessageHash` and the recipients, and APPEND
+  waits up to 90 seconds for one under way; gluon then adds the
+  existing message to the mailbox. peroxide's `sendrecord` does the
+  same. Its hash decodes every part's body; gluon decodes the transfer
+  encoding of text/plain and text/html parts only.
+- **Size**: bridge checks only go-proton-api's 70 MiB on the encrypted
+  message, and announces no APPENDLIMIT. peroxide announces the same
+  70 MiB.

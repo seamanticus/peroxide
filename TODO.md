@@ -96,47 +96,7 @@ after it reconnects). go-imap can send an unsolicited LIST
 
 ## 2. (done: STORE `\Deleted` sends FETCH, STORE FLAGS replaces, 1dfcddc)
 
-## 3. APPEND only into Drafts
-
-**Problem.** `mailbox.CreateMessage` (imap/mailbox.go) refuses APPEND
-outside Drafts ("cannot create messages outside the Drafts mailbox"), a
-rule of peroxide's own since 2018 (commit 2a1b998), not of Proton's. So a
-client can't copy or move a message from another account into a Proton
-folder, nor save a sent copy into Sent: aerc tried `APPEND INBOX` on
-2026-11-04 and got NO.
-
-**How proton-bridge does it** (`Connector.CreateMessage`,
-internal/services/imapservice/connector.go): every mailbox but All Mail
-accepts APPEND, through Proton's import API (`ImportMessages`,
-go-proton-api message_import.go), with:
-
-- label IDs: the mailbox, plus Starred if `\Flagged` is set;
-- flags: Received into INBOX, Sent into Sent; elsewhere Received if the
-  message has a `Received` header, Sent otherwise; Replied if
-  `\Answered`; Drafts keeps its own draft path (peroxide's `createMessage`);
-- unread unless `\Seen` (always read in Drafts);
-- size: at most 50 MB once encrypted (`ErrImportSizeExceeded`), the
-  APPENDLIMIT peroxide already announces;
-- a message just sent over SMTP is matched by hash (`sendRecorder`) and
-  not imported twice into Sent.
-
-**Steps.**
-
-1. Write a client for Proton's import API, as go-proton-api's
-   `ImportMessages` does (peroxide's own, `protonmail.Client.Import`,
-   was removed in b170307 and can be recovered from its parent), and
-   use it for APPEND with the metadata above.
-2. Refuse All Mail (and Starred, a flag here) with NO, as bridge does.
-3. Decide on the SMTP duplicate check: peroxide's SMTP server sends
-   through a Proton draft (`CreateDraftMessage` then `SendMessage`,
-   smtp/smtp.go), which Proton files in Sent, so a client that also
-   APPENDs to Sent (aerc `copy-to`) would create a second copy.
-4. Tests (imap): the label IDs and flags sent for INBOX, Sent, a custom
-   folder and Drafts; All Mail refused; a literal over APPENDLIMIT gets
-   TOOBIG before any request. Since a882fe3 a literal over
-   `imap.MaxLiteralSize` (= APPENDLIMIT) is refused by go-imap's reader
-   with BAD before it is read; one within it but whose encrypted import
-   exceeds 50 MB still needs NO [TOOBIG] from CreateMessage.
+## 3. (done: APPEND into every mailbox but All Mail and Starred, by import; SMTP sends recorded for APPEND into Sent; APPENDLIMIT 70 MiB; a195b04, bd3c765)
 
 ## 4. (done: `-debug` is the raw mode, to one stream; described in docs/debug.md; 64febb9, 1f840c6, 509744c, 0a17156, 6a03626)
 

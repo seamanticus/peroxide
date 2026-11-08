@@ -130,4 +130,4 @@ by default); off, All Mail is left out of LIST, and SELECT still opens
 it by name. peroxide's `-show-all-mail=false` does the same, for
 clients that don't want each message twice. bridge also refuses APPEND
 and moves into All Mail, as peroxide does whatever the setting
-(`TODO.md` section 8).
+(`TODO.md` section 8); peroxide refuses them into Starred too.

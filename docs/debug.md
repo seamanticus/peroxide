@@ -104,7 +104,8 @@ Treat a `-debug` log as a copy of your mailbox.
 - **Message content, in clear.** IMAP FETCH responses carry the
   decrypted messages your client reads: bodies, attachments (base64),
   headers. SMTP DATA carries every message you send, in clear, with its
-  attachments. APPEND carries the drafts you save.
+  attachments. APPEND carries every message your client saves, drafts
+  and copies.
 - **Message metadata from the API.** Subjects, sender and recipient
   names and addresses, dates, sizes, labels, folder names, attachment
   file names: everything a listing shows.
