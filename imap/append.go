@@ -95,6 +95,20 @@ func importAddress(addrs []*protonmail.Address, sender string) (*protonmail.Addr
 	return addrs[i], true
 }
 
+// draftAddress is importAddress for a draft: as proton-bridge's
+// getImportAddress with isDraft, a sender address that can't send or isn't
+// enabled gives the primary address instead.
+func draftAddress(addrs []*protonmail.Address, sender string) (*protonmail.Address, bool) {
+	addr, ok := importAddress(addrs, sender)
+	if !ok {
+		return nil, false
+	}
+	if addr.Send == protonmail.AddressSendDisabled || addr.Status != protonmail.AddressEnabled {
+		return importAddress(addrs, "")
+	}
+	return addr, true
+}
+
 // stripPlusAlias returns addr without the +alias of its local part.
 func stripPlusAlias(addr string) string {
 	local, domain, ok := strings.Cut(addr, "@")

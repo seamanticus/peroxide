@@ -192,6 +192,31 @@ func TestImportAddress(t *testing.T) {
 	}
 }
 
+// draftAddress is importAddress, but a sender address that can't send or
+// isn't enabled gives the primary address.
+// evidence: witnesses
+func TestDraftAddress(t *testing.T) {
+	enabled, send := protonmail.AddressEnabled, protonmail.AddressSendSecondary
+	addrs := []*protonmail.Address{
+		{ID: "primary", Email: "one@example.org", Order: 1, Status: enabled, Send: protonmail.AddressSendPrimary},
+		{ID: "second", Email: "two@example.org", Order: 2, Status: enabled, Send: send},
+		{ID: "nosend", Email: "three@example.org", Order: 3, Status: enabled, Send: protonmail.AddressSendDisabled},
+		{ID: "disabled", Email: "four@example.org", Order: 4, Status: protonmail.AddressDisabled, Send: send},
+	}
+	for _, tt := range []struct {
+		sender, want string
+	}{
+		{"two@example.org", "second"},
+		{"three@example.org", "primary"},
+		{"four@example.org", "primary"},
+		{"mail@mailserver.com", "primary"},
+	} {
+		if got, ok := draftAddress(addrs, tt.sender); !ok || got.ID != tt.want {
+			t.Errorf("draftAddress(%q) = %v, %v, want %v", tt.sender, got, ok, tt.want)
+		}
+	}
+}
+
 // withTextPart adds an empty text part to a message without one, as
 // proton-bridge does: last in a multipart/mixed message, in one wrapping any
 // other; a message with a text part is left as is.

@@ -218,48 +218,20 @@ func createMessage(c *protonmail.Client, u *protonmail.User, privateKeys openpgp
 	}
 
 	subject, _ := mr.Header.Subject()
-	fromList, _ := mr.Header.AddressList("From")
 	toList, _ := mr.Header.AddressList("To")
 	ccList, _ := mr.Header.AddressList("Cc")
 	bccList, _ := mr.Header.AddressList("Bcc")
 
-	if len(fromList) != 1 {
-		return nil, errors.New("the From field must contain exactly one address")
+	// As proton-bridge makes a draft (createDraftWithParser): from the
+	// sender's address if it is one of yours that can send, from your
+	// primary address otherwise; no recipient is needed.
+	fromAddr, ok := draftAddress(addrs, messageSender(mr.Header.Header.Header))
+	if !ok {
+		return nil, errors.New("the account has no address to make the draft in")
 	}
-	if len(toList) == 0 && len(ccList) == 0 && len(bccList) == 0 {
-		return nil, errors.New("no recipient specified")
-	}
-
-	fromAddrStr := fromList[0].Address
-	var fromAddr *protonmail.Address
-	for _, addr := range addrs {
-		if strings.EqualFold(addr.Email, fromAddrStr) {
-			fromAddr = addr
-			break
-		}
-	}
-	if fromAddr == nil {
-		return nil, errors.New("unknown sender address")
-	}
-	if len(fromAddr.Keys) == 0 {
-		return nil, errors.New("sender address has no private key")
-	}
-
-	// TODO: get appropriate private key
-	encryptedPrivateKey, err := fromAddr.Keys[0].Entity()
+	privateKey, err := addressKey(fromAddr, privateKeys)
 	if err != nil {
-		return nil, fmt.Errorf("cannot parse sender private key: %v", err)
-	}
-
-	var privateKey *openpgp.Entity
-	for _, e := range privateKeys {
-		if e.PrimaryKey.KeyId == encryptedPrivateKey.PrimaryKey.KeyId {
-			privateKey = e
-			break
-		}
-	}
-	if privateKey == nil {
-		return nil, errors.New("sender address key hasn't been decrypted")
+		return nil, err
 	}
 
 	msg := &protonmail.Message{
@@ -270,8 +242,8 @@ func createMessage(c *protonmail.Client, u *protonmail.User, privateKeys openpgp
 		Header:    formatHeader(mr.Header),
 		AddressID: fromAddr.ID,
 		Sender: &protonmail.MessageAddress{
-			Address: fromAddrStr,
-			Name:    fromList[0].Name,
+			Address: fromAddr.Email,
+			Name:    fromAddr.DisplayName,
 		},
 	}
 
