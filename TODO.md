@@ -96,7 +96,7 @@ after it reconnects). go-imap can send an unsolicited LIST
 
 ## 2. (done: STORE `\Deleted` sends FETCH, STORE FLAGS replaces, 1dfcddc)
 
-## 3. (done: APPEND into every mailbox but All Mail and Starred, by import; SMTP sends recorded for APPEND into Sent; APPENDLIMIT 70 MiB; a195b04, bd3c765)
+## 3. (done: APPEND into every mailbox but All Mail and Starred, by import, Drafts too; a message already in the account is not imported again, OK/NO [ALERT]; SMTP sends recorded for APPEND into Sent; APPENDLIMIT 70 MiB; a195b04, bd3c765, 426b9c4, 9a24dd5, d07f346, 38cb20f, e094ad3)
 
 ## 4. (done: `-debug` is the raw mode, to one stream; described in docs/debug.md; 64febb9, 1f840c6, 509744c, 0a17156, 6a03626)
 

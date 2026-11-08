@@ -66,8 +66,7 @@ Proton's limits apply when it uploads.
      at rest.
 9. Proton sends, and files the message in **Sent**. A client that also
    saves its copy there (APPEND) gets the sent message, not a second
-   one, in `peroxide serve` (see
-   [imap/changes.md](imap/changes.md#append)).
+   one (see [imap/changes.md](imap/changes.md#append)).
 
 SMTP answers `250` when Proton accepts the send, or `554` with the
 error (the text is peroxide's or Proton's message). A failure after

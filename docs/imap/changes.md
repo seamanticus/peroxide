@@ -179,7 +179,14 @@ source each time. So before importing, peroxide looks for the message:
   differ). A send still under way is waited for, up to 90 seconds. This
   works when SMTP and IMAP run in one `peroxide serve`; separate
   `peroxide smtp` and `peroxide imap` processes don't share what was
-  sent.
+  sent. The `Message-Id` lookup finds sent messages in every mode, as
+  SMTP gives Proton each message's `Message-Id`.
+
+Not into **Drafts**: a client saving a draft again may keep its
+`Message-Id`, and deletes the old draft once the APPEND answers OK, so
+"already there" would lose the edit. A draft is always imported. Whether
+Proton then merges it with the draft it has, by `Message-Id`, isn't
+known yet.
 
 Found, nothing changes in Proton, and APPEND answers with an `ALERT`,
 the one response code clients must show (RFC 3501 section 7.1):
@@ -191,6 +198,9 @@ the one response code clients must show (RFC 3501 section 7.1):
   account, in INBOX: it was not copied, as Proton keeps one copy of a
   message`. A client moving it from another account keeps its copy
   there, as a move whose APPEND fails deletes nothing.
+
+Either way the message found is left as it is: the flags the APPEND
+gives (`\Flagged`, `\Seen`) aren't applied to it.
 
 Thunderbird and Evolution show `ALERT` texts; aerc and KMail show
 neither OK nor `ALERT` texts, only NO's.
@@ -204,7 +214,9 @@ whole it grows by a third, and over 70 MiB is refused with `NO
 ([README.md](README.md#limits-worth-knowing)).
 
 APPEND waits for the next events before it answers, so the new message
-is visible when it does.
+is visible when it does. The date an APPEND gives (its INTERNALDATE) isn't
+kept, as in bridge: Proton dates an imported message by its `Date`
+field.
 
 ## How proton-bridge does it
 
