@@ -5,13 +5,11 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"strings"
 
-	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-message"
@@ -27,26 +25,6 @@ func messageID(msg *protonmail.Message) string {
 	} else {
 		return msg.ID + "@protonmail.com"
 	}
-}
-
-func formatHeader(h mail.Header) string {
-	var b bytes.Buffer
-	fields := h.Fields()
-	for fields.Next() {
-		b.WriteString(fmt.Sprintf("%s: %s\r\n", fields.Key(), fields.Value()))
-	}
-	return b.String()
-}
-
-func protonmailAddressList(addresses []*mail.Address) []*protonmail.MessageAddress {
-	l := make([]*protonmail.MessageAddress, len(addresses))
-	for i, addr := range addresses {
-		l[i] = &protonmail.MessageAddress{
-			Name:    addr.Name,
-			Address: addr.Address,
-		}
-	}
-	return l
 }
 
 func imapAddress(addr *protonmail.MessageAddress) *imap.Address {
@@ -208,155 +186,4 @@ func originalHeader(s string) (textproto.Header, error) {
 		return textproto.Header{}, err
 	}
 	return h, nil
-}
-
-func createMessage(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.EntityList, addrs []*protonmail.Address, r io.Reader) (*protonmail.Message, error) {
-	// Parse the incoming MIME message header
-	mr, err := mail.CreateReader(r)
-	if err != nil {
-		return nil, err
-	}
-
-	subject, _ := mr.Header.Subject()
-	toList, _ := mr.Header.AddressList("To")
-	ccList, _ := mr.Header.AddressList("Cc")
-	bccList, _ := mr.Header.AddressList("Bcc")
-
-	// As proton-bridge makes a draft (createDraftWithParser): from the
-	// sender's address if it is one of yours that can send, from your
-	// primary address otherwise; no recipient is needed.
-	fromAddr, ok := draftAddress(addrs, messageSender(mr.Header.Header.Header))
-	if !ok {
-		return nil, errors.New("the account has no address to make the draft in")
-	}
-	privateKey, err := addressKey(fromAddr, privateKeys)
-	if err != nil {
-		return nil, err
-	}
-
-	msg := &protonmail.Message{
-		ToList:    protonmailAddressList(toList),
-		CCList:    protonmailAddressList(ccList),
-		BCCList:   protonmailAddressList(bccList),
-		Subject:   subject,
-		Header:    formatHeader(mr.Header),
-		AddressID: fromAddr.ID,
-		Sender: &protonmail.MessageAddress{
-			Address: fromAddr.Email,
-			Name:    fromAddr.DisplayName,
-		},
-	}
-
-	// Create an empty draft
-	plaintext, err := msg.Encrypt([]*openpgp.Entity{privateKey}, privateKey)
-	if err != nil {
-		return nil, err
-	}
-	if err := plaintext.Close(); err != nil {
-		return nil, err
-	}
-
-	// TODO: parentID from In-Reply-To
-	msg, err = c.CreateDraftMessage(msg, "")
-	if err != nil {
-		return nil, fmt.Errorf("cannot create draft message: %v", err)
-	}
-
-	var body *bytes.Buffer
-	var bodyType string
-
-	for {
-		p, err := mr.NextPart()
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			return nil, err
-		}
-
-		switch h := p.Header.(type) {
-		case *mail.InlineHeader:
-			t, _, err := h.ContentType()
-			if err != nil {
-				break
-			}
-
-			if body != nil && t != "text/html" {
-				break
-			}
-
-			body = &bytes.Buffer{}
-			bodyType = t
-			if _, err := io.Copy(body, p.Body); err != nil {
-				return nil, err
-			}
-		case *mail.AttachmentHeader:
-			t, _, err := h.ContentType()
-			if err != nil {
-				break
-			}
-
-			filename, err := h.Filename()
-			if err != nil {
-				break
-			}
-
-			att := &protonmail.Attachment{
-				MessageID: msg.ID,
-				Name:      filename,
-				MIMEType:  t,
-				ContentID: h.Get("Content-Id"),
-				// TODO: Header
-			}
-
-			_, err = att.GenerateKey([]*openpgp.Entity{privateKey})
-			if err != nil {
-				return nil, fmt.Errorf("cannot generate attachment key: %v", err)
-			}
-
-			pr, pw := io.Pipe()
-
-			go func() {
-				cleartext, err := att.Encrypt(pw, privateKey)
-				if err != nil {
-					pw.CloseWithError(err)
-					return
-				}
-				if _, err := io.Copy(cleartext, p.Body); err != nil {
-					pw.CloseWithError(err)
-					return
-				}
-				pw.CloseWithError(cleartext.Close())
-			}()
-
-			att, err = c.CreateAttachment(att, pr)
-			if err != nil {
-				return nil, fmt.Errorf("cannot upload attachment: %v", err)
-			}
-
-			msg.Attachments = append(msg.Attachments, att)
-		}
-	}
-
-	if body == nil {
-		return nil, errors.New("message doesn't contain a body part")
-	}
-
-	// Encrypt the body and update the draft
-	msg.MIMEType = bodyType
-	plaintext, err = msg.Encrypt([]*openpgp.Entity{privateKey}, privateKey)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := io.Copy(plaintext, body); err != nil {
-		return nil, err
-	}
-	if err := plaintext.Close(); err != nil {
-		return nil, err
-	}
-
-	if _, err := c.UpdateDraftMessage(msg); err != nil {
-		return nil, fmt.Errorf("cannot update draft message: %v", err)
-	}
-
-	return msg, nil
 }

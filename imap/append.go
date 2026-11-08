@@ -291,7 +291,7 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 	}
 
 	// Into Drafts the message is imported too, not made a Proton draft
-	// (createMessage), which keeps one body part and none of the header.
+	// (POST /messages), which keeps one body part and none of the header.
 	pickAddress := importAddress
 	if mbox.label == protonmail.LabelDraft {
 		pickAddress = draftAddress
