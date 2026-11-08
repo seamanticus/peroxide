@@ -256,7 +256,7 @@ changes under the message's UID. It follows RFC 8601's
 | `pass` | The signature verifies with a key Proton publishes for the sender (`header.from`), the one in `key`: the text is as the sender signed it |
 | `fail` | Made by the key in `key`, which the sender publishes, but it doesn't verify: the text changed after it was signed. `reason` says how |
 | `neutral` | Made by a key the sender doesn't publish (an old key, or someone else's): it can't vouch for the sender |
-| `permerror` | Can't be checked: Proton publishes no key for the sender (most senders outside Proton), or refused to say which |
+| `permerror` | Can't be checked: Proton publishes no key for the sender (most senders outside Proton), only keys their owner marked compromised, or refused to say which |
 | `none` | The body isn't signed, but an attachment is (see `attachments`) |
 | (no field) | Neither the body nor any attachment is signed, or the body is passed through still encrypted, or couldn't be decrypted |
 
