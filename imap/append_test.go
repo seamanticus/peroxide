@@ -1,7 +1,6 @@
 package imap
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -20,7 +19,6 @@ import (
 	"github.com/emersion/go-message/textproto"
 
 	"github.com/seamanticus/peroxide/protonmail"
-	"github.com/seamanticus/peroxide/sendrecord"
 )
 
 const appendLiteral = "From: Bob <bob@example.org>\r\n" +
@@ -334,46 +332,41 @@ func statusResp(err error) *imap.StatusResp {
 
 // An APPEND of a message the account has already isn't imported: Proton
 // would file the one it has in the mailbox, moving it out of its folder.
-// Found by its Message-Id, or as the message the SMTP server just sent to
-// the same recipients, it is OK [ALERT] if it is in the mailbox already, NO
-// [ALERT] naming where it is otherwise; nothing changes in Proton.
+// Found by its Message-Id (a copy of a sent message saved into Sent among
+// them), it is OK [ALERT] if it is in the mailbox already, or in INBOX for
+// Sent and back (labelled there), NO [ALERT] naming where it is otherwise;
+// nothing else changes in Proton. Without a Message-Id it is imported.
 // evidence: witnesses
 func TestAppendExisting(t *testing.T) {
 	withID := "Message-Id: <m1@example.org>\r\n" + appendLiteral
-	hash, err := sendrecord.Hash([]byte(appendLiteral))
-	if err != nil {
-		t.Fatal(err)
-	}
 	const metadata = "POST /mail/v4/messages"
 	for _, tt := range []struct {
 		name    string
 		literal string
 		// labels of message "e" in Proton; its Message-Id is m1@example.org.
-		labels []string
-		// sentTo, if set, records "e" as sent over SMTP to them.
-		sentTo       []string
+		labels       []string
 		dest         string
 		wantType     imap.StatusRespType
 		wantIn       string // in the text
 		wantRequests []string
 	}{
-		{"new message", withID, nil, nil, protonmail.LabelArchive, imap.StatusRespOk, "",
+		{"new message", withID, nil, protonmail.LabelArchive, imap.StatusRespOk, "",
 			[]string{metadata, "POST /mail/v4/messages/import"}},
-		{"in another folder", withID, []string{protonmail.LabelInbox, protonmail.LabelAllMail}, nil, protonmail.LabelSpam, imap.StatusRespNo, "in INBOX",
+		{"in another folder", withID, []string{protonmail.LabelInbox, protonmail.LabelAllMail}, protonmail.LabelSpam, imap.StatusRespNo, "in INBOX",
 			[]string{metadata}},
-		{"in the folder", withID, []string{protonmail.LabelSpam, protonmail.LabelAllMail}, nil, protonmail.LabelSpam, imap.StatusRespOk, "already in Dest",
+		{"in the folder", withID, []string{protonmail.LabelSpam, protonmail.LabelAllMail}, protonmail.LabelSpam, imap.StatusRespOk, "already in Dest",
 			[]string{metadata}},
-		{"only in All Mail", withID, []string{protonmail.LabelAllMail, protonmail.LabelStarred}, nil, protonmail.LabelTrash, imap.StatusRespNo, "in All Mail",
+		{"only in All Mail", withID, []string{protonmail.LabelAllMail, protonmail.LabelStarred}, protonmail.LabelTrash, imap.StatusRespNo, "in All Mail",
 			[]string{metadata}},
-		{"just sent, into Sent", appendLiteral, []string{protonmail.LabelSent, protonmail.LabelAllMail}, []string{"ann@example.org"}, protonmail.LabelSent, imap.StatusRespOk, "already in Dest",
+		{"sent, saved into Sent", withID, []string{protonmail.LabelSent, protonmail.LabelAllMail}, protonmail.LabelSent, imap.StatusRespOk, "already in Dest",
 			[]string{metadata}},
-		{"just sent, into Archive", appendLiteral, []string{protonmail.LabelSent, protonmail.LabelAllMail}, []string{"ann@example.org"}, protonmail.LabelArchive, imap.StatusRespNo, "in Sent",
+		{"sent, saved into Archive", withID, []string{protonmail.LabelSent, protonmail.LabelAllMail}, protonmail.LabelArchive, imap.StatusRespNo, "in Sent",
 			[]string{metadata}},
-		{"sent to others", appendLiteral, []string{protonmail.LabelSent}, []string{"carol@example.org"}, protonmail.LabelSent, imap.StatusRespOk, "",
+		{"no Message-Id", appendLiteral, []string{protonmail.LabelSent}, protonmail.LabelSent, imap.StatusRespOk, "",
 			[]string{"POST /mail/v4/messages/import"}},
-		{"in Sent, into INBOX", withID, []string{protonmail.LabelSent, protonmail.LabelAllMail}, nil, protonmail.LabelInbox, imap.StatusRespOk, "in Dest too",
+		{"in Sent, into INBOX", withID, []string{protonmail.LabelSent, protonmail.LabelAllMail}, protonmail.LabelInbox, imap.StatusRespOk, "in Dest too",
 			[]string{metadata, "PUT /messages/label"}},
-		{"in INBOX, into Sent", withID, []string{protonmail.LabelInbox, protonmail.LabelAllMail}, nil, protonmail.LabelSent, imap.StatusRespOk, "already in INBOX",
+		{"in INBOX, into Sent", withID, []string{protonmail.LabelInbox, protonmail.LabelAllMail}, protonmail.LabelSent, imap.StatusRespOk, "already in INBOX",
 			[]string{metadata, "PUT /messages/label"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -384,9 +377,6 @@ func TestAppendExisting(t *testing.T) {
 			}
 			inbox, _ := newAppendTestMailbox(t, api, nil)
 			addTestMailbox(t, inbox.u, "Sent", protonmail.LabelSent, nil)
-			if tt.sentTo != nil {
-				inbox.u.backend.sends.Start("bob", hash, tt.sentTo).Sent("e")
-			}
 			mbox := addTestMailbox(t, inbox.u, "Dest", tt.dest, nil)
 
 			resp := statusResp(appendTo(mbox, []string{imap.SeenFlag}, tt.literal))
@@ -446,18 +436,5 @@ func TestAppendExistingDuringRename(t *testing.T) {
 	wg.Wait()
 	if resp.Type != imap.StatusRespNo || !strings.Contains(resp.Info, "in Work") {
 		t.Errorf("response %v %q, want NO naming Work", resp.Type, resp.Info)
-	}
-}
-
-// recipients lists To, Cc and Bcc, as the SMTP server's envelope holds them.
-// evidence: witnesses
-func TestRecipients(t *testing.T) {
-	h, err := textproto.ReadHeader(bufio.NewReader(strings.NewReader(
-		"To: A <a@x.org>, b@x.org\r\nCc: c@x.org\r\nBcc: d@x.org\r\nReply-To: e@x.org\r\n\r\n")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := recipients(h), []string{"a@x.org", "b@x.org", "c@x.org", "d@x.org"}; !slices.Equal(got, want) {
-		t.Errorf("recipients() = %v, want %v", got, want)
 	}
 }

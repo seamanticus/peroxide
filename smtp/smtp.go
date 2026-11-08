@@ -19,7 +19,6 @@ import (
 
 	"github.com/seamanticus/peroxide/auth"
 	"github.com/seamanticus/peroxide/protonmail"
-	"github.com/seamanticus/peroxide/sendrecord"
 )
 
 func toPMAddressList(addresses []*mail.Address) []*protonmail.MessageAddress {
@@ -60,18 +59,18 @@ func bccFromRest(rcpt []string, ignoreMails []*mail.Address) []*mail.Address {
 	return final
 }
 
-func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.EntityList, addrs []*protonmail.Address, rcpt []string, r io.Reader) (sentID string, err error) {
+func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.EntityList, addrs []*protonmail.Address, rcpt []string, r io.Reader) error {
 	// Kept whole: recipients without a key may get the message itself,
 	// signed (signedMIMEPackage). Unbounded, as go-smtp's MaxMessageBytes
 	// isn't set; the server takes only authenticated local clients.
 	raw, err := io.ReadAll(r)
 	if err != nil {
-		return "", fmt.Errorf("cannot read the message: %w", err)
+		return fmt.Errorf("cannot read the message: %w", err)
 	}
 	// Parse the incoming MIME message header
 	mr, err := mail.CreateReader(bytes.NewReader(raw))
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	subject, _ := mr.Header.Subject()
@@ -85,10 +84,10 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 	}
 
 	if len(fromList) != 1 {
-		return "", errors.New("the From field must contain exactly one address")
+		return errors.New("the From field must contain exactly one address")
 	}
 	if len(toList) == 0 && len(ccList) == 0 && len(bccList) == 0 {
-		return "", errors.New("no recipient specified")
+		return errors.New("no recipient specified")
 	}
 
 	rawFrom := fromList[0]
@@ -101,16 +100,16 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 		}
 	}
 	if fromAddr == nil {
-		return "", errors.New("unknown sender address")
+		return errors.New("unknown sender address")
 	}
 	if len(fromAddr.Keys) == 0 {
-		return "", errors.New("sender address has no private key")
+		return errors.New("sender address has no private key")
 	}
 
 	// TODO: get appropriate private key
 	encryptedPrivateKey, err := fromAddr.Keys[0].Entity()
 	if err != nil {
-		return "", fmt.Errorf("cannot parse sender private key: %v", err)
+		return fmt.Errorf("cannot parse sender private key: %v", err)
 	}
 
 	var privateKey *openpgp.Entity
@@ -121,12 +120,12 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 		}
 	}
 	if privateKey == nil {
-		return "", errors.New("sender address key hasn't been decrypted")
+		return errors.New("sender address key hasn't been decrypted")
 	}
 
 	msgID, err := mr.Header.MessageID()
 	if err != nil {
-		return "", fmt.Errorf("failed to parse Message-Id: %v", err)
+		return fmt.Errorf("failed to parse Message-Id: %v", err)
 	}
 
 	msg := &protonmail.Message{
@@ -148,10 +147,10 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 
 	plaintext, err := msg.Encrypt([]*openpgp.Entity{privateKey}, privateKey)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if err := plaintext.Close(); err != nil {
-		return "", err
+		return err
 	}
 
 	parentID := ""
@@ -166,7 +165,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 		}
 		total, msgs, err := c.ListMessages(&filter)
 		if err != nil {
-			return "", err
+			return err
 		}
 		if total == 1 {
 			parentID = msgs[0].ID
@@ -175,7 +174,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 
 	msg, err = c.CreateDraftMessage(msg, parentID)
 	if err != nil {
-		return "", fmt.Errorf("cannot create draft message: %v", err)
+		return fmt.Errorf("cannot create draft message: %v", err)
 	}
 
 	// Parse the incoming MIME message body
@@ -191,7 +190,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 		if err == io.EOF {
 			break
 		} else if err != nil {
-			return "", err
+			return err
 		}
 
 		switch h := p.Header.(type) {
@@ -208,7 +207,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 			body = &bytes.Buffer{}
 			bodyType = t
 			if _, err := io.Copy(body, p.Body); err != nil {
-				return "", err
+				return err
 			}
 		case *mail.AttachmentHeader:
 			t, _, err := h.ContentType()
@@ -231,7 +230,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 
 			attKey, err := att.GenerateKey([]*openpgp.Entity{privateKey})
 			if err != nil {
-				return "", fmt.Errorf("cannot generate attachment key: %v", err)
+				return fmt.Errorf("cannot generate attachment key: %v", err)
 			}
 
 			// Read whole: signed, then encrypted. Proton's clients sign
@@ -241,10 +240,10 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 			// 25 MB.
 			data, err := io.ReadAll(p.Body)
 			if err != nil {
-				return "", fmt.Errorf("cannot read attachment %q: %v", filename, err)
+				return fmt.Errorf("cannot read attachment %q: %v", filename, err)
 			}
 			if _, err := att.Sign(privateKey, bytes.NewReader(data)); err != nil {
-				return "", err
+				return err
 			}
 
 			log.Printf("uploading message attachment %q", filename)
@@ -266,7 +265,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 
 			att, err = c.CreateAttachment(att, pr)
 			if err != nil {
-				return "", fmt.Errorf("cannot upload attachment: %v", err)
+				return fmt.Errorf("cannot upload attachment: %v", err)
 			}
 
 			attachmentKeys[att.ID] = attKey
@@ -274,7 +273,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 	}
 
 	if body == nil {
-		return "", errors.New("message doesn't contain a body part")
+		return errors.New("message doesn't contain a body part")
 	}
 
 	// Encrypt the body and update the draft
@@ -283,18 +282,18 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 	msg.MIMEType = bodyType
 	plaintext, err = msg.Encrypt([]*openpgp.Entity{privateKey}, privateKey)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if _, err := io.Copy(plaintext, bytes.NewReader(body.Bytes())); err != nil {
-		return "", err
+		return err
 	}
 	if err := plaintext.Close(); err != nil {
-		return "", err
+		return err
 	}
 
 	msg, err = c.UpdateDraftMessage(msg)
 	if err != nil {
-		return "", fmt.Errorf("cannot update draft message: %v", err)
+		return fmt.Errorf("cannot update draft message: %v", err)
 	}
 
 	// Split internal recipients and plaintext recipients
@@ -309,12 +308,12 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 	for _, rcpt := range recipients {
 		resp, err := c.GetPublicKeys(context.Background(), rcpt.Address)
 		if err != nil {
-			return "", fmt.Errorf("cannot get public key for address %q: %v", rcpt.Address, err)
+			return fmt.Errorf("cannot get public key for address %q: %v", rcpt.Address, err)
 		}
 
 		key, err := resp.SendingKey()
 		if err != nil {
-			return "", fmt.Errorf("cannot send to %q: %w", rcpt.Address, err)
+			return fmt.Errorf("cannot send to %q: %w", rcpt.Address, err)
 		}
 		if key == nil {
 			plaintextRecipients = append(plaintextRecipients, rcpt.Address)
@@ -323,7 +322,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 
 		pub, err := key.Entity()
 		if err != nil {
-			return "", err
+			return err
 		}
 
 		encryptedRecipients[rcpt.Address] = pub
@@ -339,7 +338,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 		// contacts' own sign preferences aren't read.
 		settings, err := c.GetMailSettings(context.Background())
 		if err != nil {
-			return "", fmt.Errorf("cannot get the mail settings: %w", err)
+			return fmt.Errorf("cannot get the mail settings: %w", err)
 		}
 		var set *protonmail.MessagePackageSet
 		if settings.Sign == protonmail.SignExternalEnabled {
@@ -348,7 +347,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 			set, err = cleartextPackage(body.Bytes(), bodyType, attachmentKeys, privateKey, plaintextRecipients)
 		}
 		if err != nil {
-			return "", err
+			return err
 		}
 		outgoing.Packages = append(outgoing.Packages, set)
 	}
@@ -358,36 +357,31 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 
 		plaintext, err := encryptedSet.Encrypt(bodyType, privateKey)
 		if err != nil {
-			return "", err
+			return err
 		}
 		if _, err := io.Copy(plaintext, bytes.NewReader(body.Bytes())); err != nil {
 			plaintext.Close()
-			return "", err
+			return err
 		}
 		if err := plaintext.Close(); err != nil {
-			return "", err
+			return err
 		}
 
 		for rcpt, pub := range encryptedRecipients {
 			if _, err := encryptedSet.AddInternal(rcpt, pub); err != nil {
-				return "", err
+				return err
 			}
 		}
 
 		outgoing.Packages = append(outgoing.Packages, encryptedSet)
 	}
 
-	sent, _, err := c.SendMessage(outgoing)
+	_, _, err = c.SendMessage(outgoing)
 	if err != nil {
-		return "", fmt.Errorf("cannot send message: %v", err)
-	}
-	if sent == nil || sent.ID == "" {
-		// Sent: failing now would have the client send again. Proton sends
-		// the draft itself, so the sent message keeps its ID.
-		return outgoing.ID, nil
+		return fmt.Errorf("cannot send message: %v", err)
 	}
 
-	return sent.ID, nil
+	return nil
 }
 
 // cleartextPackage is the package of recipients without a key when external
@@ -472,7 +466,6 @@ func mimeBody(raw []byte) ([]byte, error) {
 type session struct {
 	be *backend
 
-	username    string
 	c           *protonmail.Client
 	u           *protonmail.User
 	privateKeys openpgp.EntityList
@@ -509,7 +502,6 @@ func (s *session) authPlain(username, password string) error {
 	// TODO: decrypt private keys in u.Addresses
 
 	log.Printf("%s logged in", username)
-	s.username = username
 	s.c = c
 	s.u = u
 	s.privateKeys = privateKeys
@@ -548,27 +540,7 @@ func (s *session) Data(r io.Reader) error {
 	if s.c == nil {
 		return smtp.ErrAuthRequired
 	}
-	// Read whole, for the hash: SendMail keeps it whole too.
-	raw, err := io.ReadAll(r)
-	if err != nil {
-		return fmt.Errorf("cannot read the message: %w", err)
-	}
-	// Recorded for an IMAP client saving its copy in Sent (imap APPEND),
-	// by the envelope recipients, as proton-bridge records it. A message
-	// Hash can't read is sent all the same (SendMail decides), unrecorded.
-	hash, err := sendrecord.Hash(raw)
-	if err != nil {
-		_, err := SendMail(s.c, s.u, s.privateKeys, s.addrs, s.allReceivers, bytes.NewReader(raw))
-		return err
-	}
-	send := s.be.sends.Start(s.username, hash, s.allReceivers)
-	sentID, err := SendMail(s.c, s.u, s.privateKeys, s.addrs, s.allReceivers, bytes.NewReader(raw))
-	if err != nil {
-		send.Failed()
-		return err
-	}
-	send.Sent(sentID)
-	return nil
+	return SendMail(s.c, s.u, s.privateKeys, s.addrs, s.allReceivers, r)
 }
 
 func (s *session) Reset() {
@@ -582,14 +554,12 @@ func (s *session) Logout() error {
 
 type backend struct {
 	sessions *auth.Manager
-	sends    *sendrecord.Recorder
 }
 
 func (be *backend) NewSession(_ *smtp.Conn) (smtp.Session, error) {
 	return &session{be: be}, nil
 }
 
-// New returns the SMTP backend. It records every message it sends in sends.
-func New(sessions *auth.Manager, sends *sendrecord.Recorder) smtp.Backend {
-	return &backend{sessions, sends}
+func New(sessions *auth.Manager) smtp.Backend {
+	return &backend{sessions}
 }

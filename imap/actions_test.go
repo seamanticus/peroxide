@@ -29,7 +29,6 @@ import (
 
 	"github.com/seamanticus/peroxide/imap/database"
 	"github.com/seamanticus/peroxide/protonmail"
-	"github.com/seamanticus/peroxide/sendrecord"
 )
 
 // fakeAPI answers message actions with a result per message: codes holds the
@@ -263,7 +262,7 @@ func newActionTestMailbox(t *testing.T, api *fakeAPI, msgs []*protonmail.Message
 	u := mbox.u
 	u.c = &protonmail.Client{RootURL: srv.URL}
 	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: mbox}
-	u.backend = &backend{updates: make(chan imapbackend.Update), sends: sendrecord.New()}
+	u.backend = &backend{updates: make(chan imapbackend.Update)}
 
 	var mu sync.Mutex
 	var sent []imapbackend.Update

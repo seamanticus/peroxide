@@ -23,12 +23,7 @@ import (
 	"github.com/emersion/go-message/textproto"
 
 	"github.com/seamanticus/peroxide/protonmail"
-	"github.com/seamanticus/peroxide/sendrecord"
 )
-
-// sentWait is how long APPEND waits for an SMTP send of the same message
-// still under way, as proton-bridge waits (90 s).
-const sentWait = 90 * time.Second
 
 // appendAllowed refuses, before any request, APPEND into a mailbox that is a
 // view of messages kept in their folders: All Mail, as proton-bridge refuses
@@ -250,20 +245,6 @@ func wrapWithTextPart(h textproto.Header, body []byte) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// recipients returns the To, Cc and Bcc addresses of h, as proton-bridge's
-// getLiteralToList lists them for the send recorder.
-func recipients(h textproto.Header) []string {
-	mh := mail.Header{Header: message.Header{Header: h}}
-	var to []string
-	for _, k := range []string{"To", "Cc", "Bcc"} {
-		list, _ := mh.AddressList(k)
-		for _, a := range list {
-			to = append(to, a.Address)
-		}
-	}
-	return to
-}
-
 func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Literal) error {
 	if body.Len() > appendLimit {
 		return imapbackend.ErrTooBig
@@ -288,7 +269,7 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 	// old draft once the APPEND answers OK: answered "already there", it
 	// would delete the only copy. So a draft is always imported.
 	if mbox.label != protonmail.LabelDraft {
-		existing, err := mbox.existingMessages(ctx, literal, h)
+		existing, err := mbox.existingMessages(ctx, h)
 		if err != nil {
 			return err
 		}
@@ -325,36 +306,20 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 	return mbox.Poll()
 }
 
-// existingMessages returns the messages of the account an import of literal
-// would end up as, none if it would make a new one. Proton's import doesn't
-// make a second message of one it has (seen with the same Message-Id): it
-// files the one it has in the mailbox, which for a folder moves it out of its
-// own. So, before importing, peroxide looks for
-//   - the message its SMTP server sent of literal in the last
-//     sendrecord.Expiry, by the same account to the same recipients, waiting
-//     up to sentWait for a send under way (proton-bridge's sendrecorder);
-//   - the messages whose Message-Id is literal's (MessagesByExternalID).
-func (mbox *mailbox) existingMessages(ctx context.Context, literal []byte, h textproto.Header) ([]*protonmail.Message, error) {
-	// A message Hash can't read the SMTP server didn't record either.
-	if hash, err := sendrecord.Hash(literal); err == nil {
-		waitCtx, cancel := context.WithTimeout(ctx, sentWait)
-		apiID, ok := mbox.u.backend.sends.SentMessage(waitCtx, mbox.u.username, hash, recipients(h))
-		cancel()
-		if ok {
-			msgs, err := mbox.u.c.MessagesByID(ctx, []string{apiID})
-			if err != nil {
-				return nil, fmt.Errorf("cannot look up the message just sent: %w", err)
-			}
-			if len(msgs) > 0 {
-				return msgs, nil
-			}
-		}
-	}
-
+// existingMessages returns the messages of the account whose Message-Id is
+// the one of the message of header h (MessagesByExternalID): those an import
+// of it would end up as. Proton's import doesn't make a second message of
+// one it has (seen with the same Message-Id): it files the one it has in the
+// mailbox, which for a folder moves it out of its own. A message sent
+// through peroxide's SMTP is found too, by the Message-Id SMTP gives Proton;
+// seen found within the second of the send (2026-11-09), so no record of
+// sends is kept, unlike proton-bridge's sendrecorder.
+func (mbox *mailbox) existingMessages(ctx context.Context, h textproto.Header) ([]*protonmail.Message, error) {
 	mh := mail.Header{Header: message.Header{Header: h}}
 	id, err := mh.MessageID()
 	if err != nil || id == "" {
-		// Without one, Proton has nothing to know the message by.
+		// Without one, Proton has nothing to know the message by: it is
+		// imported, a sent copy saved twice.
 		return nil, nil
 	}
 	msgs, err := mbox.u.c.MessagesByExternalID(ctx, id)

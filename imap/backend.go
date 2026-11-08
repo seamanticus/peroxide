@@ -13,7 +13,6 @@ import (
 	"github.com/seamanticus/peroxide/auth"
 	"github.com/seamanticus/peroxide/events"
 	"github.com/seamanticus/peroxide/protonmail"
-	"github.com/seamanticus/peroxide/sendrecord"
 )
 
 var errNotYetImplemented = errors.New("not yet implemented")
@@ -42,10 +41,7 @@ var _ imapbackend.AppendLimitUser = (*user)(nil) // proof: compile-time
 type backend struct {
 	sessions      *auth.Manager
 	eventsManager *events.Manager
-	// The messages the SMTP server sent, which APPEND finds instead of
-	// importing them again.
-	sends   *sendrecord.Recorder
-	updates chan imapbackend.Update
+	updates       chan imapbackend.Update
 	// Whether LIST shows All Mail, as proton-bridge's ShowAllMail setting.
 	showAllMail bool
 
@@ -134,17 +130,12 @@ func (be *backend) Updates() <-chan imapbackend.Update {
 	return be.updates
 }
 
-// New returns the IMAP backend. sends are the messages the SMTP server sent,
-// shared with it (sendrecord). showAllMail false leaves All Mail out of LIST
+// New returns the IMAP backend. showAllMail false leaves All Mail out of LIST
 // (user.ListMailboxes).
-func New(sessions *auth.Manager, eventsManager *events.Manager, sends *sendrecord.Recorder, showAllMail bool) imapbackend.Backend {
-	if sends == nil {
-		panic("invariant: imap.New needs a sendrecord.Recorder")
-	}
+func New(sessions *auth.Manager, eventsManager *events.Manager, showAllMail bool) imapbackend.Backend {
 	return &backend{
 		sessions:      sessions,
 		eventsManager: eventsManager,
-		sends:         sends,
 		showAllMail:   showAllMail,
 		updates:       make(chan imapbackend.Update, 50),
 		users:         make(map[string]*user),
