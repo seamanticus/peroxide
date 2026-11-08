@@ -57,8 +57,9 @@ type user struct {
 
 	db             *database.User
 	eventsReceiver eventsReceiver
-	builds         builds    // messages being built and stored
-	mem            memBudget // memory the builds take
+	builds         builds     // messages being built and stored
+	mem            memBudget  // memory the builds take
+	senders        senderKeys // public keys of the senders of signed mail
 	pacerOnce      sync.Once
 	pacerLimiter   *downloadLimiter // requests' pace; use pacer()
 

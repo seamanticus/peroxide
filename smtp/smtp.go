@@ -2,6 +2,7 @@ package smtp
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -283,7 +284,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 	var plaintextRecipients []string
 	encryptedRecipients := make(map[string]*openpgp.Entity)
 	for _, rcpt := range recipients {
-		resp, err := c.GetPublicKeys(rcpt.Address)
+		resp, err := c.GetPublicKeys(context.Background(), rcpt.Address)
 		if err != nil {
 			return fmt.Errorf("cannot get public key for address %q: %v", rcpt.Address, err)
 		}

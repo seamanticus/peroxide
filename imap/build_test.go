@@ -84,11 +84,15 @@ func TestPGPMIMESignedMessage(t *testing.T) {
 	msg := fetchTestMessage("a", 0)
 	msg.MIMEType = "multipart/mixed"
 	msg.Body = encryptSignedBody(t, entity, account, sender)
-	mbox, _ := newActionTestMailbox(t, &fakeAPI{t: t}, []*protonmail.Message{msg})
+	api := &fakeAPI{t: t, gets: map[string]fakeResponse{"/keys": keysResponse(t, sender)}}
+	mbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{msg})
 	mbox.u.privateKeys = openpgp.EntityList{account}
 	cacheFull(t, mbox, msg)
 
-	fetched := fetchItems(t, mbox, imap.FetchBodyStructure, "BODY.PEEK[1]", "BODY.PEEK[1.MIME]", "BODY.PEEK[2]")
+	fetched := fetchItems(t, mbox, imap.FetchBodyStructure, "BODY.PEEK[1]", "BODY.PEEK[1.MIME]", "BODY.PEEK[2]", "BODY.PEEK[HEADER]")
+	if h := string(sectionBytes(t, fetched, "BODY.PEEK[HEADER]")); !strings.Contains(h, SignatureHeader+": pass") {
+		t.Errorf("header has no %v: pass, the sender's key being published:\n%s", SignatureHeader, h)
+	}
 	bs := fetched.BodyStructure
 	if bs.MIMESubType != "signed" || bs.Params["protocol"] != "application/pgp-signature" || !strings.HasPrefix(bs.Params["micalg"], "pgp-sha") {
 		t.Errorf("BODYSTRUCTURE %v/%v %v, want multipart/signed with protocol and micalg", bs.MIMEType, bs.MIMESubType, bs.Params)

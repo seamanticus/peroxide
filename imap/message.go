@@ -169,6 +169,9 @@ func messageHeader(msg *protonmail.Message) message.Header {
 			h = mail.Header{Header: message.Header{Header: orig}}
 			// The body is peroxide's multipart, not the one sent.
 			h.Del("Content-Transfer-Encoding")
+			// Only peroxide writes its verdict: one the sender wrote
+			// would vouch for the message.
+			h.Del(SignatureHeader)
 		}
 	}
 	h.SetContentType("multipart/mixed", typeParams)
