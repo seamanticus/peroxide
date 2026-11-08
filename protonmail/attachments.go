@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
 )
 
@@ -36,6 +37,41 @@ type Attachment struct {
 	Signature string
 
 	unencryptedKey *packet.EncryptedKey
+}
+
+// SignaturePacket returns the binary signature packets of att's detached
+// signature, the one Proton's clients make over the file before encrypting
+// it; nil if it has none. Proton returns it base64-encoded; an armored one
+// is read too.
+func (att *Attachment) SignaturePacket() ([]byte, error) {
+	s := strings.TrimSpace(att.Signature)
+	if s == "" {
+		return nil, nil
+	}
+	if strings.HasPrefix(s, "-----BEGIN PGP SIGNATURE-----") {
+		block, err := armor.Decode(strings.NewReader(s))
+		if err != nil {
+			return nil, fmt.Errorf("cannot read the armored signature of attachment %v: %w", att.ID, err)
+		}
+		return io.ReadAll(block.Body)
+	}
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("cannot decode the signature of attachment %v: %w", att.ID, err)
+	}
+	return b, nil
+}
+
+// Sign makes the detached signature of the file data by signer, binary, as
+// Proton's clients send it with an attachment (the Signature part of the
+// upload), and sets it in att, base64-encoded as Proton returns it.
+func (att *Attachment) Sign(signer *openpgp.Entity, data io.Reader) ([]byte, error) {
+	var b bytes.Buffer
+	if err := openpgp.DetachSign(&b, signer, data, nil); err != nil {
+		return nil, fmt.Errorf("cannot sign attachment %q: %w", att.Name, err)
+	}
+	att.Signature = base64.StdEncoding.EncodeToString(b.Bytes())
+	return b.Bytes(), nil
 }
 
 // GenerateKey generates an encrypted key and encrypts it to the provided
@@ -77,15 +113,15 @@ func (att *Attachment) GenerateKey(to []*openpgp.Entity) (*packet.EncryptedKey, 
 // Prior to calling Encrypt, an attachment key must have been generated with
 // GenerateKey.
 //
-// signed is ignored for now.
+// signed is ignored: the data packet isn't signed inside, as Proton's
+// clients sign an attachment apart, detached over the file (Sign), sent as
+// the Signature part of the upload.
 func (att *Attachment) Encrypt(ciphertext io.Writer, signed *openpgp.Entity) (cleartext io.WriteCloser, err error) {
 	config := &packet.Config{}
 
 	if att.unencryptedKey == nil {
 		return nil, errors.New("cannot encrypt attachment: no attachment key available")
 	}
-
-	// TODO: sign and store signature in att.Signature
 
 	hints := &openpgp.FileHints{
 		IsBinary: true,
@@ -226,7 +262,20 @@ func (c *Client) CreateAttachment(att *Attachment, r io.Reader) (created *Attach
 			return
 		}
 
-		// TODO: Signature
+		// The detached signature over the file (Sign), binary, as
+		// go-proton-api's UploadAttachment sends it.
+		if att.Signature != "" {
+			w, err := mw.CreateFormFile("Signature", "Signature.pgp")
+			if err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+			sr := base64.NewDecoder(base64.StdEncoding, strings.NewReader(att.Signature))
+			if _, err := io.Copy(w, sr); err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+		}
 
 		pw.CloseWithError(mw.Close())
 	}()

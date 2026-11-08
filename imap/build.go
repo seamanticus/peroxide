@@ -80,13 +80,30 @@ func (u *user) buildLiteral(ctx context.Context, full *protonmail.Message) ([]by
 }
 
 func (u *user) buildMultipart(ctx context.Context, full *protonmail.Message) ([]byte, bool, error) {
-	// The body first: its signature's verdict goes in the message's header.
+	// The body and the attachments first: their signatures' verdicts go in
+	// the message's header, which is written first.
 	ih, body, verdict, fallback, err := u.inlinePart(ctx, full)
 	if err != nil {
 		return nil, false, err
 	}
+	type part struct {
+		h    message.Header
+		body []byte
+	}
+	parts := make([]part, 0, len(full.Attachments))
+	verdicts := make([]sigVerdict, 0, len(full.Attachments))
+	for _, att := range full.Attachments {
+		h, body, v, attFallback, err := u.attachmentPart(ctx, att, senderAddress(full))
+		if err != nil {
+			return nil, false, err
+		}
+		fallback = fallback || attFallback
+		parts = append(parts, part{h, body})
+		verdicts = append(verdicts, v)
+	}
+
 	h := messageHeader(full)
-	setVerdict(&h, full, verdict)
+	setVerdict(&h, full, verdict, attachmentsSummary(verdicts))
 	var b bytes.Buffer
 	w, err := message.CreateWriter(&b, h)
 	if err != nil {
@@ -95,13 +112,8 @@ func (u *user) buildMultipart(ctx context.Context, full *protonmail.Message) ([]
 	if err := writePart(w, ih, body); err != nil {
 		return nil, false, err
 	}
-	for _, att := range full.Attachments {
-		h, body, attFallback, err := u.attachmentPart(ctx, att)
-		if err != nil {
-			return nil, false, err
-		}
-		fallback = fallback || attFallback
-		if err := writePart(w, h, body); err != nil {
+	for _, p := range parts {
+		if err := writePart(w, p.h, p.body); err != nil {
 			return nil, false, err
 		}
 	}
@@ -158,17 +170,27 @@ func (u *user) explainDecryptError(msg *protonmail.Message, err error) error {
 	return fmt.Errorf("encrypted end to end to a key Proton doesn't have: %w", err)
 }
 
-// setVerdict writes the verdict of the body's signature in h, as
-// SignatureHeader; a body not signed has none.
-func setVerdict(h *message.Header, full *protonmail.Message, v sigVerdict) {
-	if v.result == "" {
+// setVerdict writes in h, as SignatureHeader, the verdict of the body's
+// signature and the summary of the attachments' (attachmentsSummary, ""
+// for none). A message whose body isn't signed and whose attachments,
+// if any, aren't either has no field; one whose body isn't signed but an
+// attachment is gets "none" for the body.
+func setVerdict(h *message.Header, full *protonmail.Message, v sigVerdict, attachments string) {
+	if v.result == "" && (attachments == "" || attachments == sigNone) {
 		return
 	}
-	var signer string
-	if full.Sender != nil {
-		signer = full.Sender.Address
+	if v.result == "" {
+		v.result = sigNone
 	}
-	h.Set(SignatureHeader, v.headerValue(signer))
+	h.Set(SignatureHeader, v.headerValue(senderAddress(full), attachments))
+}
+
+// senderAddress is the address of full's sender, "" if it has none.
+func senderAddress(full *protonmail.Message) string {
+	if full.Sender == nil {
+		return ""
+	}
+	return full.Sender.Address
 }
 
 // attachmentPart downloads att and returns its part: decrypted, or, when no
@@ -177,30 +199,44 @@ func setVerdict(h *message.Header, full *protonmail.Message, v sigVerdict) {
 // whose comment says why, so that the client may decrypt it. It is decrypted
 // whole first, so that a failure at its end still gives the armored part. An
 // attached message (message/rfc822) has no transfer encoding, as in bridge,
-// so that its structure can be described. Only a failed download is an error.
-func (u *user) attachmentPart(ctx context.Context, att *protonmail.Attachment) (h message.Header, body []byte, fallback bool, err error) {
+// so that its structure can be described.
+//
+// A decrypted attachment's detached signature is checked against the
+// sender's keys (verifyAttachment), and the verdict written in the part's
+// own header as SignatureHeader, and returned for the message's summary.
+// The errors are a failed download, and a failure to fetch the sender's
+// keys that may pass.
+func (u *user) attachmentPart(ctx context.Context, att *protonmail.Attachment, sender string) (h message.Header, body []byte, v sigVerdict, fallback bool, err error) {
 	rc, err := u.c.GetAttachment(ctx, att.ID)
 	if err != nil {
-		return h, nil, false, err
+		return h, nil, sigVerdict{}, false, err
 	}
 	ciphertext, err := io.ReadAll(rc)
 	if closeErr := rc.Close(); err == nil {
 		err = closeErr
 	}
 	if err != nil {
-		return h, nil, false, fmt.Errorf("cannot download attachment %v: %w", att.ID, err)
+		return h, nil, sigVerdict{}, false, fmt.Errorf("cannot download attachment %v: %w", att.ID, err)
 	}
 
 	why := "no key peroxide has unlocked opens it"
 	if att.Decryptable(u.privateKeys) {
 		md, err := att.Read(bytes.NewReader(ciphertext), u.privateKeys, nil)
 		if err == nil {
-			// Not checked: Proton signs an attachment apart (its Signature
-			// field), detached, which peroxide doesn't read.
 			body, err = io.ReadAll(md.UnverifiedBody)
 		}
 		if err == nil {
-			return attachmentHeader(att), body, false, nil
+			v, lookupErr := u.verifyAttachment(ctx, att, body, sender)
+			if lookupErr != nil {
+				return h, nil, sigVerdict{}, false, lookupErr
+			}
+			h := attachmentHeader(att)
+			if v.result != "" {
+				// The signer is the message's sender: header.from is on the
+				// message's field.
+				h.Set(SignatureHeader, v.headerValue("", ""))
+			}
+			return h, body, v, false, nil
 		}
 		why = err.Error()
 	}
@@ -208,13 +244,14 @@ func (u *user) attachmentPart(ctx context.Context, att *protonmail.Attachment) (
 	log.Printf("Attachment %v of message %v served encrypted: %v", att.ID, att.MessageID, why)
 	var b bytes.Buffer
 	if err := writeArmored(&b, att.PGPMessage(bytes.NewReader(ciphertext)), "This attachment could not be decrypted: "+why); err != nil {
-		return h, nil, false, fmt.Errorf("cannot armor attachment %v: %w", att.ID, err)
+		return h, nil, sigVerdict{}, false, fmt.Errorf("cannot armor attachment %v: %w", att.ID, err)
 	}
 	var ah mail.AttachmentHeader
 	ah.SetContentType("application/octet-stream", nil)
 	ah.Set("Content-Transfer-Encoding", "base64")
 	ah.SetFilename(armoredAttachmentName(att))
-	return ah.Header, b.Bytes(), true, nil
+	// Not decrypted, so not checked: counted as not signed.
+	return ah.Header, b.Bytes(), sigVerdict{}, true, nil
 }
 
 // buildPGPMIME builds a message whose decrypted body is a MIME message (one
@@ -237,7 +274,7 @@ func (u *user) buildPGPMIME(ctx context.Context, full *protonmail.Message) ([]by
 	}
 
 	h := messageHeader(full)
-	setVerdict(&h, full, verdict)
+	setVerdict(&h, full, verdict, "")
 	// Written by hand below, not by message.CreateWriter, which adds it.
 	h.Set("MIME-Version", "1.0")
 	if len(sigs) > 0 {

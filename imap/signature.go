@@ -1,8 +1,10 @@
 package imap
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
+	pgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
 
 	"github.com/seamanticus/peroxide/protonmail"
@@ -101,8 +104,10 @@ type sigVerdict struct {
 }
 
 // headerValue formats v as the value of SignatureHeader, in the shape of an
-// RFC 8601 resinfo: the verdict, then a reason, the signer and the key.
-func (v sigVerdict) headerValue(signer string) string {
+// RFC 8601 resinfo: the verdict, then a reason, the signer, the key and, on
+// the message's field, the summary of its attachments' verdicts (""
+// leaves it out).
+func (v sigVerdict) headerValue(signer, attachments string) string {
 	var b strings.Builder
 	b.WriteString(v.result)
 	if v.reason != "" {
@@ -113,6 +118,9 @@ func (v sigVerdict) headerValue(signer string) string {
 	}
 	if len(v.fingerprint) > 0 {
 		fmt.Fprintf(&b, " key=%s", strings.ToUpper(hex.EncodeToString(v.fingerprint)))
+	}
+	if attachments != "" {
+		fmt.Fprintf(&b, " attachments=%s", attachments)
 	}
 	return b.String()
 }
@@ -192,4 +200,101 @@ func judge(md *openpgp.MessageDetails, senderKnown bool) sigVerdict {
 	default:
 		return sigVerdict{result: sigPass, fingerprint: md.SignedBy.PublicKey.Fingerprint}
 	}
+}
+
+// sigNone is the attachments summary of a message none of whose attachments
+// is signed; an attachment not signed gets no field of its own.
+const sigNone = "none"
+
+// verifyAttachment checks the detached signature Proton keeps for att
+// (Attachment.Signature: Proton's clients sign the file before encrypting
+// it, go-proton-api UploadAttachment) over its decrypted bytes, with the
+// account's keys and those Proton publishes for sender. The verdict's result
+// is "" if att carries no signature. lookupErr is a failure to fetch the
+// sender's keys that may pass: the message is then not built now.
+func (u *user) verifyAttachment(ctx context.Context, att *protonmail.Attachment, data []byte, sender string) (v sigVerdict, lookupErr error) {
+	sig, err := att.SignaturePacket()
+	if err != nil {
+		return sigVerdict{result: sigPermErr, reason: "its signature can't be read: " + err.Error()}, nil
+	}
+	if sig == nil {
+		return sigVerdict{}, nil
+	}
+
+	keyring := slices.Clone(u.privateKeys)
+	senderKnown := false
+	if sender != "" {
+		keys, err := u.senders.get(ctx, u.c, sender)
+		switch {
+		case err != nil && (retryable(err) || ctx.Err() != nil):
+			return sigVerdict{}, err
+		case err != nil:
+			log.Printf("Attachment %v: cannot check its signature: %v", att.ID, err)
+			return sigVerdict{result: sigPermErr, reason: "Proton refused the sender's keys"}, nil
+		}
+		senderKnown = len(keys) > 0
+		keyring = append(keyring, keys...)
+	}
+
+	_, signer, err := openpgp.VerifyDetachedSignature(keyring, bytes.NewReader(data), bytes.NewReader(sig), nil)
+	switch {
+	case errors.Is(err, pgperrors.ErrUnknownIssuer) && !senderKnown:
+		return sigVerdict{result: sigPermErr, reason: "Proton publishes no key for the sender"}, nil
+	case errors.Is(err, pgperrors.ErrUnknownIssuer):
+		return sigVerdict{result: sigNeutral, reason: "signed by a key the sender doesn't publish"}, nil
+	case signer == nil && err != nil:
+		// A key matched the issuer, and the bytes don't verify.
+		return sigVerdict{result: sigFail, fingerprint: issuerFingerprint(keyring, sig), reason: err.Error()}, nil
+	case err != nil:
+		// Verified, but the key or the signature is expired or revoked.
+		return sigVerdict{result: sigFail, fingerprint: signer.PrimaryKey.Fingerprint, reason: err.Error()}, nil
+	default:
+		return sigVerdict{result: sigPass, fingerprint: signer.PrimaryKey.Fingerprint}, nil
+	}
+}
+
+// issuerFingerprint returns the fingerprint of the primary key of the key in
+// keyring that the signature packets sig name as issuer, nil if none.
+func issuerFingerprint(keyring openpgp.EntityList, sig []byte) []byte {
+	p, err := packet.NewReader(bytes.NewReader(sig)).Next()
+	if err != nil {
+		return nil
+	}
+	s, ok := p.(*packet.Signature)
+	if !ok || s.IssuerKeyId == nil {
+		return nil
+	}
+	if keys := keyring.KeysById(*s.IssuerKeyId); len(keys) > 0 {
+		return keys[0].Entity.PrimaryKey.Fingerprint
+	}
+	return nil
+}
+
+// attachmentsSummary sums up the verdicts of a message's attachments, for
+// the attachments property of its field: the worst of them, fail before
+// permerror before neutral before pass, an unsigned attachment counting as
+// neutral beside signed ones; "none" when none is signed, "" when it has
+// no attachment.
+func attachmentsSummary(verdicts []sigVerdict) string {
+	if len(verdicts) == 0 {
+		return ""
+	}
+	rank := map[string]int{sigPass: 0, sigNeutral: 1, "": 1, sigPermErr: 2, sigFail: 3}
+	worst, signed := sigPass, false
+	for _, v := range verdicts {
+		if v.result != "" {
+			signed = true
+		}
+		r := v.result
+		if r == "" {
+			r = sigNeutral
+		}
+		if rank[r] > rank[worst] {
+			worst = r
+		}
+	}
+	if !signed {
+		return sigNone
+	}
+	return worst
 }
