@@ -638,3 +638,70 @@ Only EXPUNGE from Trash or Drafts deletes for good.
 Decide with: what Thunderbird, Evolution and aerc do on delete
 ("move to Trash" settings), and whether EXPUNGE in Spam should
 follow Trash. docs/imap/changes.md#expunge describes today's rule.
+
+## 18. `peroxide smtp` and `peroxide imap` side by side lock an account out
+
+**Problem.** Run as two processes, `peroxide smtp` and `peroxide imap`
+each keep their own session for an account (auth.Manager is per
+process), from the same stored refresh token. Proton refresh tokens are
+single use: the first process to refresh (`POST /auth/refresh`) gets a
+new one, and the other's fails with `[10013] Invalid refresh token`.
+That process then logs in again (`POST /auth`), which Proton may answer
+with CAPTCHA (`[9001]`), and every request it makes fails until
+`peroxide auth <user>` is run again. Seen 2026-11-09 09:26
+(build_release/smtp.log, imap.log): SMTP refreshed at 09:26:24, IMAP's
+refresh at 09:26:33 failed, its login got 9001, its APPENDs answered NO
+and its events 401. `peroxide serve` shares one auth.Manager between
+the two servers, so it doesn't happen there.
+
+A side effect: the send recorder (package sendrecord) is per process,
+and docs/imap/changes.md#append describes separate processes as not
+sharing it. In practice separate processes can't serve one account at
+all.
+
+**Options:**
+
+1. **Document it**: docs/commands.md, under `smtp`, `imap` and `serve`:
+   one process per account, `serve` for both protocols.
+2. **Refuse it**: a lock file per account (as the database already is,
+   "the database is in use by another peroxide process") taken by
+   whichever process logs the account in, so the second fails at once
+   with a clear message instead of after the first token refresh.
+3. **Share the session**: after a refresh, write the new tokens back to
+   the auth file (auth/auth.go) and, on `[10013]`, read the file again
+   before logging in. Two processes then race at worst once per
+   refresh. Most work, and the file is encrypted with the bridge
+   password both processes hold.
+
+## 19. SMTP can't send a PGP/MIME message the client encrypted
+
+**Problem.** A message the client encrypted itself (aerc's encrypt on
+send: `Content-Type: multipart/encrypted;
+protocol="application/pgp-encrypted"`) fails with `554 cannot upload
+attachment: [2001] Invalid input`. Seen 2026-11-09 09:29 and 09:30
+(build_release/smtp.log, "SMTP encrypted"). SendMail (smtp/smtp.go,
+hydroxide's send path) walks the MIME parts with go-message's
+mail.Reader: it finds no text body to use, takes the
+`application/octet-stream` part as an attachment with an empty filename
+(log: `uploading message attachment ""`), and Proton refuses the
+upload. Not caused by branch append-import, which changed only what
+SendMail returns.
+
+**What a fix needs to decide:**
+
+- Such a message is already end-to-end encrypted to the recipient's key
+  by the client: Proton must send it as is, not re-encrypt it. The
+  Proton package type for that is PGP/MIME (`MessagePackagePGPMIME`,
+  16) with the client's ciphertext as the body, or the message sent
+  as an attachment-less MIME body of type multipart/encrypted. Check
+  how proton-bridge's SMTP handles an incoming multipart/encrypted
+  message (internal/services/smtp, message/parser) before choosing.
+- The copy kept in Sent: Proton stores what it sends; the client's
+  ciphertext is encrypted to the recipient, maybe not to the sender, so
+  the sent copy may be unreadable to the account. aerc's
+  `pgp-self-encrypt` (or equivalent) adds the sender's key.
+- multipart/signed (sign only) goes through today? Check: the signed
+  part is an inline body and the signature an attachment
+  (signature.asc), which may reach the recipient as a separate
+  attachment, breaking the signature.
+- A test in smtp/smtp_test.go with a multipart/encrypted message.
