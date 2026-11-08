@@ -68,10 +68,30 @@ const (
 )
 
 type PublicKey struct {
-	// Send is not in Proton's answers (they carry Flags); unused.
-	Send      int
 	Flags     PublicKeyFlags
 	PublicKey string
+}
+
+// ErrNoActiveKey is the error of SendingKey for an address whose keys are all
+// obsolete: Proton has keys for it, but mail can be encrypted to none.
+var ErrNoActiveKey = errors.New("no active key for the recipient")
+
+// SendingKey returns the key to encrypt mail to the address resp is for: the
+// first one Proton marks active, as it lists the primary key first. No key
+// at all is nil, nil: the address takes plain mail. Keys of which none is
+// active are ErrNoActiveKey: falling back to plain mail would send in clear
+// what the recipient expects encrypted, so proton-bridge refuses too
+// (NoActiveKeyForRecipient).
+func (resp *PublicKeyResp) SendingKey() (*PublicKey, error) {
+	if len(resp.Keys) == 0 {
+		return nil, nil
+	}
+	for _, k := range resp.Keys {
+		if k.Flags&PublicKeyActive != 0 {
+			return k, nil
+		}
+	}
+	return nil, ErrNoActiveKey
 }
 
 func (pub *PublicKey) Entity() (*openpgp.Entity, error) {

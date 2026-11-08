@@ -302,13 +302,16 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 			return fmt.Errorf("cannot get public key for address %q: %v", rcpt.Address, err)
 		}
 
-		if len(resp.Keys) == 0 {
+		key, err := resp.SendingKey()
+		if err != nil {
+			return fmt.Errorf("cannot send to %q: %w", rcpt.Address, err)
+		}
+		if key == nil {
 			plaintextRecipients = append(plaintextRecipients, rcpt.Address)
 			continue
 		}
 
-		// TODO: only keys with Send == 1
-		pub, err := resp.Keys[0].Entity()
+		pub, err := key.Entity()
 		if err != nil {
 			return err
 		}
