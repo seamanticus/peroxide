@@ -54,14 +54,17 @@ type selectCommand struct {
 	imapserver.Select
 }
 
+// Handle runs go-imap's SELECT and passes its result on unchanged. That result
+// is not nil on success: go-imap returns an *imap.ErrStatusResp carrying the
+// tagged OK [READ-WRITE] or [READ-ONLY]. So success is read from the
+// connection instead: Select.Handle clears the selected mailbox first and
+// sets it only once the mailbox is open.
 func (cmd *selectCommand) Handle(conn imapserver.Conn) error {
-	if err := cmd.Select.Handle(conn); err != nil {
-		return err
-	}
+	err := cmd.Select.Handle(conn)
 	if mbox, ok := conn.Context().Mailbox.(*mailbox); ok {
 		mbox.u.prioritize(mbox.label)
 	}
-	return nil
+	return err
 }
 
 // fetchCommand is go-imap's FETCH, plus what the backend can't learn from

@@ -2,6 +2,7 @@ package imap
 
 import (
 	"context"
+	"errors"
 	"math"
 	"math/rand/v2"
 	"net/http"
@@ -207,8 +208,11 @@ func TestSelectPrioritizes(t *testing.T) {
 		}
 		sel.Mailbox = "INBOX"
 		conn := &selectConn{ctx: &imapserver.Context{User: u}}
-		if err := sel.Handle(conn); err != nil {
-			t.Fatalf("%v = %v", name, err)
+		// go-imap ends a successful SELECT with the tagged OK as an error.
+		err := sel.Handle(conn)
+		status, ok := errors.AsType[*imap.ErrStatusResp](err)
+		if !ok || status.Resp.Type != imap.StatusRespOk {
+			t.Fatalf("%v = %v, want go-imap's tagged OK", name, err)
 		}
 		if conn.ctx.Mailbox == nil || conn.ctx.MailboxReadOnly != (name == "EXAMINE") {
 			t.Errorf("%v selected %v, read-only %v", name, conn.ctx.Mailbox, conn.ctx.MailboxReadOnly)
@@ -216,6 +220,16 @@ func TestSelectPrioritizes(t *testing.T) {
 		if label, gen := u.priority(); label != protonmail.LabelInbox || gen != uint64(i+1) {
 			t.Errorf("after %v priority = %q, %v; want INBOX, %v", name, label, gen, i+1)
 		}
+	}
+
+	// A mailbox that doesn't exist: the SELECT fails, and nothing moves.
+	sel := Extension{}.Command("SELECT")().(*selectCommand)
+	sel.Mailbox = "Nowhere"
+	if err := sel.Handle(&selectConn{ctx: &imapserver.Context{User: u}}); err == nil {
+		t.Error("SELECT of a mailbox that doesn't exist succeeded")
+	}
+	if _, gen := u.priority(); gen != 2 {
+		t.Errorf("a failed SELECT changed the priority (selection %v, want 2)", gen)
 	}
 }
 
