@@ -76,11 +76,13 @@ since. The requests are paced as TCP paces its traffic (AIMD): 2 at
 once to start, one more per round that succeeds, up to 32 (what
 Proton's API team recommends to proton-bridge); a 429 or 5xx halves
 that and pauses every request for Proton's `Retry-After`, or for 1-2 s
-doubling up to a minute, with jitter. Messages being downloaded and built take at
-most 64 MB (by Proton's sizes) at once, a FETCH's included: one alone
-always may. A message that fails for
-another reason goes in the failed set and isn't tried again by the
-background download.
+doubling up to a minute, with jitter. The pace is shared with FETCH,
+which builds the messages it finds unstored in parallel too. Messages
+being downloaded and built take at most 64 MB (by Proton's sizes) at
+once, a FETCH's included: one alone always may. When a client selects
+a mailbox, its messages not stored yet go to the front of the queue.
+A message that fails for another reason goes in the failed set and
+isn't tried again by the background download.
 
 Before that, if the keys peroxide unlocked differ from those the stored
 messages were built with, the messages stored with something left
@@ -147,7 +149,8 @@ next change's (`user.sendSem`). Then:
   (FLAGS)`. An update for a message the database lacks is left to the
   download while it runs; after, the message is fetched and stored.
   An update of a stored message's contents (an edited draft) builds it
-  again, and gives it new UIDs if it changed
+  again after the page, once however many updates it had, without
+  holding up other events, and gives it new UIDs if it changed
   ([messages.md](messages.md#messages-that-change)).
 - **Labels**: see [mailboxes.md](mailboxes.md#when-protons-folders-and-labels-change).
 - **Addresses**: the address list is updated (see

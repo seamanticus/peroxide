@@ -32,9 +32,15 @@ draft, a key unlocked since), the message gets a new UID
 
 After login, once the message list is downloaded
 ([sync.md](sync.md)), peroxide downloads every message in the
-background, newest first, so most FETCHes find it stored. A FETCH of a
-message not stored yet builds and stores it first; a FETCH of one
-being downloaded waits for that download rather than making a second.
+background, newest first, so most FETCHes find it stored; the mailbox a
+client last selected goes first. A FETCH of messages not stored yet
+builds and stores them first, up to 64 at a time in parallel, paced
+with the background download (Proton asking either to slow down slows
+both); the response starts once the first 64 are ready. A FETCH of a
+message being downloaded waits for that download rather than making a
+second. Each such message still costs one request (and one per
+attachment): Proton has no way to ask for several full messages at
+once.
 
 `FETCH ALL`, `FAST` and `FULL` are expanded as RFC 3501 defines. An
 item peroxide doesn't know fails the whole FETCH (it isn't dropped
@@ -107,8 +113,10 @@ size.
 **HEADER.FIELDS** and **HEADER.FIELDS.NOT** send only the fields named,
 or all but those, matched without regard to case.
 
-**Signatures** are not checked: neither the body's nor attachments'.
-A PGP/MIME signature is handed to your client (above), which can.
+**Signatures** of the body are checked by peroxide and the verdict
+written in the header ([Signatures](#signatures)); a PGP/MIME
+signature is also handed to your client (above), which can check it
+itself. Attachments' signatures are not checked.
 
 **Bytes that can't be parsed.** If a built message can't be parsed
 (malformed MIME inside a PGP/MIME body, say), it is served instead as a
@@ -198,12 +206,74 @@ can change what peroxide would build:
   message gets a new UID in every mailbox it is in, and clients are
   told `EXPUNGE` of the old one and `EXISTS` of the new, as gluon does.
   A message not stored yet is simply built as Proton has it at its
-  next FETCH.
+  next FETCH. Several updates of one draft in an events page (the web
+  client autosaving) build it once, after the page is applied; the
+  download of the draft holds no lock, so other events, STOREs and the
+  background download don't wait for it. If Proton can't be reached,
+  the stored version stays until the draft's next update.
 - **A key unlocked since** the messages were built: at login, if the
   unlocked keys differ from those the stored messages were built with,
   every message stored with something left encrypted (armored body,
   `.pgp` attachment, PGP/MIME pass-through) is built again, and gets a
   new UID if it now decrypts.
+
+## Signatures
+
+Mail between Proton users, and mail a sender signed inside OpenPGP
+encryption, carries the sender's signature inside the encrypted body.
+It signs the text, which peroxide decrypts and serves in the clear:
+your client gets no signature to check, whichever client it is. So
+peroxide checks it when it builds the message, with the sender's public
+keys as Proton publishes them (`GET /keys`, the keys Proton's own web
+client checks against), and writes the result in the message header:
+
+    X-Peroxide-Signature: pass header.from=alice@proton.me key=4F2A...9C1D
+
+The keys of each sender are fetched once and kept for a day, so only
+the first signed message of a sender costs a request. A message that
+isn't signed gets no field. Mail you sent, signed with your own key,
+is checked with it.
+
+### The field, for client authors
+
+The field is written once, when peroxide builds the message, and never
+changes under the message's UID. It follows RFC 8601's
+`Authentication-Results` result values (section 2.7.1) and its
+`ptype.property=value` shape:
+
+    X-Peroxide-Signature: <result> [(<reason>)] [header.from=<address>] [key=<fingerprint>]
+
+| Result | Meaning |
+|---|---|
+| `pass` | The signature verifies with a key Proton publishes for the sender (`header.from`), the one in `key`: the text is as the sender signed it |
+| `fail` | Made by the key in `key`, which the sender publishes, but it doesn't verify: the text changed after it was signed. `reason` says how |
+| `neutral` | Made by a key the sender doesn't publish (an old key, or someone else's): it can't vouch for the sender |
+| `permerror` | Can't be checked: Proton publishes no key for the sender (most senders outside Proton), or refused to say which |
+| (no field) | The body isn't signed, or is passed through still encrypted, or couldn't be decrypted |
+
+- `header.from` is the sender address from Proton's metadata, the
+  `From` peroxide writes; `key` is the signing key's fingerprint in
+  upper-case hex (V4: 40 digits, V6: 64).
+- `reason` is free text for people; don't parse it.
+- Only peroxide writes the field: one in the header the sender sent,
+  or in a PGP/MIME message's own header, is removed before peroxide
+  adds its own. A client can trust the field as far as it trusts the
+  connection to peroxide.
+- `pass` says the sender's Proton key made the signature, as Proton's
+  web client does with its "verified" mark; it says nothing about
+  whether that key is the one you expect (Proton's key pinning in
+  contacts isn't read). Show `fail` as a warning; `neutral` and
+  `permerror` as "not verified".
+- Received PGP/MIME (`multipart/signed`) gets the field too: a client
+  that verifies such mail itself can ignore it.
+
+A client wanting to show the verdict reads it with the rest of the
+header (`BODY.PEEK[HEADER.FIELDS (X-PEROXIDE-SIGNATURE)]`, or the whole
+header it fetches anyway).
+
+Messages stored before peroxide checked signatures have no field until
+they are built again (edited, a key change, or `download-mailbox
+-discard-local-copy`).
 
 ## Where messages are kept
 
@@ -234,7 +304,9 @@ headers (`X-Pm-Internal-Id`, `X-Pm-External-Id`, `X-Pm-Date`), which
 peroxide doesn't. Its multipart/signed rewrites the signed part's
 header, and names the hash `SHA-256` in `micalg`; peroxide keeps the
 signed part byte for byte and writes `pgp-sha256` (RFC 3156), so the
-signature verifies. An edited draft is built again and replaces the
+signature verifies. bridge checks no signature inside an encrypted
+body, so its clients see none; peroxide writes `X-Peroxide-Signature`.
+An edited draft is built again and replaces the
 stored one under a new UID only if the bytes differ
 (`applyMessageUpdated`); peroxide does the same. Messages that fail
 are kept in its sync status (`FailedMessages`) and not retried by the

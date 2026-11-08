@@ -578,13 +578,24 @@ with it.**
   FETCH, edited draft) shares one 64 MB budget by Proton's sizes
   (memBudget, 2026-11-09); a big message waits until the others leave
   it room, not first come first served.
-- `refreshMessage` holds syncSem for its request (bounded by
-  `unknownMessageTimeout`), as `updateUnknownMessage` does; a burst of
-  draft autosaves delays other events by one round trip each.
+- (done, ab3215f) `refreshMessage` no longer holds syncSem for its
+  request; updates of one message in an events page rebuild it once.
+  Not done: waiting for a draft to be quiet for a poll before
+  rebuilding it (decided against for now: the client would see the
+  previous version for up to a poll).
+- (done, c9c6fc1) Unstored messages: still one request each (Proton has
+  no batch endpoint for full messages), but a FETCH builds them in
+  parallel, 64 at a time, paced with the download, and a selected
+  mailbox goes to the front of the download.
 - go-imap's `backendutil` doesn't descend into attached messages:
   `BODY[2.1]` of a `message/rfc822` part answers empty.
-- Signatures are still not checked (`TODO: check signature`); a
-  PGP/MIME signature is handed to the client, which can.
+- (done, 8bf8ea4) Body signatures are checked with the sender's
+  Proton keys (GET /keys, cached a day) and the verdict written in
+  `X-Peroxide-Signature` (docs/imap/messages.md#signatures), for aerc
+  to show (aerc_implementation.md section 6). Open: attachment
+  signatures (Proton's detached `Signature`); messages stored before
+  8bf8ea4 get no field until built again; Proton's contact key pinning
+  isn't read.
 - 9.1 step 8 (one `syncSem` per mailbox) stays open.
 
 ### 9.1 Keep UIDs across sessions (option b)
