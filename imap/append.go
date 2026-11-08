@@ -282,8 +282,12 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 	if err != nil {
 		return fmt.Errorf("cannot read the message header: %w", err)
 	}
-	if done, err := mbox.appendSent(ctx, literal, h); done || err != nil {
+	existing, err := mbox.existingMessages(ctx, literal, h)
+	if err != nil {
 		return err
+	}
+	if len(existing) > 0 {
+		return mbox.alreadyThere(existing)
 	}
 
 	addr, ok := importAddress(mbox.u.addresses(), messageSender(h))
@@ -308,36 +312,92 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 	return mbox.Poll()
 }
 
-// appendSent handles an APPEND of a message peroxide's SMTP server sent in
-// the last sendrecord.Expiry, by the same account to the same recipients:
-// Proton filed it in Sent already, so it is added to this mailbox, as a COPY
-// of it would, instead of imported again (proton-bridge does the same, and
-// gluon adds the existing message to the mailbox). done is false for any
-// other message: it is to be imported.
-func (mbox *mailbox) appendSent(ctx context.Context, literal []byte, h textproto.Header) (done bool, err error) {
-	if mbox.u.backend == nil || mbox.u.backend.sends == nil {
-		return false, nil
+// existingMessages returns the messages of the account an import of literal
+// would end up as, none if it would make a new one. Proton's import doesn't
+// make a second message of one it has (seen with the same Message-Id): it
+// files the one it has in the mailbox, which for a folder moves it out of its
+// own. So, before importing, peroxide looks for
+//   - the message its SMTP server sent of literal in the last
+//     sendrecord.Expiry, by the same account to the same recipients, waiting
+//     up to sentWait for a send under way (proton-bridge's sendrecorder);
+//   - the messages whose Message-Id is literal's (MessagesByExternalID).
+func (mbox *mailbox) existingMessages(ctx context.Context, literal []byte, h textproto.Header) ([]*protonmail.Message, error) {
+	if be := mbox.u.backend; be != nil && be.sends != nil {
+		// A message Hash can't read the SMTP server didn't record either.
+		if hash, err := sendrecord.Hash(literal); err == nil {
+			waitCtx, cancel := context.WithTimeout(ctx, sentWait)
+			apiID, ok := be.sends.SentMessage(waitCtx, mbox.u.username, hash, recipients(h))
+			cancel()
+			if ok {
+				msgs, err := mbox.u.c.MessagesByID(ctx, []string{apiID})
+				if err != nil {
+					return nil, fmt.Errorf("cannot look up the message just sent: %w", err)
+				}
+				if len(msgs) > 0 {
+					return msgs, nil
+				}
+			}
+		}
 	}
-	hash, err := sendrecord.Hash(literal)
+
+	mh := mail.Header{Header: message.Header{Header: h}}
+	id, err := mh.MessageID()
+	if err != nil || id == "" {
+		// Without one, Proton has nothing to know the message by.
+		return nil, nil
+	}
+	msgs, err := mbox.u.c.MessagesByExternalID(ctx, id)
 	if err != nil {
-		// Not a message the SMTP server could have sent: it hashes them all.
-		return false, nil
+		return nil, fmt.Errorf("cannot check whether the message is already in your account: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, sentWait)
-	defer cancel()
-	apiID, ok := mbox.u.backend.sends.SentMessage(ctx, mbox.u.username, hash, recipients(h))
-	if !ok {
-		return false, nil
+	return slices.DeleteFunc(msgs, func(m *protonmail.Message) bool { return m.ExternalID != id }), nil
+}
+
+// alreadyThere answers an APPEND of a message the account has as existing:
+// nothing is imported or moved. If one of them is in this mailbox, the APPEND
+// did what was asked: OK. Otherwise importing would move it here from where
+// it is, so NO, and a client moving it from another account keeps its copy.
+// Either way under ALERT, which clients must show (RFC 3501 section 7.1.1):
+// an OK text alone is shown by none of aerc, Thunderbird and Evolution.
+func (mbox *mailbox) alreadyThere(existing []*protonmail.Message) error {
+	if slices.ContainsFunc(existing, func(m *protonmail.Message) bool {
+		return slices.Contains(m.LabelIDs, mbox.label)
+	}) {
+		log.Printf("APPEND to %v of message %v, already there: not imported", mbox.name, existing[0].ID)
+		return appendAlert(imap.StatusRespOk, fmt.Sprintf("This message is already in %v: it was not copied again", mbox.name))
 	}
-	log.Printf("APPEND of message %v, just sent: added to %v, not imported again", apiID, mbox.name)
-	if mbox.label != protonmail.LabelSent {
-		failed, err := mbox.u.c.LabelMessages(mbox.label, []string{apiID})
-		if err != nil {
-			return true, err
+	where := mbox.u.mailboxNames(existing)
+	log.Printf("APPEND to %v of message %v, already in %v: refused", mbox.name, existing[0].ID, where)
+	return appendAlert(imap.StatusRespNo, fmt.Sprintf(
+		"This message is already in your Proton account, in %v: it was not copied, as Proton keeps one copy of a message",
+		where))
+}
+
+// mailboxNames lists the mailboxes holding msgs, but All Mail and Starred,
+// which hold every message and the starred ones: All Mail if none is left.
+func (u *user) mailboxNames(msgs []*protonmail.Message) string {
+	var names []string
+	for _, m := range msgs {
+		for _, labelID := range m.LabelIDs {
+			if labelID == protonmail.LabelAllMail || labelID == protonmail.LabelStarred {
+				continue
+			}
+			if mbox := u.getMailboxByLabel(labelID); mbox != nil && !slices.Contains(names, mbox.name) {
+				names = append(names, mbox.name)
+			}
 		}
-		if err := mbox.u.applyAction([]string{apiID}, failed, labelUpdate(mbox.label, true)); err != nil {
-			return true, err
-		}
 	}
-	return true, mbox.Poll()
+	if len(names) == 0 {
+		return "All Mail"
+	}
+	slices.Sort(names)
+	return strings.Join(names, ", ")
+}
+
+// appendAlert is APPEND's tagged response of typ with text under ALERT.
+// go-imap's server sends an *imap.ErrStatusResp a command returns as its
+// response, OK included (server/conn.go handleCommand), as its own SELECT
+// ends; its APPEND passes CreateMessage's error on.
+func appendAlert(typ imap.StatusRespType, text string) error {
+	return &imap.ErrStatusResp{Resp: &imap.StatusResp{Type: typ, Code: imap.CodeAlert, Info: text}}
 }

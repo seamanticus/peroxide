@@ -41,6 +41,9 @@ type fakeAPI struct {
 	codes    map[string]int
 	gets     map[string]fakeResponse
 	labelIDs map[string][]string
+	// externalIDs gives the Message-Id of each message, for the metadata
+	// request by ExternalID.
+	externalIDs map[string]string
 	// actionCodes and actionStatus override codes for one action, keyed by
 	// path and label ID, e.g. "/messages/unlabel 0" (the label ID is empty
 	// for actions without one): the code per message, or an HTTP status that
@@ -197,14 +200,24 @@ func (api *fakeAPI) serveMetadata(w http.ResponseWriter, r *http.Request) {
 	if got := r.Header.Get("X-HTTP-Method-Override"); got != http.MethodGet {
 		api.t.Errorf("metadata request overridden as %q, want GET", got)
 	}
-	var req struct{ ID []string }
+	var req struct {
+		ID         []string
+		ExternalID string
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.t.Errorf("decode metadata request: %v", err)
 	}
 	var msgs []*protonmail.Message
 	for _, id := range req.ID {
 		if labelIDs, ok := api.labelIDs[id]; ok {
-			msgs = append(msgs, &protonmail.Message{ID: id, LabelIDs: labelIDs})
+			msgs = append(msgs, &protonmail.Message{ID: id, LabelIDs: labelIDs, ExternalID: api.externalIDs[id]})
+		}
+	}
+	if req.ExternalID != "" {
+		for _, id := range slices.Sorted(maps.Keys(api.externalIDs)) {
+			if api.externalIDs[id] == req.ExternalID {
+				msgs = append(msgs, &protonmail.Message{ID: id, LabelIDs: api.labelIDs[id], ExternalID: req.ExternalID})
+			}
 		}
 	}
 	b, err := json.Marshal(struct {

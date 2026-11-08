@@ -288,44 +288,82 @@ func TestWithTextPart(t *testing.T) {
 	}
 }
 
-// An APPEND of a message the SMTP server just sent, to the same recipients,
-// isn't imported again: in Sent, where Proton filed it, it is already; in
-// another mailbox it is added there. Other recipients make another message.
+// statusResp returns the tagged response err gives APPEND, as go-imap's
+// server sends it: an *imap.ErrStatusResp as is, nil as OK, another error
+// as NO with its text.
+func statusResp(err error) *imap.StatusResp {
+	if err == nil {
+		return &imap.StatusResp{Type: imap.StatusRespOk}
+	}
+	if s, ok := errors.AsType[*imap.ErrStatusResp](err); ok {
+		return s.Resp
+	}
+	return &imap.StatusResp{Type: imap.StatusRespNo, Info: err.Error()}
+}
+
+// An APPEND of a message the account has already isn't imported: Proton
+// would file the one it has in the mailbox, moving it out of its folder.
+// Found by its Message-Id, or as the message the SMTP server just sent to
+// the same recipients, it is OK [ALERT] if it is in the mailbox already, NO
+// [ALERT] naming where it is otherwise; nothing changes in Proton.
 // evidence: witnesses
-func TestAppendSentMessage(t *testing.T) {
+func TestAppendExisting(t *testing.T) {
+	withID := "Message-Id: <m1@example.org>\r\n" + appendLiteral
 	hash, err := sendrecord.Hash([]byte(appendLiteral))
 	if err != nil {
 		t.Fatal(err)
 	}
+	const metadata = "POST /mail/v4/messages"
 	for _, tt := range []struct {
-		name         string
-		label        string
-		to           []string
+		name    string
+		literal string
+		// labels of message "e" in Proton; its Message-Id is m1@example.org.
+		labels []string
+		// sentTo, if set, records "e" as sent over SMTP to them.
+		sentTo       []string
+		dest         string
+		wantType     imap.StatusRespType
+		wantIn       string // in the text
 		wantRequests []string
-		wantImports  int
 	}{
-		{"into Sent", protonmail.LabelSent, []string{"ann@example.org"}, nil, 0},
-		{"into Archive", protonmail.LabelArchive, []string{"ann@example.org"}, []string{"PUT /messages/label"}, 0},
-		{"to others", protonmail.LabelSent, []string{"carol@example.org"}, []string{"POST /mail/v4/messages/import"}, 1},
+		{"new message", withID, nil, nil, protonmail.LabelArchive, imap.StatusRespOk, "",
+			[]string{metadata, "POST /mail/v4/messages/import"}},
+		{"in another folder", withID, []string{protonmail.LabelInbox, protonmail.LabelAllMail}, nil, protonmail.LabelSpam, imap.StatusRespNo, "in INBOX",
+			[]string{metadata}},
+		{"in the folder", withID, []string{protonmail.LabelSpam, protonmail.LabelAllMail}, nil, protonmail.LabelSpam, imap.StatusRespOk, "already in Dest",
+			[]string{metadata}},
+		{"only in All Mail", withID, []string{protonmail.LabelAllMail, protonmail.LabelStarred}, nil, protonmail.LabelTrash, imap.StatusRespNo, "in All Mail",
+			[]string{metadata}},
+		{"just sent, into Sent", appendLiteral, []string{protonmail.LabelSent, protonmail.LabelAllMail}, []string{"ann@example.org"}, protonmail.LabelSent, imap.StatusRespOk, "already in Dest",
+			[]string{metadata}},
+		{"just sent, into Archive", appendLiteral, []string{protonmail.LabelSent, protonmail.LabelAllMail}, []string{"ann@example.org"}, protonmail.LabelArchive, imap.StatusRespNo, "in Sent",
+			[]string{metadata}},
+		{"sent to others", appendLiteral, []string{protonmail.LabelSent}, []string{"carol@example.org"}, protonmail.LabelSent, imap.StatusRespOk, "",
+			[]string{"POST /mail/v4/messages/import"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			api := &fakeAPI{t: t}
-			inbox, _ := newAppendTestMailbox(t, api, []*protonmail.Message{inboxMessage("s1", 0)})
+			api := &fakeAPI{t: t, labelIDs: map[string][]string{}, externalIDs: map[string]string{}}
+			if tt.labels != nil {
+				api.labelIDs["e"] = tt.labels
+				api.externalIDs["e"] = "m1@example.org"
+			}
+			inbox, _ := newAppendTestMailbox(t, api, nil)
+			addTestMailbox(t, inbox.u, "Sent", protonmail.LabelSent, nil)
 			inbox.u.backend.sends = sendrecord.New()
-			inbox.u.backend.sends.Start("bob", hash, tt.to).Sent("s1")
-			mbox := addTestMailbox(t, inbox.u, "Dest", tt.label, nil)
+			if tt.sentTo != nil {
+				inbox.u.backend.sends.Start("bob", hash, tt.sentTo).Sent("e")
+			}
+			mbox := addTestMailbox(t, inbox.u, "Dest", tt.dest, nil)
 
-			if err := appendTo(mbox, []string{imap.SeenFlag}, appendLiteral); err != nil {
-				t.Fatalf("CreateMessage() = %v", err)
+			resp := statusResp(appendTo(mbox, []string{imap.SeenFlag}, tt.literal))
+			if resp.Type != tt.wantType || !strings.Contains(resp.Info, tt.wantIn) {
+				t.Errorf("response %v %q, want %v with %q", resp.Type, resp.Info, tt.wantType, tt.wantIn)
+			}
+			if wantAlert := tt.wantIn != ""; (resp.Code == imap.CodeAlert) != wantAlert {
+				t.Errorf("response code %q, want ALERT %v", resp.Code, wantAlert)
 			}
 			if got := api.madeRequests(); !slices.Equal(got, tt.wantRequests) {
 				t.Errorf("made requests %q, want %q", got, tt.wantRequests)
-			}
-			if len(api.madeImports()) != tt.wantImports {
-				t.Errorf("%v imports, want %v", len(api.madeImports()), tt.wantImports)
-			}
-			if tt.label == protonmail.LabelArchive && !inMailbox(mbox, "s1") {
-				t.Error("the sent message isn't in Archive")
 			}
 		})
 	}

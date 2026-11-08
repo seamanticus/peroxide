@@ -420,16 +420,34 @@ func (c *Client) MessagesByID(ctx context.Context, ids []string) ([]*Message, er
 	if len(ids) > MaxMessagesPerRequest {
 		return nil, fmt.Errorf("cannot get %v messages in one request, at most %v", len(ids), MaxMessagesPerRequest)
 	}
-	reqData := struct {
+	return c.messageMetadata(ctx, struct {
 		ID       []string
 		Desc     int
 		Page     int
 		PageSize int
 		Sort     string
-	}{ids, 0, 0, MaxMessagesPerRequest, "ID"}
+	}{ids, 0, 0, MaxMessagesPerRequest, "ID"})
+}
 
+// MessagesByExternalID returns the metadata of the messages whose ExternalID
+// is externalID: their Message-Id, without angle brackets, as Proton stores
+// it. At most MaxMessagesPerRequest are returned. proton-bridge looks up a
+// Message-Id the same way (GetMessageMetadata with MessageFilter.ExternalID).
+func (c *Client) MessagesByExternalID(ctx context.Context, externalID string) ([]*Message, error) {
+	return c.messageMetadata(ctx, struct {
+		ExternalID string
+		Desc       int
+		Page       int
+		PageSize   int
+		Sort       string
+	}{externalID, 0, 0, MaxMessagesPerRequest, "ID"})
+}
+
+// messageMetadata posts reqData, a message filter, to POST /mail/v4/messages
+// overridden as GET, asking again while Proton answers it stale.
+func (c *Client) messageMetadata(ctx context.Context, reqData any) ([]*Message, error) {
 	for range maxStaleRetries {
-		req, err := c.newJSONRequest(http.MethodPost, "/mail/v4/messages", &reqData)
+		req, err := c.newJSONRequest(http.MethodPost, "/mail/v4/messages", reqData)
 		if err != nil {
 			return nil, err
 		}
