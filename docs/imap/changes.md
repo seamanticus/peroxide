@@ -134,8 +134,10 @@ proton-bridge makes a Proton draft instead (`createDraftWithParser`),
 which keeps one body (HTML if there is one) and none of the original
 header: a `multipart/alternative` message comes back HTML only, from
 you. peroxide did the same until it was seen to mangle messages copied
-from other accounts; whether Proton's web client opens an imported
-draft for editing is being tested.
+from other accounts. Proton's web client lists and opens imported
+drafts; a draft aerc postpones is one of them, and recalling and
+postponing it again saves a new one (aerc gives it a new
+`Message-Id`) and deletes the old.
 
 **Anywhere else** it imports the message (`POST
 /mail/v4/messages/import`), with what bridge sends:

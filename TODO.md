@@ -458,13 +458,13 @@ files named are the ones the sweep starts from, not a complete list.
    cause with `%v` or `%s`, cutting the chain `errors.Is` and
    `errors.AsType` follow: auth/auth.go (every auth file error),
    protonmail/srp.go, protonmail/auth.go, protonmail/keys.go,
-   smtp/smtp.go, the draft path of imap/message.go (`createMessage`),
+   smtp/smtp.go,
    config/tls.go, captcha/server.go and captcha/browser.go. So a
    `*protonmail.APIError` returned through `smtp.go`'s "cannot send
    message" can't be told from any other failure, and the SMTP reply
    can't depend on its code. Grep: `Errorf(.*%[sv]".*err)`.
 3. **Comparing errors with `==`.** `err == io.EOF`
-   (protonmail/messages.go, smtp/smtp.go, imap/message.go),
+   (protonmail/messages.go, smtp/smtp.go),
    `err == ErrNotFound` (imap/database/user.go, and the imap tests),
    `err == errUsedSession || err == errExpiredSession`
    (captcha/server.go). Each works today because the error is returned
