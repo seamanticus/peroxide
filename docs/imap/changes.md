@@ -46,6 +46,9 @@ One call: label the messages with the destination
   shows the EXPUNGE at the next events. This is Proton's model, not
   peroxide's choice: there is no way to have one message in two folders.
 - Into `Starred`, it stars them.
+- **Into `Trash`** (COPY or MOVE), Proton also unstars them. peroxide
+  takes `\Flagged` off at once, with the answer, rather than at the next
+  events.
 
 No `COPYUID` is returned (no UIDPLUS).
 
@@ -122,10 +125,17 @@ APPEND works into every mailbox but **All Mail** and **Starred**, as
 in proton-bridge. So a client can copy or move mail from another
 account into Proton, and save its copy of what it sent.
 
-**Into `Drafts`** it creates a Proton draft from the message, in the
-From address (Sender's if there's no From) if it is one of yours that
-is enabled and can send, in your primary address otherwise, as bridge
-does. No recipient is needed.
+**Into `Drafts`** the message is imported like anywhere else, but
+neither received nor sent, which is what makes it a draft in Proton, and
+read. Its parts and header are kept, as other servers keep them. Its
+address is the From address (Sender's if there's no From) if it is one
+of yours that is enabled and can send, your primary address otherwise.
+proton-bridge makes a Proton draft instead (`createDraftWithParser`),
+which keeps one body (HTML if there is one) and none of the original
+header: a `multipart/alternative` message comes back HTML only, from
+you. peroxide did the same until it was seen to mangle messages copied
+from other accounts; whether Proton's web client opens an imported
+draft for editing is being tested.
 
 **Anywhere else** it imports the message (`POST
 /mail/v4/messages/import`), with what bridge sends:
