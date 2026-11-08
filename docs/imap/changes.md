@@ -154,7 +154,10 @@ draft for editing is being tested.
   text and list the attachments. A message already signed or
   encrypted, or one with more than one text part, is encrypted whole as
   PGP/MIME instead. A message without a text part gets an empty one
-  first, as bridge adds it: Proton reads a message's text from it.
+  first, as bridge adds it: Proton reads a message's text from it. A
+  PGP/MIME message (`multipart/encrypted` or `multipart/signed`) is left
+  as it is, so that clients still find it at the root and decrypt or
+  verify it; bridge would wrap it.
 
 **A message already in your account isn't imported.** Proton keeps one
 copy of a message: importing one it has (by its `Message-Id`) makes no
