@@ -738,6 +738,31 @@ func TestMovePartialFailure(t *testing.T) {
 	}
 }
 
+// Filed in Trash, a message loses Starred at once, as Proton takes it off:
+// clients see \Flagged go without waiting for the event.
+// evidence: witnesses
+func TestTrashUnstars(t *testing.T) {
+	api := &fakeAPI{t: t}
+	starred := inboxMessage("a", 0)
+	starred.LabelIDs = append(starred.LabelIDs, protonmail.LabelStarred)
+	inbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{starred}, protonmail.LabelStarred)
+	trash := addTestMailbox(t, inbox.u, "Trash", protonmail.LabelTrash, nil)
+
+	if err := inbox.CopyMessages(true, uidSet(1), "Trash"); err != nil {
+		t.Fatalf("CopyMessages() = %v", err)
+	}
+	if !inMailbox(trash, "a") {
+		t.Error("a isn't in Trash")
+	}
+	msg, err := inbox.u.db.Message("a")
+	if err != nil {
+		t.Fatalf("Message() = %v", err)
+	}
+	if slices.Contains(msg.LabelIDs, protonmail.LabelStarred) {
+		t.Errorf("a still starred: labels %v", msg.LabelIDs)
+	}
+}
+
 // COPY labels the messages with the destination and keeps them in the source.
 // One the label failed for is left out, and the command fails; one already
 // labelled ("does not exist") counts as copied.

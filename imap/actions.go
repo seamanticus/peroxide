@@ -201,7 +201,13 @@ func unreadUpdate(unread int) *protonmail.EventMessageUpdate {
 	return &protonmail.EventMessageUpdate{Unread: &unread}
 }
 
+// labelUpdate is the local change of adding or removing labelID. Proton takes
+// Starred off a message it files in Trash (seen in its events), so adding
+// Trash removes Starred too: clients don't show \Flagged until the event.
 func labelUpdate(labelID string, add bool) *protonmail.EventMessageUpdate {
+	if add && labelID == protonmail.LabelTrash {
+		return &protonmail.EventMessageUpdate{LabelIDsAdded: []string{labelID}, LabelIDsRemoved: []string{protonmail.LabelStarred}}
+	}
 	if add {
 		return &protonmail.EventMessageUpdate{LabelIDsAdded: []string{labelID}, LabelIDsRemoved: []string{}}
 	}

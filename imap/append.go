@@ -47,8 +47,10 @@ func appendAllowed(labelID string) error {
 // labelID, with flags, imports it with, as proton-bridge's CreateMessage
 // decides: labelled with the mailbox, and Starred if \Flagged; received into
 // INBOX, sent into Sent, and elsewhere received if it has a Received field,
-// sent otherwise; replied if \Answered; unread unless \Seen. Not for Drafts,
-// whose messages are drafts (createMessage). The address is the caller's.
+// sent otherwise; replied if \Answered; unread unless \Seen. Into Drafts,
+// neither received nor sent, which is what makes a message a draft in Proton
+// (go-proton-api MessageMetadata.IsDraft), and read, as bridge's drafts are.
+// The address is the caller's.
 func importMetadata(labelID string, flags []string, h textproto.Header) *protonmail.ImportMetadata {
 	meta := &protonmail.ImportMetadata{
 		LabelIDs: []string{labelID},
@@ -58,6 +60,8 @@ func importMetadata(labelID string, flags []string, h textproto.Header) *protonm
 		meta.LabelIDs = append(meta.LabelIDs, protonmail.LabelStarred)
 	}
 	switch {
+	case labelID == protonmail.LabelDraft:
+		meta.Unread = false
 	case labelID == protonmail.LabelInbox:
 		meta.Flags = protonmail.MessageFlagReceived
 	case labelID == protonmail.LabelSent:
@@ -271,13 +275,6 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 	// go-imap v1 gives a backend no context: the requests run to their end.
 	ctx := context.Background()
 
-	if mbox.label == protonmail.LabelDraft {
-		if _, err := createMessage(mbox.u.c, mbox.u.u, mbox.u.privateKeys, mbox.u.addresses(), bytes.NewReader(literal)); err != nil {
-			return err
-		}
-		return mbox.Poll()
-	}
-
 	h, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(literal)))
 	if err != nil {
 		return fmt.Errorf("cannot read the message header: %w", err)
@@ -290,7 +287,13 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 		return mbox.alreadyThere(existing)
 	}
 
-	addr, ok := importAddress(mbox.u.addresses(), messageSender(h))
+	// Into Drafts the message is imported too, not made a Proton draft
+	// (createMessage), which keeps one body part and none of the header.
+	pickAddress := importAddress
+	if mbox.label == protonmail.LabelDraft {
+		pickAddress = draftAddress
+	}
+	addr, ok := pickAddress(mbox.u.addresses(), messageSender(h))
 	if !ok {
 		return errors.New("the account has no address to import the message into")
 	}

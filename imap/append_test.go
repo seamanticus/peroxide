@@ -123,11 +123,38 @@ func TestImportMetadata(t *testing.T) {
 		{"answered", protonmail.LabelInbox, []string{imap.AnsweredFlag}, plain, recv | replied, true, []string{protonmail.LabelInbox}},
 		{"flagged", protonmail.LabelArchive, []string{imap.FlaggedFlag}, plain, sent, true, []string{protonmail.LabelArchive, protonmail.LabelStarred}},
 		{"draft flag ignored", custom, []string{imap.DraftFlag}, plain, sent, true, []string{custom}},
+		{"Drafts", protonmail.LabelDraft, nil, received, 0, false, []string{protonmail.LabelDraft}},
+		{"Drafts answered", protonmail.LabelDraft, []string{imap.AnsweredFlag}, plain, replied, false, []string{protonmail.LabelDraft}},
 	} {
 		meta := importMetadata(tt.label, tt.flags, tt.h)
 		if meta.Flags != tt.wantFlags || meta.Unread != tt.wantUnread || !slices.Equal(meta.LabelIDs, tt.wantLabels) {
 			t.Errorf("%v: importMetadata() = %+v, want flags %v, unread %v, labels %v", tt.name, meta, tt.wantFlags, tt.wantUnread, tt.wantLabels)
 		}
+	}
+}
+
+// An APPEND into Drafts imports the message whole, neither received nor
+// sent, in the primary address when the sender isn't the account's.
+// evidence: witnesses
+func TestAppendDraftsImports(t *testing.T) {
+	api := &fakeAPI{t: t}
+	inbox, _ := newAppendTestMailbox(t, api, nil)
+	inbox.u.addrs[0].Status = protonmail.AddressEnabled
+	drafts := addTestMailbox(t, inbox.u, "Drafts", protonmail.LabelDraft, nil)
+
+	literal := strings.Replace(appendLiteral, "Bob <bob@example.org>", "GitHub <notifications@github.com>", 1)
+	if err := appendTo(drafts, nil, literal); err != nil {
+		t.Fatalf("CreateMessage() = %v", err)
+	}
+	imports := api.madeImports()
+	if len(imports) != 1 {
+		t.Fatalf("%v imports, want 1", len(imports))
+	}
+	if m := imports[0].meta; m.AddressID != "a1" || m.Flags != 0 || m.Unread != 0 || !slices.Equal(m.LabelIDs, []string{protonmail.LabelDraft}) {
+		t.Errorf("import metadata %+v", m)
+	}
+	if !bytes.Contains(imports[0].message, []byte("From: GitHub <notifications@github.com>")) {
+		t.Error("the imported draft lost its From field")
 	}
 }
 
