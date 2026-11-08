@@ -52,6 +52,14 @@ Responses are logged as received, before peroxide decodes them, so
 fields peroxide doesn't know about are visible too: that is the point
 of the log.
 
+**`<tag> NO Expected DONE` after `+ idling`** means the client closed the
+connection while in IDLE, without the `DONE` and `LOGOUT` RFC 2177 and
+3501 expect: aerc does so when it quits (aerc_implementation.md section
+7). go-imap's IDLE reads one more line, finds the connection closed and
+answers NO, to a socket nobody reads any more: no client ever receives
+it, and nothing is lost; the next line is the logout. A NO after
+`+ idling` on a connection that stays open would be a real error.
+
 ## What is hidden
 
 **Credentials and secrets in API traffic.** Any JSON object key, at any
