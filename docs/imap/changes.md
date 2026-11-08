@@ -146,19 +146,39 @@ does. No recipient is needed.
   PGP/MIME instead. A message without a text part gets an empty one
   first, as bridge adds it: Proton reads a message's text from it.
 
-**A message the SMTP server just sent** isn't imported again. Proton
-filed it in Sent when it was sent, so a client that saves its copy
-(aerc's `copy-to`) would otherwise leave two. peroxide remembers each
-message it sent for 30 minutes, by a hash of its subject, addresses,
-parts and decoded bodies (the same as bridge's; boundaries, transfer
-encodings, `Date`, `Message-Id` and `Bcc` may differ), and its
-recipients. An APPEND of the same message, from the same account, to
-the same recipients, answers OK without an import: into Sent it is
-there already; into another mailbox the sent message is added to it,
-as COPY does. A send still under way is waited for, up to 90 seconds.
-This works when SMTP and IMAP run in one `peroxide serve`; separate
-`peroxide smtp` and `peroxide imap` processes don't share what was
-sent.
+**A message already in your account isn't imported.** Proton keeps one
+copy of a message: importing one it has (by its `Message-Id`) makes no
+new message but files the one it has in the mailbox, and a mailbox that
+is a folder (INBOX, Sent, Spam, Trash, Archive, your folders) takes it
+out of the folder it was in. Moving one message from another account
+into Spam, then Archive, then Trash moved Proton's single copy from
+folder to folder, each APPEND answering OK, and the client deleted its
+source each time. So before importing, peroxide looks for the message:
+
+- by its `Message-Id`, among the account's messages (one metadata
+  request, as bridge looks a Message-Id up);
+- as a message its SMTP server sent in the last 30 minutes, from the
+  same account to the same recipients, by a hash of its subject,
+  addresses, parts and decoded bodies (the same as bridge's;
+  boundaries, transfer encodings, `Date`, `Message-Id` and `Bcc` may
+  differ). A send still under way is waited for, up to 90 seconds. This
+  works when SMTP and IMAP run in one `peroxide serve`; separate
+  `peroxide smtp` and `peroxide imap` processes don't share what was
+  sent.
+
+Found, nothing changes in Proton, and APPEND answers with an `ALERT`,
+the one response code clients must show (RFC 3501 section 7.1):
+
+- in this mailbox already (a copy of a sent message saved into Sent,
+  aerc's `copy-to`): `OK [ALERT] This message is already in Sent: it
+  was not copied again`;
+- elsewhere: `NO [ALERT] This message is already in your Proton
+  account, in INBOX: it was not copied, as Proton keeps one copy of a
+  message`. A client moving it from another account keeps its copy
+  there, as a move whose APPEND fails deletes nothing.
+
+Thunderbird and Evolution show `ALERT` texts; aerc and KMail show
+neither OK nor `ALERT` texts, only NO's.
 
 **Size**: 70 MiB (73400320 bytes), the import API's limit as
 go-proton-api checks it, on the encrypted message: about 50 MB of
@@ -199,12 +219,17 @@ is visible when it does.
   refuses Starred, as it refuses moves into it: bridge imports there
   with the Starred label alone, leaving the message in no folder.
   peroxide shows no Scheduled mailbox.
-- **Sent duplicates**: bridge's `sendrecorder` remembers sends for 30
-  minutes, by gluon's `GetMessageHash` and the recipients, and APPEND
-  waits up to 90 seconds for one under way; gluon then adds the
-  existing message to the mailbox. peroxide's `sendrecord` does the
-  same. Its hash decodes every part's body; gluon decodes the transfer
-  encoding of text/plain and text/html parts only.
+- **A message already there**: bridge's `sendrecorder` remembers sends
+  for 30 minutes, by gluon's `GetMessageHash` and the recipients, and
+  APPEND waits up to 90 seconds for one under way; gluon then adds the
+  existing message to the mailbox, and answers OK. Any other message
+  bridge imports, and Proton's own deduplication files the message it
+  has in the mailbox, moving it from its folder, under a plain OK.
+  peroxide records sends as bridge does (its hash decodes every part's
+  body; gluon decodes the transfer encoding of text/plain and text/html
+  parts only), and looks up the `Message-Id` too, and then imports
+  nothing and moves nothing: OK [ALERT] if the message is in the
+  mailbox already, NO [ALERT] otherwise.
 - **Size**: bridge checks only go-proton-api's 70 MiB on the encrypted
   message, and announces no APPENDLIMIT. peroxide announces the same
   70 MiB.
