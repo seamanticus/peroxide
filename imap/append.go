@@ -372,6 +372,11 @@ func (mbox *mailbox) existingMessages(ctx context.Context, literal []byte, h tex
 // an OK text alone is shown by none of aerc, Thunderbird and Evolution.
 // The APPEND's flags aren't applied to the message found: it is the one
 // already there, flags and all.
+//
+// INBOX and Sent are the exception: Proton keeps a message in both (mail to
+// yourself), so adding one to a message in the other moves nothing, as COPY
+// does it. That is what a client saving its reply to the parent's mailbox
+// asks (aerc's copy-to-replied): the message is labelled, and OK.
 func (mbox *mailbox) alreadyThere(existing []*protonmail.Message) error {
 	name := mbox.Name()
 	if slices.ContainsFunc(existing, func(m *protonmail.Message) bool {
@@ -380,11 +385,45 @@ func (mbox *mailbox) alreadyThere(existing []*protonmail.Message) error {
 		log.Printf("APPEND to %v of message %v, already there: not imported", name, existing[0].ID)
 		return appendAlert(imap.StatusRespOk, fmt.Sprintf("This message is already in %v: it was not copied again", name))
 	}
+	if partner, ok := inboxSentPartner(mbox.label); ok {
+		if i := slices.IndexFunc(existing, func(m *protonmail.Message) bool {
+			return slices.Contains(m.LabelIDs, partner)
+		}); i >= 0 {
+			apiID := existing[i].ID
+			failed, err := mbox.u.c.LabelMessages(mbox.label, []string{apiID})
+			if err != nil {
+				return fmt.Errorf("cannot add the message already in your account to %v: %w", name, err)
+			}
+			if err := mbox.u.applyAction([]string{apiID}, failed, labelUpdate(mbox.label, true)); err != nil {
+				return err
+			}
+			from := mbox.u.getMailboxByLabel(partner)
+			if from == nil {
+				panic("invariant: setMailboxes makes INBOX and Sent")
+			}
+			fromName := from.Name()
+			log.Printf("APPEND to %v of message %v, already in %v: labelled, not imported", name, apiID, fromName)
+			return appendAlert(imap.StatusRespOk, fmt.Sprintf(
+				"This message is already in %v: it is now in %v too, not copied again", fromName, name))
+		}
+	}
 	where := mbox.u.mailboxNames(existing)
 	log.Printf("APPEND to %v of message %v, already in %v: refused", name, existing[0].ID, where)
 	return appendAlert(imap.StatusRespNo, fmt.Sprintf(
 		"This message is already in your Proton account, in %v: it was not copied, as Proton keeps one copy of a message",
 		where))
+}
+
+// inboxSentPartner returns the folder a message may be in beside labelID:
+// Sent for INBOX, INBOX for Sent.
+func inboxSentPartner(labelID string) (string, bool) {
+	switch labelID {
+	case protonmail.LabelInbox:
+		return protonmail.LabelSent, true
+	case protonmail.LabelSent:
+		return protonmail.LabelInbox, true
+	}
+	return "", false
 }
 
 // mailboxNames lists the mailboxes holding msgs, but All Mail and Starred,

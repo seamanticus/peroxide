@@ -371,6 +371,10 @@ func TestAppendExisting(t *testing.T) {
 			[]string{metadata}},
 		{"sent to others", appendLiteral, []string{protonmail.LabelSent}, []string{"carol@example.org"}, protonmail.LabelSent, imap.StatusRespOk, "",
 			[]string{"POST /mail/v4/messages/import"}},
+		{"in Sent, into INBOX", withID, []string{protonmail.LabelSent, protonmail.LabelAllMail}, nil, protonmail.LabelInbox, imap.StatusRespOk, "in Dest too",
+			[]string{metadata, "PUT /messages/label"}},
+		{"in INBOX, into Sent", withID, []string{protonmail.LabelInbox, protonmail.LabelAllMail}, nil, protonmail.LabelSent, imap.StatusRespOk, "already in INBOX",
+			[]string{metadata, "PUT /messages/label"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			api := &fakeAPI{t: t, labelIDs: map[string][]string{}, externalIDs: map[string]string{}}
