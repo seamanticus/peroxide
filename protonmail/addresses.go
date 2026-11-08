@@ -21,10 +21,15 @@ const (
 	AddressEnabled
 )
 
+// Proton numbers address types from 1 (go-proton-api AddressType).
 const (
-	AddressOriginal AddressType = iota
+	AddressOriginal AddressType = iota + 1
 	AddressAlias
 	AddressCustom
+	AddressPremium
+	// AddressExternal is an address of another provider: it can send only
+	// if set up for it ("bring your own e-mail").
+	AddressExternal
 )
 
 type Address struct {
