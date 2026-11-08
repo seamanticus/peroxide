@@ -168,19 +168,16 @@ is a folder (INBOX, Sent, Spam, Trash, Archive, your folders) takes it
 out of the folder it was in. Moving one message from another account
 into Spam, then Archive, then Trash moved Proton's single copy from
 folder to folder, each APPEND answering OK, and the client deleted its
-source each time. So before importing, peroxide looks for the message:
+source each time. So before importing, peroxide looks the message up by
+its `Message-Id` among the account's messages (one metadata request, as
+bridge looks a Message-Id up).
 
-- by its `Message-Id`, among the account's messages (one metadata
-  request, as bridge looks a Message-Id up);
-- as a message its SMTP server sent in the last 30 minutes, from the
-  same account to the same recipients, by a hash of its subject,
-  addresses, parts and decoded bodies (the same as bridge's;
-  boundaries, transfer encodings, `Date`, `Message-Id` and `Bcc` may
-  differ). A send still under way is waited for, up to 90 seconds. This
-  works when SMTP and IMAP run in one `peroxide serve`; separate
-  `peroxide smtp` and `peroxide imap` processes don't share what was
-  sent. The `Message-Id` lookup finds sent messages in every mode, as
-  SMTP gives Proton each message's `Message-Id`.
+That finds a message sent through peroxide's SMTP too: SMTP gives Proton
+each message's `Message-Id`, and Proton finds it by it at once (tested
+2026-11-09: aerc's `copy-to = Sent` copies, plain and with an
+attachment, each looked up in the second of the send, all found). A
+message without a `Message-Id` (clients set one; a hand-made `sendmail`
+input may not) is imported: its saved copy is then in Sent twice.
 
 Not into **Drafts**: a client saving a draft again may keep its
 `Message-Id`, and deletes the old draft once the APPEND answers OK, so
@@ -257,11 +254,10 @@ field.
   existing message to the mailbox, and answers OK. Any other message
   bridge imports, and Proton's own deduplication files the message it
   has in the mailbox, moving it from its folder, under a plain OK.
-  peroxide records sends as bridge does (its hash decodes every part's
-  body; gluon decodes the transfer encoding of text/plain and text/html
-  parts only), and looks up the `Message-Id` too, and then imports
-  nothing and moves nothing: OK [ALERT] if the message is in the
-  mailbox already, NO [ALERT] otherwise.
+  peroxide keeps no record of sends: it looks up the `Message-Id`,
+  which finds sent messages as well (above), and then imports nothing
+  and moves nothing: OK [ALERT] if the message is in the mailbox
+  already (or in INBOX for Sent, and back), NO [ALERT] otherwise.
 - **Size**: bridge checks only go-proton-api's 70 MiB on the encrypted
   message, and announces no APPENDLIMIT. peroxide announces the same
   70 MiB.

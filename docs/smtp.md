@@ -86,7 +86,7 @@ web app and send it from there.
 - Only `In-Reply-To` sets the parent, as a reply: forwards are sent as
   new messages.
 - No duplicate check: a client that retries a send (after a timeout)
-  sends twice. Each send is recorded, but only for APPEND to find.
+  sends twice.
 - Inline parts other than the body (an inline image without an
   attachment disposition, a text/plain alternative) are dropped.
 
@@ -117,5 +117,6 @@ skips a duplicate send. It adds `AUTH LOGIN` beside go-smtp's `AUTH
 PLAIN` (internal/services/imapsmtpserver/smtp.go).
 
 peroxide's send path is hydroxide's, nearly unchanged; it covers mail
-between Proton users and plain mail to others. It records each send as
-bridge does, for APPEND into Sent, but doesn't skip a send it recorded.
+between Proton users and plain mail to others. It keeps no record of
+sends: APPEND finds a saved copy by its `Message-Id` instead
+([imap/changes.md](imap/changes.md#append)).

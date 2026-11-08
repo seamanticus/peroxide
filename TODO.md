@@ -131,7 +131,7 @@ after it reconnects). go-imap can send an unsolicited LIST
 
 ## 2. (done: STORE `\Deleted` sends FETCH, STORE FLAGS replaces, 1dfcddc)
 
-## 3. (done: APPEND into every mailbox but All Mail and Starred, by import, Drafts too; a message already in the account is not imported again, OK/NO [ALERT]; SMTP sends recorded for APPEND into Sent; APPENDLIMIT 70 MiB; a195b04, bd3c765, 426b9c4, 9a24dd5, d07f346, 38cb20f, e094ad3)
+## 3. (done: APPEND into every mailbox but All Mail and Starred, by import, Drafts too; a message already in the account is not imported again (by Message-Id), OK/NO [ALERT]; APPENDLIMIT 70 MiB; a195b04, bd3c765, 426b9c4, 9a24dd5, d07f346, 38cb20f, e094ad3)
 
 ## 4. (done: `-debug` is the raw mode, to one stream; described in docs/debug.md; 64febb9, 1f840c6, 509744c, 0a17156, 6a03626)
 
@@ -653,11 +653,6 @@ with CAPTCHA (`[9001]`), and every request it makes fails until
 refresh at 09:26:33 failed, its login got 9001, its APPENDs answered NO
 and its events 401. `peroxide serve` shares one auth.Manager between
 the two servers, so it doesn't happen there.
-
-A side effect: the send recorder (package sendrecord) is per process,
-and docs/imap/changes.md#append describes separate processes as not
-sharing it. In practice separate processes can't serve one account at
-all.
 
 **Options:**
 
