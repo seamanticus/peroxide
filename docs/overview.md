@@ -59,13 +59,14 @@ client, only checks the password against a bcrypt hash and reuses them.
 labels, opens `~/.config/peroxide/<user>.db`, and starts polling
 Proton's events every 20 to 40 seconds. The first time, it also starts
 downloading every message's metadata into the database, newest first,
-in the background; mailboxes fill as it goes, and later logins only
-apply events. See [imap/sync.md](imap/sync.md).
+in the background, then every message itself into its sealed store;
+mailboxes fill as it goes, and later logins only apply events and
+download what is new. See [imap/sync.md](imap/sync.md).
 
-**The client fetches a message.** Flags, envelope and size come from
-the local database. Anything that needs the body (BODYSTRUCTURE, a body
-section) downloads the full message from Proton, decrypts it, and
-rebuilds a MIME message from Proton's parts. See
+**The client fetches a message.** Flags come from the local database;
+everything else from the stored message, which peroxide built once from
+Proton's parts (decrypted, as a MIME message). A message not stored yet
+is downloaded, built and stored first. See
 [imap/messages.md](imap/messages.md).
 
 **The client changes something** (marks read, moves, deletes): peroxide
@@ -85,10 +86,14 @@ The keys stay unlocked in memory until the process exits.
 
 - On disk, in `~/.config/peroxide/` (or `$XDG_CONFIG_HOME/peroxide/`):
   `auth.json` (credentials, encrypted) and one `<user>.db` per account
-  (message metadata, not bodies). See [accounts.md](accounts.md).
-- In memory only: the unlocked private keys, the Proton session, and up
-  to 32 full messages per account (encrypted, as Proton sent them).
-- Nowhere: decrypted message bodies, the bridge password.
+  (message metadata). See [accounts.md](accounts.md).
+- On disk, in `~/.local/share/peroxide/<user>/` (or
+  `$XDG_DATA_HOME/peroxide/<user>/`): every message, sealed under a key
+  derived from the bridge password. See
+  [security.md](security.md#the-message-store).
+- In memory only: the unlocked private keys, the Proton session, the
+  store key.
+- Nowhere: the bridge password.
 
 ## How proton-bridge does it
 
@@ -98,9 +103,8 @@ everything in the background after login, and keeps its credentials in
 an encrypted vault whose key is in your system keychain. It adds
 telemetry, crash reports, automatic updates and a GUI.
 
-peroxide is the opposite trade-off: one static binary, no keychain, no
-GUI, no full local copy. Bodies are fetched on demand. That keeps it
-small (memory and disk) and simple to audit, and costs requests: a
-folder opened for the first time in a session lists all its messages
-again, and every body is downloaded when first read. `TODO.md` sections
-8, 9 and 9.1 track the parts of that cost peroxide intends to remove.
+peroxide keeps the same kind of copy, downloaded the same way, but is
+one static binary with no keychain (the store key comes from the bridge
+password) and no GUI. It aims to stay small and simple to audit:
+`TODO.md` tracks where it still differs (section 8 for All Mail, 14 for
+gluon itself).

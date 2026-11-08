@@ -11,9 +11,11 @@ Each account has a bolt database, `~/.config/peroxide/<username>.db`
 | `mailboxes/<label ID>` | One bucket per mailbox: its UIDVALIDITY, and its messages by UID and by message ID |
 | `counts` | Total and unread per mailbox, kept as messages change, so STATUS doesn't count |
 | `events` | `last`: the ID of the last Proton event applied |
-| `meta` | The schema version, the last UIDVALIDITY given, where the download stands, and whether a rebuild was asked for |
+| `bodies` | For each message stored, sealed: the file holding it, its size, BODYSTRUCTURE and envelope ([messages.md](messages.md#where-messages-are-kept)) |
+| `failed` | The messages that failed to download or build ([messages.md](messages.md#failed-messages)) |
+| `meta` | The schema version, the last UIDVALIDITY given, where the download stands, whether a rebuild was asked for, the store key's check value, and which keys the stored messages were built with |
 
-It is not encrypted. See [../accounts.md](../accounts.md#files-on-disk).
+Only `bodies` is encrypted. See [../accounts.md](../accounts.md#files-on-disk).
 
 A database left by an older peroxide (another schema version) is
 wiped when opened, and downloaded again: it is only a copy of what
@@ -21,9 +23,9 @@ Proton has.
 
 ## The download
 
-At login, peroxide **downloads the metadata of every message of the
-account** in the background, as proton-bridge syncs, and only once per
-database: later logins rely on events.
+At login, peroxide **downloads every message of the account** in the
+background, as proton-bridge syncs: first the metadata, only once per
+database (later logins rely on events), then the messages themselves.
 
 1. It lists the account **newest first**, 128 messages per request,
    every label at once: `POST /mail/v4/messages` with
@@ -66,6 +68,23 @@ once every message is stored, applies the events after it again
 (rewinding the events, bridge's `RewindEventID`); applying an event
 twice changes nothing.
 
+Then **the messages themselves**: every message not stored yet, newest
+first, is downloaded (`GET /messages/<id>`, and each attachment), built
+and stored, as a FETCH would. What is stored is the progress, so a
+stopped download resumes, and later logins download only what arrived
+since. The requests are paced as TCP paces its traffic (AIMD): 2 at
+once to start, one more per round that succeeds, up to 32 (what
+Proton's API team recommends to proton-bridge); a 429 or 5xx halves
+that and pauses every request for Proton's `Retry-After`, or for 1-2 s
+doubling up to a minute, with jitter. Messages being downloaded take at
+most 64 MB (by Proton's sizes) at once. A message that fails for
+another reason goes in the failed set and isn't tried again by the
+background download.
+
+Before that, if the keys peroxide unlocked differ from those the stored
+messages were built with, the messages stored with something left
+encrypted are built again ([messages.md](messages.md#messages-that-change)).
+
 For a large account, run the download before the first client connects
 (see
 [../commands.md](../commands.md#download-mailbox)):
@@ -75,18 +94,20 @@ For a large account, run the download before the first client connects
 ## Rebuilding the database
 
 The database is rebuilt from scratch, never repaired in place: Proton is
-the source of truth. A rebuild wipes the database and downloads the
-account again; every mailbox gets a new UIDVALIDITY, so clients drop
-what they cached and fetch again. Nothing in Proton changes, and you stay
-logged in (`auth.json` is a separate file). The `\Deleted` flags set in
-this session are lost.
+the source of truth. A rebuild wipes the database and the stored
+messages and downloads the account again; every mailbox gets a new
+UIDVALIDITY, so clients drop what they cached and fetch again. Nothing
+in Proton changes, and you stay logged in (`auth.json` is a separate
+file). The `\Deleted` flags set in this session are lost.
 
 A rebuild happens:
 
 - when Proton sends a **Refresh** event, or when an event **can't be
   applied** for a reason a retry won't cure (see below);
 - with `peroxide download-mailbox -discard-local-copy <username>`;
-- when the database is from an older peroxide.
+- when the database is from an older peroxide;
+- when the bridge password changed: the stored messages are sealed
+  under a key derived from it ([../security.md](../security.md#the-message-store)).
 
 The first two mark the database for a rebuild: its clients get
 `* BYE` and are disconnected, and the next login (theirs, as they
@@ -124,6 +145,9 @@ next change's (`user.sendSem`). Then:
   an affected mailbox selected get `EXISTS`, `EXPUNGE` or `FETCH
   (FLAGS)`. An update for a message the database lacks is left to the
   download while it runs; after, the message is fetched and stored.
+  An update of a stored message's contents (an edited draft) builds it
+  again, and gives it new UIDs if it changed
+  ([messages.md](messages.md#messages-that-change)).
 - **Labels**: see [mailboxes.md](mailboxes.md#when-protons-folders-and-labels-change).
 - **Addresses**: the address list is updated (see
   [../accounts.md](../accounts.md#keys-that-change-while-peroxide-runs)).
@@ -204,7 +228,9 @@ it reports a "bad event" and offers a resync; its `repair` command does
 the same, and a resync asked for is remembered (`ShouldResync`) until
 the next login.
 
-peroxide downloads the same metadata the same way, but no bodies: each
-FETCH of a body still makes a request (`TODO.md` section 9). An event
-it can't apply rebuilds at once rather than waiting for you to choose,
-as there is no window to ask in.
+peroxide downloads the same metadata and bodies the same way. Its
+parallelism grows and shrinks with Proton's answers (AIMD) where
+bridge's starts at its maximum and halves on errors
+(`DefaultDownloadRateModifier`). An event it can't apply rebuilds at
+once rather than waiting for you to choose, as there is no window to
+ask in.

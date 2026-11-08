@@ -20,8 +20,9 @@ SUBSCRIBE (every mailbox counts as subscribed).
   object each one is; flags; LIST and STATUS.
 - [sync.md](sync.md): the local database, Proton's event stream, how
   changes made elsewhere reach your client, and UIDs.
-- [messages.md](messages.md): FETCH, how a message is rebuilt from
-  Proton's data, decryption, and mail peroxide can't decrypt.
+- [messages.md](messages.md): FETCH and SEARCH, how a message is built
+  from Proton's data and stored, decryption, mail peroxide can't
+  decrypt, and messages that change.
 - [changes.md](changes.md): STORE, COPY, MOVE, EXPUNGE and APPEND, and
   what each costs.
 
@@ -56,5 +57,5 @@ and its own poll of Proton's events.
 proton-bridge uses Gluon, Proton's own IMAP server library, which keeps
 a full local copy of every message in an encrypted store, assigns and
 persists UIDs, and supports UIDPLUS, MOVE, IDLE, UNSELECT, ID and more.
-peroxide's backend is far smaller and keeps no bodies, at the cost of
-the gaps listed above.
+peroxide's backend keeps the same kind of store and persistent UIDs,
+and is far smaller, at the cost of the gaps listed above.

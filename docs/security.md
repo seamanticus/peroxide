@@ -26,24 +26,58 @@ details are on the pages linked.
 |---|---|---|
 | `auth.json` | Session tokens, **login password**, **mailbox password**, key salts | NaCl secretbox under a key that *is* the bridge password; file mode 0600, directory 0700 |
 | `<user>.db` | Message metadata of every message listed: subjects, addresses, dates, labels, attachment names | none, file mode 0700, directory 0700 |
+| message store, `~/.local/share/peroxide/<user>/` | Every message as served to clients, decrypted, one file each; in `<user>.db`, its structure and envelope | AES-256-GCM under a key derived from the bridge password, never stored; files 0600, directory 0700 |
 | `-debug` output, if you keep it | Decrypted mail and metadata | whatever you give it |
 
-Decrypted bodies, unlocked keys and the bridge password are never
-written by peroxide (except by `-debug`). See
-[accounts.md](accounts.md#files-on-disk).
+Unlocked keys and the bridge password are never written by peroxide;
+decrypted mail only sealed in the message store (below), or by
+`-debug`. See [accounts.md](accounts.md#files-on-disk).
 
 Consequences:
 
 - **The bridge password is as sensitive as your Proton password.** With
-  `auth.json` it gives your Proton login and mailbox passwords. Keep it
-  in a password manager or a gpg-encrypted file the client decrypts on
-  demand, not in a client's configuration in plain text.
+  `auth.json` it gives your Proton login and mailbox passwords, and
+  with the message store your mail. Keep it in a password manager or a
+  gpg-encrypted file the client decrypts on demand, not in a client's
+  configuration in plain text.
 - **Full-disk encryption matters.** `<user>.db` is the metadata of your
   mailbox, unencrypted. Proton doesn't encrypt subjects and addresses
   end to end either (it needs them to list and route mail), but on your
   disk peroxide adds no protection of its own.
 - `peroxide auth -remove` deletes the credentials, not `<user>.db`, and
-  doesn't end the session on Proton's side.
+  not the message store, and doesn't end the session on Proton's side.
+
+## The message store
+
+peroxide keeps each message as it serves it, so that it is downloaded
+and decrypted once (see [imap/messages.md](imap/messages.md)). The
+files are under `$XDG_DATA_HOME/peroxide/<user>/` (else
+`~/.local/share/peroxide/<user>/`): mail is data, so it is where backups
+look, not in a cache directory.
+
+- **The key** is HKDF-SHA256 of the 32 random bytes the bridge password
+  encodes (the key sealing `auth.json`), salted with your Proton user
+  ID and labelled `peroxide message store v1`: a different key from
+  `auth.json`'s, and one per account. It exists in memory while
+  peroxide runs, and is never written or logged. No slow KDF is needed,
+  as its input is random, not a password a person chose.
+- **Each file** is sealed with AES-256-GCM, a random nonce per write,
+  and the message ID as additional data, so a file renamed to another
+  message's name fails to open rather than serving the wrong mail. The
+  record of each message (its BODYSTRUCTURE, envelope, size) is sealed
+  the same way in `<user>.db`. File names are the hex of Proton's
+  message IDs, which the metadata database holds in clear anyway.
+- **A new bridge password** (`peroxide auth` again) or a lost one makes
+  the next login find a key that doesn't match (`<user>.db` keeps an
+  HMAC check value of it, not the key): the database and the store are
+  wiped and downloaded again, as after a Refresh. The files sealed
+  under the old key stay readable with the old password to whoever
+  copied them before; a new bridge password protects what is stored
+  after it.
+- **What it protects**: your mail at rest is as safe as the bridge
+  password, even without full-disk encryption. It doesn't hide how
+  many messages you have, their sizes, or, through `<user>.db`, their
+  metadata.
 
 ## Network exposure
 
@@ -85,14 +119,14 @@ With `-debug`, the log holds your mail in clear. Read
 proton-bridge keeps its secrets in `vault.enc`, encrypted with
 AES-256-GCM under a key in the system keychain, and stores no login or
 mailbox password: a derived key passphrase and the refresh token. Its
-message store on disk (Gluon) is encrypted under a per-account key kept
-in the vault (`GluonKey`). It encrypts to external PGP recipients as
-their contact settings ask. In exchange it needs a working keychain and
-keeps a full copy of your mail on disk.
+message store on disk (Gluon) is encrypted under a per-account random
+key kept in the vault (`GluonKey`), lz4-compressed. It encrypts to
+external PGP recipients as their contact settings ask. In exchange it
+needs a working keychain.
 
-peroxide's exposure is larger in two places, the stored passwords and
-the unencrypted metadata database, and smaller in one: no copy of your
-messages on disk at all. Both of the former are fixable without a
-keychain (store the derived passphrase, drop the login password,
-encrypt the database under the bridge password's key); none is done
-yet.
+peroxide derives its store key from the bridge password instead, so it
+needs no keychain and keeps no key at rest. Its exposure is larger in
+two places, the stored passwords and the unencrypted metadata
+database. Both are fixable without a keychain (store the derived
+passphrase, drop the login password, seal the metadata under the store
+key); neither is done yet.

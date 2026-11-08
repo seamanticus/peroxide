@@ -93,6 +93,9 @@ encrypted to that key can't be decrypted, and the SMTP server can't
 send from that address, until peroxide restarts. The SMTP session's
 address list isn't refreshed at all: a new address can send only after
 the SMTP client logs in again in a new process. `TODO.md` section 7.
+After the restart, messages stored still encrypted are built again with
+the new key and get new UIDs
+([imap/messages.md](imap/messages.md#messages-that-change)).
 
 ## Files on disk
 
@@ -108,15 +111,22 @@ with mode 0700.
 
 `<username>.db` holds, for every message peroxide has listed: subject,
 sender and recipient addresses and names, date, size, flags, label IDs,
-attachment names and sizes, and Proton's message ID. **No bodies and
-no keys.** It is everything a mailbox listing shows, readable by anyone
-who can read the file. Delete it at will while peroxide is stopped: it
-is rebuilt from Proton.
+attachment names and sizes, and Proton's message ID, in clear; and,
+sealed under the store key, the structure and envelope of each message
+stored. **No keys.** The metadata is everything a mailbox listing
+shows, readable by anyone who can read the file.
+
+The messages themselves are in the data directory, `peroxide/<username>/`
+under `$XDG_DATA_HOME` (else `~/.local/share`), one sealed file each:
+[security.md](security.md#the-message-store). Delete `<username>.db` and
+that directory at will while peroxide is stopped: both are rebuilt from
+Proton (deleting only some files of the directory makes those messages
+download again).
 
 `peroxide auth -remove <username>` deletes the `auth.json` record. It
-does not delete `<username>.db`, and it does not log out the Proton
-session on Proton's side (revoke it in Proton's web settings, "Session
-management").
+does not delete `<username>.db` or the stored messages, and it does not
+log out the Proton session on Proton's side (revoke it in Proton's web
+settings, "Session management").
 
 ## What the stored credentials mean
 

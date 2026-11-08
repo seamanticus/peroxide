@@ -8,37 +8,44 @@ Proton doesn't keep the MIME message that arrived. It keeps:
   attachment list (listed in pages, cheap, what the local database
   holds);
 - the **body**: one part (text/plain or text/html), as an armored
-  OpenPGP message encrypted to one of your address keys;
+  OpenPGP message encrypted to one of your address keys; for mail
+  received as PGP/MIME, the whole decrypted MIME message;
 - the **original header**, as received, but only in the full message
   (`GET /messages/<id>`), not in listings;
 - each **attachment**: its key packets (the session key encrypted to
   your key) with the metadata, and its encrypted data, downloaded on
   its own (`GET /attachments/<id>`).
 
-peroxide rebuilds a MIME message from these every time a client asks.
+peroxide builds a MIME message from these **once**, stores it, sealed,
+and serves every FETCH of it from what is stored (see
+[Where messages are kept](#where-messages-are-kept)). What a client is
+served never changes under a UID: when it must change (an edited
+draft, a key unlocked since), the message gets a new UID
+([Messages that change](#messages-that-change)).
 
 ## What each FETCH item costs
 
 | Item | Source | Request |
 |---|---|---|
-| `FLAGS`, `UID`, `INTERNALDATE`, `RFC822.SIZE`, `ENVELOPE` | local database | none |
-| `BODYSTRUCTURE`, `BODY` | full message | one per message, then cached |
-| `BODY[HEADER]`, `BODY[HEADER.FIELDS (...)]`, `RFC822.HEADER` | full message | one per message, then cached |
-| `BODY[]`, `BODY[TEXT]`, `RFC822`, `BODY[n]` | full message, plus each attachment | one, plus one per attachment |
+| `FLAGS`, `UID`, `INTERNALDATE` | local database | none |
+| everything else: `ENVELOPE`, `RFC822.SIZE`, `BODYSTRUCTURE`, `BODY`, `BODY[...]`, `RFC822...` | the stored message | none once stored; else one, plus one per attachment, to build and store it |
 
-The full message (encrypted body, original header, attachment list) is
-kept in memory for the 32 messages used most recently per account.
-Attachments are downloaded every time. A client listing a folder with
-BODYSTRUCTURE (aerc does) makes one request per message the first time.
-`TODO.md` section 9 describes the plan to make those free.
+After login, once the message list is downloaded
+([sync.md](sync.md)), peroxide downloads every message in the
+background, newest first, so most FETCHes find it stored. A FETCH of a
+message not stored yet builds and stores it first; a FETCH of one
+being downloaded waits for that download rather than making a second.
 
 `FETCH ALL`, `FAST` and `FULL` are expanded as RFC 3501 defines. An
 item peroxide doesn't know fails the whole FETCH (it isn't dropped
-silently).
+silently). A body part the message doesn't have (`BODY[7]` of a message
+with two) is an empty string, as Dovecot and gluon answer.
 
 A message Proton deleted after it was listed, and before its delete
 event arrived, is skipped: the FETCH answers for the others, and the
-EXPUNGE follows at the next poll. Any other failure fails the FETCH.
+EXPUNGE follows at the next poll. Any other failure fails the FETCH;
+one that isn't Proton asking to slow down, a server error or the
+network also puts the message in the [failed set](#failed-messages).
 
 ## \Seen
 
@@ -51,53 +58,74 @@ in one request for all of them, and then sends `FETCH (FLAGS (\Seen))`.
 If that request fails, the FETCH still answers OK (you have the
 messages), the message stays unread, and the failure is logged.
 
-## How a message is rebuilt
+## How a message is built
 
-    multipart/mixed; boundary=<sha1 of the message ID>
-      1. the body: text/plain or text/html; charset=utf-8,
-         quoted-printable, decrypted
-      2..n. each attachment: its MIME type, base64, decrypted,
-         Content-Disposition: attachment; filename=...
+As proton-bridge builds it (pkg/message/build.go, `BuildRFC822Into`):
 
-Every message is `multipart/mixed`, even one without attachments.
+- **With attachments**:
+
+      multipart/mixed; boundary=<sha1 of the message ID>
+        1. the body: text/plain or text/html; charset=utf-8,
+           quoted-printable, decrypted
+        2..n. each attachment: its MIME type, base64, decrypted,
+           Content-Disposition: attachment; filename=...
+
+  An attached message (`message/rfc822`) has no transfer encoding, so
+  that its BODYSTRUCTURE carries its envelope and structure.
+- **Received as PGP/MIME** (Proton's `MIMEType` is `multipart/mixed`:
+  the decrypted body is a whole MIME message): that message, its header
+  fields joined to the message's. If the sender signed it, it is served
+  as `multipart/signed` (RFC 3156), the signed part byte for byte and
+  the signature as `OpenPGP_signature.asc`, so that your client can
+  verify it.
+- **Otherwise**: a `multipart/mixed` of the body alone.
+
+The build is deterministic: building a message again gives the same
+bytes, unless what Proton has or the keys peroxide unlocked changed.
 
 **The header** (`BODY[HEADER]`) starts from Proton's copy of the
 original header, so `Date`, `Message-Id`, `In-Reply-To`, `References`,
 `List-*` and the rest are what the sender sent. On top of it peroxide
 sets `Subject` and `From` from Proton's metadata, and `To`, `Cc`, `Bcc`
 and `Reply-To` when the metadata has any (otherwise the original's
-stay), and its own `Content-Type` (the multipart above) and
-`MIME-Version`; it drops the original `Content-Transfer-Encoding`. A
-missing or unparseable `Date` becomes Proton's received time, a missing
-`Message-Id` `<id@protonmail.com>`. If the original header can't be
-parsed at all, it is ignored (logged) and the header is built from the
-metadata alone. The listing that fills the local database carries no
-original header, which is why only body sections and BODYSTRUCTURE,
-not ENVELOPE, use it.
+stay), and its own `Content-Type` and `MIME-Version`; it drops the
+original `Content-Transfer-Encoding`. A missing or unparseable `Date`
+becomes Proton's received time, a missing `Message-Id`
+`<id@protonmail.com>`. If the original header can't be parsed at all,
+it is ignored (logged) and the header is built from the metadata alone.
 
-**ENVELOPE** is built from metadata only, not from the original header:
-its `Date` is when Proton received the message, its `Message-Id` is the
-original one (or `<id@protonmail.com>`), its `In-Reply-To` is empty and
-its `Sender` is always `From` (`TODO.md` section 9, step 8). A message
-with no sender has `From` NIL.
+**ENVELOPE** comes from that header (RFC 3501 section 7.4.2): `Date`,
+`Sender`, `In-Reply-To` and `Message-Id` are the original's; `Sender`
+and `Reply-To` default to `From`. A message with no sender has `From`
+NIL.
+
+**BODYSTRUCTURE**, the parts and **sizes** are computed from the stored
+bytes by go-imap's parser, so they always match what `BODY[]` sends:
+`RFC822.SIZE` is the length of `BODY[]`, a part's size its encoded
+size.
 
 **HEADER.FIELDS** and **HEADER.FIELDS.NOT** send only the fields named,
 or all but those, matched without regard to case.
 
-**Sizes.** `RFC822.SIZE` is Proton's size of the message as stored,
-not of what peroxide builds; BODYSTRUCTURE gives an attachment's
-decrypted size, not its base64 size. Clients that trust these to
-allocate or to show progress may be slightly off (`TODO.md` section
-11).
-
 **Signatures** are not checked: neither the body's nor attachments'.
+A PGP/MIME signature is handed to your client (above), which can.
 
-**SEARCH** runs on the local database: flags, dates (Proton's received
-time, for SENTBEFORE and SENTSINCE too), sizes, and the header fields
-peroxide builds from metadata. `SEARCH BODY` and `SEARCH TEXT` match
-against the body and original header, which the local database doesn't
-hold (listings carry neither): they match nothing. Search those in
-Proton's web app, or in a client that downloads the messages.
+**Bytes that can't be parsed.** If a built message can't be parsed
+(malformed MIME inside a PGP/MIME body, say), it is served instead as a
+note saying why, with the message as built attached as `message.eml`:
+nothing is lost, and the log names it.
+
+## SEARCH
+
+SEARCH reads what is stored and downloads nothing. A message stored is
+searched as served: `HEADER` and `TEXT` in its header (original fields
+included), `BODY` and `TEXT` in its text parts decoded (attachments,
+`.pgp` files included, are left out), `SENTBEFORE` and `SENTSINCE`
+against its `Date` header, `LARGER` and `SMALLER` against its size. A
+message not stored yet is searched in its metadata: the header fields
+peroxide builds from it, Proton's received time and size, and no body
+(`BODY` doesn't match it). So results can grow while the background
+download runs.
 
 ## Mail peroxide can't decrypt
 
@@ -122,7 +150,7 @@ with the original header, and a real BODYSTRUCTURE of that. aerc (with
 its gpg or internal provider), Thunderbird, Evolution and mutt decrypt
 it with your key as they would any PGP/MIME mail. The log says
 `Message <id> is encrypted to a key Proton doesn't have: passed through
-as PGP/MIME` at every BODYSTRUCTURE.
+as PGP/MIME` when it is built.
 
 peroxide tells this case apart without decrypting anything: the body's
 key packets name no key of the account, locked or not. Mail encrypted
@@ -130,7 +158,7 @@ to a hidden recipient (key ID 0) names no key either, and is treated
 the same way.
 
 **With attachments**, multipart/encrypted has no room for them, so the
-message is rebuilt as usual, with the body served armored (next
+message is built as usual, with the body served armored (next
 section).
 
 ### A body or attachment no unlocked key opens
@@ -140,7 +168,7 @@ unlock (one added since peroxide started, see
 [../accounts.md](../accounts.md#keys-that-change-while-peroxide-runs)),
 or the decryption failed for another reason (corruption, an integrity
 check failure at the end of the data). Or an attachment's key packets
-open with no unlocked key.
+open with no unlocked key, or its data fails to decrypt.
 
 - The **body** is served as a text part (its own text type, else
   `text/plain`), its content the armored PGP message as stored, with an
@@ -150,23 +178,68 @@ open with no unlocked key.
 - An **attachment** is served as `application/octet-stream` named
   `<original name>.pgp`, its content the armored PGP message (its key
   packets, then its data), with `Comment: This attachment could not be
-  decrypted: no key peroxide has unlocked opens it`.
+  decrypted: ...` and the reason.
 
 You can save either and decrypt it yourself (`gpg -d`) if you have the
-key. The log names each one, at every fetch.
+key. The log names each one when the message is built.
 
-The body is decrypted whole before anything is sent, so an error at its
-very end (the integrity check) still leads to the armored fallback,
-not to a truncated message.
+Body and attachments are decrypted whole before anything is built, so
+an error at their very end (the integrity check) still leads to the
+armored fallback, not to a truncated message.
+
+## Messages that change
+
+A UID names one content forever (RFC 3501 section 2.3.1.1). Two things
+can change what peroxide would build:
+
+- **An edited draft** (or any message Proton reports as updated, not
+  just its flags or labels): if it is stored, peroxide builds it again
+  and compares the bytes. The same: nothing happens. Different: the
+  message gets a new UID in every mailbox it is in, and clients are
+  told `EXPUNGE` of the old one and `EXISTS` of the new, as gluon does.
+  A message not stored yet is simply built as Proton has it at its
+  next FETCH.
+- **A key unlocked since** the messages were built: at login, if the
+  unlocked keys differ from those the stored messages were built with,
+  every message stored with something left encrypted (armored body,
+  `.pgp` attachment, PGP/MIME pass-through) is built again, and gets a
+  new UID if it now decrypts.
+
+## Where messages are kept
+
+Each message is stored as served, sealed with AES-256-GCM, one file per
+message under `$XDG_DATA_HOME/peroxide/<user>/` (or
+`~/.local/share/peroxide/<user>/`), named by the hex of Proton's message
+ID; its BODYSTRUCTURE, envelope and size are kept, sealed with the same
+key, in the account's database. The key is derived from your bridge
+password and never written: [../security.md](../security.md#the-message-store).
+A message deleted in Proton is removed from the store with it.
+
+### Failed messages
+
+A message whose download or build fails for a reason that retrying soon
+won't change (Proton refusing it, say) is kept in a set of failed
+messages, as proton-bridge does. The background download skips it;
+any FETCH of it, any event about it, and `peroxide download-mailbox`
+try again, and success takes it out. It stays listed, with its flags,
+meanwhile.
 
 ## How proton-bridge does it
 
 proton-bridge builds the message the same way from the same pieces
-(pkg/message/build.go), but keeps the result in its local store, so
-a message is downloaded and decrypted once, ever. It adds `X-Pm-*`
-headers (`X-Pm-Internal-Id`, `X-Pm-External-Id`, `X-Pm-Date`) and can
-rebuild a signed message as multipart/signed
-(`writeMultipartSignedRFC822`).
+(pkg/message/build.go), downloads every message at login (its sync's
+download and build stages) and keeps the result in gluon's store, so a
+message is downloaded and decrypted once, ever. It adds `X-Pm-*`
+headers (`X-Pm-Internal-Id`, `X-Pm-External-Id`, `X-Pm-Date`), which
+peroxide doesn't. Its multipart/signed rewrites the signed part's
+header, and names the hash `SHA-256` in `micalg`; peroxide keeps the
+signed part byte for byte and writes `pgp-sha256` (RFC 3156), so the
+signature verifies. An edited draft is built again and replaces the
+stored one under a new UID only if the bytes differ
+(`applyMessageUpdated`); peroxide does the same. Messages that fail
+are kept in its sync status (`FailedMessages`) and not retried by the
+sync; peroxide also retries them on FETCH, events and
+`download-mailbox`.
 
 For a body it can't decrypt, proton-bridge serves the PGP/MIME
 pass-through only for messages without attachments
@@ -175,4 +248,5 @@ pass-through only for messages without attachments
 `writeCustomAttachmentPart`). peroxide follows that, and in addition
 passes through only mail encrypted to a key you don't hold in Proton:
 mail encrypted to a Proton key peroxide hasn't unlocked yet is shown
-armored, as your own client couldn't open it either.
+armored, as your own client couldn't open it either, and is built
+again once that key is unlocked.

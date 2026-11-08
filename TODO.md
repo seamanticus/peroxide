@@ -253,6 +253,16 @@ message is always there.
 
 ## 9. Fetch full messages in the background (BODYSTRUCTURE cost)
 
+**Done (2026-11-09, commits c12f3d2 to d95611c)**, as decided below:
+store key derived in `auth` (c12f3d2); sealed store under
+`$XDG_DATA_HOME/peroxide/<user>/`, one file per version (c2f4c0b,
+516c292); FETCH from the stored message with bridge's builds (2e1a0f4);
+SEARCH on stored messages (fef89f1); failed set (ecdb1e5); background
+body download with AIMD (6ee0c62); edited drafts and new keys renewed
+under new UIDs (d95611c). docs/imap/messages.md, sync.md, security.md
+describe it. Open, below the plan: the leftovers at the end of this
+section. What follows is the record of how it was decided.
+
 **Problem.** Since commit f82e989, BODYSTRUCTURE and every body section
 need the full message (`GET /messages/{id}`): the local database has
 neither the body nor its MIME type, and only the decrypted body says
@@ -554,6 +564,27 @@ with it.**
    Tests: a stored message's ENVELOPE has the header's In-Reply-To,
    Date and Sender; an unstored one the metadata's, without a request.
 
+**Left after 2026-11-09** (step numbers above):
+
+- 7. Not written: a test that a stored body can't be read with another
+  key at the imap level (the database tests cover it); the
+  FETCH-BODYSTRUCTURE benchmark before and after. Run by the human:
+  every test of these commits was compiled, none run in the sandbox.
+- 8. ENVELOPE of a message not stored yet: D1(a) builds it first, so
+  an aerc listing of a mailbox the download hasn't reached costs one
+  request per message, as it did; no metadata fallback was kept.
+- The memory to build: a message and its attachments are held whole
+  (the store seals in one shot); the downloader bounds what is in
+  flight at 64 MB by Proton's sizes, a FETCH doesn't.
+- `refreshMessage` holds syncSem for its request (bounded by
+  `unknownMessageTimeout`), as `updateUnknownMessage` does; a burst of
+  draft autosaves delays other events by one round trip each.
+- go-imap's `backendutil` doesn't descend into attached messages:
+  `BODY[2.1]` of a `message/rfc822` part answers empty.
+- Signatures are still not checked (`TODO: check signature`); a
+  PGP/MIME signature is handed to the client, which can.
+- 9.1 step 8 (one `syncSem` per mailbox) stays open.
+
 ### 9.1 Keep UIDs across sessions (option b)
 
 **Done (1476ca8), as proton-bridge v3 does it** (decisions of
@@ -570,7 +601,7 @@ ID, marks the database (`meta/rebuild`, bridge's `ShouldResync`), sends
 BYE and disconnects the account's clients; the next login wipes and
 downloads again. `peroxide download-mailbox [-discard-local-copy]` runs
 the download from the command line. docs/imap/sync.md has the details.
-Still open: the bodies (section 9 steps 1-4, 7, 8). What follows is the
+Bodies: done, section 9 (2026-11-09). What follows is the
 plan as written before, kept for the record.
 
 **Problem.** `mailbox.init` syncs a mailbox on its first use in every
@@ -769,7 +800,8 @@ Found in the 2026-11-06 audit; none is from branch `labels-events`.
    (section 1 covers the collision). Tests: LIST and FLAGS equal across
    repeated calls and two users built from the same labels in different
    insertion orders.
-2. **RFC822.SIZE is Proton's size, not the size served.** `fetchMessage`
+2. (done, 2e1a0f4: RFC822.SIZE is the stored length; an unstored
+   message is built first) **RFC822.SIZE is Proton's size, not the size served.** `fetchMessage`
    answers `msg.Size` (the API's, of the message as Proton stores it),
    SEARCH LARGER/SMALLER uses it too, but `BODY[]` is what peroxide
    builds: another header, quoted-printable, base64 attachments, or
@@ -899,7 +931,7 @@ Small, independent, found reviewing branch `labels-events`.
    Fix: remember the fingerprints already reported in `user` and log
    each once per session. Test: two updates of an address with one new
    key log once.
-5. **Pass-through and fallbacks log at every FETCH.**
+5. (done, 2e1a0f4: they log once, when the message is built) **Pass-through and fallbacks log at every FETCH.**
    `passThroughBodyStructure` (imap/passthrough.go) logs "Message ... is
    encrypted to a key Proton doesn't have: passed through as PGP/MIME"
    every time BODYSTRUCTURE is fetched, so every list fetch of a folder
@@ -907,7 +939,7 @@ Small, independent, found reviewing branch `labels-events`.
    `attachmentBody` ("Attachment ... served encrypted") likewise. Fix:
    log once per message per session (a set in `user`, or log only when
    the full message is first fetched, in `fullMessage`).
-6. **Attachment size in BODYSTRUCTURE** is the API's decrypted size, not
+6. (done, 2e1a0f4: sizes are computed from the bytes served) **Attachment size in BODYSTRUCTURE** is the API's decrypted size, not
    the size of the base64 sent (RFC 3501 section 7.4.2); for an armored
    fallback (`<name>.pgp`) it is further off, as armor and key packets
    are added. Recorded under section 9 ("more found") with its fix.
@@ -1052,6 +1084,20 @@ unit tests can't reach.
       UIDVALIDITY is higher than the one noted.
    5. Record whether aerc reconnected by itself and how it showed the
       BYE.
+2. **The message store** (section 9, 2026-11-09).
+   1. Log aerc in to a fresh account copy; `-debug` shows the metadata
+      download, then "Downloading N messages of ...", and in the end
+      "Downloaded N messages of ..., 0 failed"; `ls ~/.local/share/peroxide/<user>/`
+      has N files, and `grep -c` of a known subject in them finds none.
+   2. Open a message received as PGP/MIME (signed, from another
+      OpenPGP user): aerc shows the parts, and verifies the signature.
+   3. Edit a draft in Proton's web client; within a poll aerc shows it
+      once, with the new text (EXPUNGE then EXISTS in `-debug`).
+   4. Restart peroxide with another bridge password (`peroxide auth`
+      again): the log says the messages were stored under another
+      bridge password, and they download again.
+   5. Note how long the download of a large account takes, and whether
+      any 429 shows up in `-debug` (the AIMD halving).
 
 ## 16. aerc and the download's UID order
 
