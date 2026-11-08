@@ -122,8 +122,10 @@ APPEND works into every mailbox but **All Mail** and **Starred**, as
 in proton-bridge. So a client can copy or move mail from another
 account into Proton, and save its copy of what it sent.
 
-**Into `Drafts`** it creates a Proton draft from the message (its
-sender from the From address, which must be one of yours).
+**Into `Drafts`** it creates a Proton draft from the message, in the
+From address (Sender's if there's no From) if it is one of yours that
+is enabled and can send, in your primary address otherwise, as bridge
+does. No recipient is needed.
 
 **Anywhere else** it imports the message (`POST
 /mail/v4/messages/import`), with what bridge sends:
