@@ -51,10 +51,13 @@ const senderKeysTTL = 24 * time.Hour
 
 // senderKeys caches the public keys Proton publishes for each address, per
 // account: one request per sender of signed mail, then none for a day. Safe
-// for concurrent use; the zero value is ready.
+// for concurrent use; the zero value is ready. Lookups of one address that
+// overlap (two messages of a sender built at once) make one request: the
+// later ones wait for it and read the cache.
 type senderKeys struct {
 	mu      sync.Mutex
 	entries map[string]senderKeysEntry
+	pending map[string]chan struct{} // closed when the lookup ends
 }
 
 type senderKeysEntry struct {
@@ -67,11 +70,36 @@ type senderKeysEntry struct {
 // for (outside Proton, no WKD) has none, cached as well.
 func (s *senderKeys) get(ctx context.Context, c *protonmail.Client, address string) (openpgp.EntityList, error) {
 	key := strings.ToLower(address)
-	s.mu.Lock()
-	e, ok := s.entries[key]
-	s.mu.Unlock()
-	if ok && time.Since(e.fetched) < senderKeysTTL {
-		return e.keys, nil
+	for {
+		s.mu.Lock()
+		e, ok := s.entries[key]
+		if ok && time.Since(e.fetched) < senderKeysTTL {
+			s.mu.Unlock()
+			return e.keys, nil
+		}
+		wait, busy := s.pending[key]
+		if !busy {
+			if s.pending == nil {
+				s.pending = make(map[string]chan struct{})
+			}
+			done := make(chan struct{})
+			s.pending[key] = done
+			s.mu.Unlock()
+			defer func() {
+				s.mu.Lock()
+				delete(s.pending, key)
+				s.mu.Unlock()
+				close(done)
+			}()
+			break
+		}
+		s.mu.Unlock()
+		select {
+		case <-wait:
+			// Cached now, or failed: then this lookup tries itself.
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
 	resp, err := c.GetPublicKeys(ctx, address)

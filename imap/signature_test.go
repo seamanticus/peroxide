@@ -7,8 +7,11 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
@@ -156,6 +159,38 @@ func TestSenderKeysCached(t *testing.T) {
 	if n := lookups.Load(); n != 1 {
 		t.Errorf("%v key lookups for three messages of one sender, want 1", n)
 	}
+}
+
+// Two lookups of one sender at once (two of its messages built in parallel,
+// as the background download does) make one request; the second waits and
+// reads the cache.
+func TestSenderKeysOneLookupAtATime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sender := newKey(t, "sender")
+		keys := keysResponse(t, sender)
+		var lookups atomic.Int32
+		c := &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				lookups.Add(1)
+				time.Sleep(100 * time.Millisecond)
+				return jsonResponse(r, http.StatusOK, keys.body), nil
+			}),
+		}}
+		var s senderKeys
+		var wg sync.WaitGroup
+		for range 2 {
+			wg.Go(func() {
+				got, err := s.get(t.Context(), c, "Sender@example.org")
+				if err != nil || len(got) != 1 {
+					t.Errorf("get() = %v keys, %v; want 1", len(got), err)
+				}
+			})
+		}
+		wg.Wait()
+		if n := lookups.Load(); n != 1 {
+			t.Errorf("%v requests for two overlapping lookups, want 1", n)
+		}
+	})
 }
 
 // signAttachment sets in att the detached signature of data by signer, as
