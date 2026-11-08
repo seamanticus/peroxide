@@ -21,55 +21,76 @@ import (
 // have changed (an edited draft, a key unlocked since), as gluon does
 // (applyMessageUpdated): if the bytes built differ from those stored, the
 // message gets new UIDs with the new bytes, and the updates telling clients
-// (EXPUNGE of the old, EXISTS of the new) are returned; if they are the same,
-// nothing changes. A message not stored keeps its UIDs: its next FETCH builds
-// what Proton has then, and a build of it running now isn't stored. Called
-// with syncSem; the request is bounded by unknownMessageTimeout.
+// (EXPUNGE of the old, EXISTS of the new) are delivered in turn; if they are
+// the same, nothing changes. A message not stored keeps its UIDs: its next
+// FETCH builds what Proton has then, and a build of it running now isn't
+// stored.
 //
-// A failure that retrying soon may fix (retryable) is returned, to try the
-// event again. Another drops what is stored and puts the message in the
-// failed set: what is served may then change under a UID, which beats
-// serving an old draft for good.
-func (u *user) refreshMessage(apiID string) ([]imapbackend.Update, error) {
+// Called without syncSem, by the events goroutine after the page that
+// changed the message: the request, bounded by unknownMessageTimeout, holds
+// no lock, so no event or download page waits on the network. syncSem is
+// taken only to compare and renew. A later event that drops the message
+// (another edit) makes this build stale, and a delete removes it: either way
+// it isn't stored.
+//
+// A failure that retrying soon may fix (retryable) leaves what is stored, as
+// clients have it; the next update of the message, or the next login for a
+// key change, tries again. Another drops what is stored, so the next FETCH
+// builds what Proton has, and puts the message in the failed set: what is
+// served may then change under a UID, which beats serving an old draft for
+// good. The error is returned for the log.
+func (u *user) refreshMessage(apiID string, deliver func([]imapbackend.Update)) error {
 	// Owning the build keeps FETCHes from building it meanwhile.
-	_, owner := u.builds.start(apiID)
+	bd, owner := u.builds.start(apiID)
 	if !owner {
 		// Being built, so not stored: what the build downloaded may be
 		// older than this event.
-		return nil, u.builds.drop(u.db, apiID)
+		return u.builds.drop(u.db, apiID)
 	}
 	defer u.builds.finish(apiID)
 
 	_, old, err := u.db.Body(apiID)
 	if errors.Is(err, database.ErrNotFound) {
-		return nil, nil
+		return nil
 	} else if err != nil {
-		return nil, err
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), unknownMessageTimeout)
 	defer cancel()
 	built, err := u.downloadAndBuild(ctx, apiID)
 	if errors.Is(err, errMessageGone) {
-		return nil, nil // its delete event follows
+		return nil // its delete event follows
 	} else if retryable(err) {
-		return nil, err
+		return err
 	} else if err != nil {
 		log.Printf("Message %v changed and can't be built again: dropped until a FETCH tries again: %v", apiID, err)
-		return nil, errors.Join(u.db.DeleteBody(apiID), u.db.AddFailed(apiID))
+		if dropErr := u.builds.drop(u.db, apiID); dropErr != nil {
+			return errors.Join(err, dropErr)
+		}
+		return u.recordFailure(apiID, err)
 	}
 	if bytes.Equal(built.literal, old) {
-		return nil, nil
+		return nil
 	}
 
+	u.lockSync()
+	if u.builds.isStale(bd) {
+		// Dropped by a later event, which refreshes it in turn.
+		u.unlockSync()
+		return nil
+	}
 	log.Printf("Message %v changed: it gets new UIDs", apiID)
 	r, err := u.db.RenewMessage(apiID, built.literal, built.info)
-	if errors.Is(err, database.ErrNotFound) {
-		return nil, nil
-	} else if err != nil {
-		return nil, fmt.Errorf("cannot give message %v new UIDs: %w", apiID, err)
+	if err != nil {
+		u.unlockSync()
+		if errors.Is(err, database.ErrNotFound) {
+			return nil // deleted meanwhile
+		}
+		return fmt.Errorf("cannot give message %v new UIDs: %w", apiID, err)
 	}
-	return u.renewalUpdates(r), nil
+	u.unlockSyncAndSend(u.renewalUpdates(r), deliver)
+	return nil
 }
 
 // renewalUpdates tells clients of a message given new UIDs: in each mailbox,
@@ -150,9 +171,10 @@ func (u *user) unlockedKeysDigest() []byte {
 // refreshFallbacks builds again, when the unlocked keys differ from those the
 // stored messages were built with, every stored message that had something
 // left encrypted: a key unlocked since may open it, and it then gets new
-// UIDs (refreshMessage). Each takes syncSem and delivers its updates in
-// turn. It stops when ctx ends; the digest is stored only once all are done,
-// so the next login carries on.
+// UIDs (refreshMessage), one at a time, behind the background download's
+// pace. It stops when ctx ends or a message fails for a reason that may
+// pass (the network, Proton throttling); the digest is stored only once all
+// are done, so the next login carries on.
 func (u *user) refreshFallbacks(ctx context.Context, deliver func([]imapbackend.Update)) {
 	digest := u.unlockedKeysDigest()
 	stored, err := u.db.UnlockedKeys()
@@ -183,13 +205,12 @@ func (u *user) refreshFallbacks(ctx context.Context, deliver func([]imapbackend.
 		if ctx.Err() != nil {
 			return
 		}
-		u.lockSync()
-		updates, err := u.refreshMessage(id)
-		u.unlockSyncAndSend(updates, deliver)
-		if err != nil {
+		if err := u.refreshMessage(id, deliver); retryable(err) {
 			// Left as stored; tried again at the next login.
 			log.Printf("cannot build message %v again: %v", id, err)
 			return
+		} else if err != nil {
+			log.Printf("cannot build message %v again: %v", id, err)
 		}
 	}
 	if err := u.db.SetUnlockedKeys(digest); err != nil {

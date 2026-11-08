@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	imapbackend "github.com/emersion/go-imap/backend"
@@ -25,6 +26,16 @@ func fullResponse(t *testing.T, msg *protonmail.Message) fakeResponse {
 	return fakeResponse{http.StatusOK, "application/json", string(b)}
 }
 
+// refresh runs refreshMessage on apiID and returns what it delivered.
+func refresh(t *testing.T, u *user, apiID string) []imapbackend.Update {
+	t.Helper()
+	var ups []imapbackend.Update
+	if err := u.refreshMessage(apiID, func(d []imapbackend.Update) { ups = append(ups, d...) }); err != nil {
+		t.Fatalf("refreshMessage(%v) = %v", apiID, err)
+	}
+	return ups
+}
+
 // An edited draft, stored, gets new UIDs with its new body, as gluon gives
 // them: clients are told EXPUNGE then EXISTS. One whose bytes come out the
 // same keeps its UID; one not stored makes no request.
@@ -40,8 +51,8 @@ func TestRefreshMessage(t *testing.T) {
 
 	same := *draft
 	api.gets["/messages/a"] = fullResponse(t, &same)
-	if ups, err := u.refreshMessage("a"); err != nil || len(ups) != 0 {
-		t.Errorf("refreshMessage() of an unchanged message = %v, %v; want no updates", ups, err)
+	if ups := refresh(t, u, "a"); len(ups) != 0 {
+		t.Errorf("refreshMessage() of an unchanged message delivered %v, want nothing", ups)
 	}
 	if got := uidsByID(t, mbox); got["a"] != before["a"] {
 		t.Errorf("UID %v after an unchanged refresh, want %v", got["a"], before["a"])
@@ -50,10 +61,7 @@ func TestRefreshMessage(t *testing.T) {
 	edited := *draft
 	edited.Body = "second draft\r\n"
 	api.gets["/messages/a"] = fullResponse(t, &edited)
-	ups, err := u.refreshMessage("a")
-	if err != nil {
-		t.Fatalf("refreshMessage() = %v", err)
-	}
+	ups := refresh(t, u, "a")
 	if len(ups) != 2 {
 		t.Fatalf("refreshMessage() gave %v updates, want EXPUNGE and EXISTS", len(ups))
 	}
@@ -72,12 +80,97 @@ func TestRefreshMessage(t *testing.T) {
 	}
 
 	n := len(api.madeRequests())
-	if ups, err := u.refreshMessage("b"); err != nil || len(ups) != 0 {
-		t.Errorf("refreshMessage() of an unstored message = %v, %v; want nothing", ups, err)
+	if ups := refresh(t, u, "b"); len(ups) != 0 {
+		t.Errorf("refreshMessage() of an unstored message delivered %v, want nothing", ups)
 	}
 	if got := api.madeRequests(); len(got) != n {
 		t.Errorf("refreshMessage() of an unstored message made requests %v", got[n:])
 	}
+}
+
+// The request of a refresh holds no lock: while it hangs, syncSem is free
+// (an event page or a STORE goes ahead). A refresh whose message is dropped
+// meanwhile (a later edit) renews nothing.
+func TestRefreshHoldsNoLock(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setBubbleClock()
+		draft := inboxMessage("a", 0)
+		hang, release := make(chan struct{}), make(chan struct{})
+		api := &fakeMetadata{t: t, msgs: []*protonmail.Message{draft}}
+		api.full = func(r *http.Request, id string) (*http.Response, error) {
+			close(hang)
+			<-release
+			return jsonResponse(r, http.StatusOK, `{"Code":1000,"Message":{"ID":"a","MIMEType":"text/plain","Body":"edited"}}`), nil
+		}
+		u, inbox, _, _ := newDownloadTestUser(t, api)
+		syncTestMailbox(t, u.db, protonmail.LabelInbox, []*protonmail.Message{draft})
+		built := builtMessage{literal: []byte("Subject: old\r\n\r\nold\r\n")}
+		if _, stored, err := u.db.PutBody("a", built.literal, built.info); err != nil || !stored {
+			t.Fatal(stored, err)
+		}
+		before := uidsByID(t, inbox)["a"]
+
+		var delivered []imapbackend.Update
+		done := make(chan error)
+		go func() {
+			done <- u.refreshMessage("a", func(ups []imapbackend.Update) { delivered = append(delivered, ups...) })
+		}()
+		<-hang
+		u.lockSync() // would block forever if the request held it
+		// A later edit, applied under syncSem, drops the message.
+		if err := u.builds.drop(u.db, "a"); err != nil {
+			t.Fatal(err)
+		}
+		u.unlockSync()
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatalf("refreshMessage() = %v", err)
+		}
+		if len(delivered) != 0 || uidsByID(t, inbox)["a"] != before {
+			t.Errorf("a stale refresh delivered %v and renewed the UID", delivered)
+		}
+	})
+}
+
+// Several updates of one message in a page (autosaves) rebuild it once, after
+// the page is applied.
+func TestEditsInAPageRefreshOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setBubbleClock()
+		draft := inboxMessage("a", 0)
+		api := &fakeMetadata{t: t, msgs: []*protonmail.Message{draft}}
+		u, inbox, updates, _ := newDownloadTestUser(t, api)
+		syncTestMailbox(t, u.db, protonmail.LabelInbox, []*protonmail.Message{draft})
+		if err := u.db.SetLastEventID("e0"); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := u.storedMessage(t.Context(), "a"); err != nil {
+			t.Fatal(err)
+		}
+		api.mu.Lock()
+		api.fulls = 0
+		api.msgs = []*protonmail.Message{{ID: "a", LabelIDs: []string{protonmail.LabelInbox}, Subject: "edited"}}
+		api.mu.Unlock()
+		before := uidsByID(t, inbox)["a"]
+
+		edit := func() *protonmail.EventMessage {
+			return &protonmail.EventMessage{ID: "a", Action: protonmail.EventUpdate, Updated: &protonmail.EventMessageUpdate{}}
+		}
+		events := make(chan *protonmail.Event, 1)
+		events <- &protonmail.Event{ID: "e1", After: "e0", Messages: []*protonmail.EventMessage{edit(), edit(), edit()}}
+		close(events)
+		u.receiveEvents(updates, events)
+
+		api.mu.Lock()
+		fulls := api.fulls
+		api.mu.Unlock()
+		if fulls != 1 {
+			t.Errorf("three edits in a page made %v requests, want 1", fulls)
+		}
+		if after := uidsByID(t, inbox)["a"]; after == before {
+			t.Error("the edited message kept its UID")
+		}
+	})
 }
 
 // Messages stored with something left encrypted are built again once a key

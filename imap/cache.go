@@ -63,6 +63,13 @@ func (b *builds) store(db *database.User, apiID string, bd *build, built builtMe
 	return db.PutBody(apiID, built.literal, built.info)
 }
 
+// isStale reports whether bd's message was dropped since bd started.
+func (b *builds) isStale(bd *build) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bd.stale
+}
+
 // drop removes what is stored of apiID, and makes a running build of it
 // stale.
 func (b *builds) drop(db *database.User, apiID string) error {

@@ -580,6 +580,7 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 		}
 		var eventUpdates []imapbackend.Update
 		var failed, retry int
+		var changed []string
 
 		// Applied whole while no download page is stored, and sent in turn
 		// (unlockSyncAndSend).
@@ -603,8 +604,11 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			}
 
 			for _, eventMessage := range event.Messages {
-				ups, err := u.applyMessageEvent(eventMessage)
+				ups, c, err := u.applyMessageEvent(eventMessage)
 				eventUpdates = append(eventUpdates, ups...)
+				if c && !slices.Contains(changed, eventMessage.ID) {
+					changed = append(changed, eventMessage.ID)
+				}
 				switch {
 				case err == nil:
 				case retryable(err):
@@ -636,6 +640,10 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			}
 		}
 		u.unlockSyncAndSend(eventUpdates, deliver)
+		if !refresh && failed == 0 {
+			// After the page, without syncSem (refreshChanged).
+			u.refreshChanged(changed, deliver)
+		}
 		select {
 		case u.eventSent <- struct{}{}:
 		default:
@@ -673,12 +681,15 @@ func retryable(err error) bool {
 // applyMessageEvent applies one message event to the database, and returns
 // the updates telling clients about it. An error means the database may now
 // differ from Proton.
-func (u *user) applyMessageEvent(eventMessage *protonmail.EventMessage) ([]imapbackend.Update, error) {
+// changed reports that the message's contents may have changed (an edited
+// draft): the caller builds it again once the page is applied
+// (refreshChanged).
+func (u *user) applyMessageEvent(eventMessage *protonmail.EventMessage) (updates []imapbackend.Update, changed bool, err error) {
 	if eventMessage.Action == protonmail.EventCreate || eventMessage.Action == protonmail.EventUpdate {
 		// Proton has a new version of it: the background download tries a
 		// message that failed again.
 		if err := u.db.RemoveFailed(eventMessage.ID); err != nil {
-			return nil, fmt.Errorf("cannot clear message %v from the failed ones: %w", eventMessage.ID, err)
+			return nil, false, fmt.Errorf("cannot clear message %v from the failed ones: %w", eventMessage.ID, err)
 		}
 	}
 	switch eventMessage.Action {
@@ -687,32 +698,50 @@ func (u *user) applyMessageEvent(eventMessage *protonmail.EventMessage) ([]imapb
 		// A message the download listed first is updated, keeping its UIDs.
 		change, err := u.db.CreateMessage(eventMessage.Created)
 		if err != nil {
-			return nil, fmt.Errorf("cannot create message in local DB: %w", err)
+			return nil, false, fmt.Errorf("cannot create message in local DB: %w", err)
 		}
-		return u.downloadUpdates([]database.MessageChange{change}), nil
+		return u.downloadUpdates([]database.MessageChange{change}), false, nil
 	case protonmail.EventUpdate, protonmail.EventUpdateFlags:
 		log.Println("Received update event for message", eventMessage.ID)
 		ups, err := u.applyUpdate(eventMessage.ID, eventMessage.Updated)
 		if errors.Is(err, database.ErrNotFound) {
 			created, err := u.updateUnknownMessage(eventMessage.ID)
-			return append(ups, created...), err
-		} else if err != nil || eventMessage.Action != protonmail.EventUpdate {
-			return ups, err
+			return append(ups, created...), false, err
+		} else if err != nil {
+			return ups, false, err
 		}
-		// Its contents may have changed, e.g. a draft edited: new UIDs if
-		// they did. After its flags and labels, so that the new UIDs are in
-		// the mailboxes it is in now.
-		renewed, err := u.refreshMessage(eventMessage.ID)
-		return append(ups, renewed...), err
+		// Its contents may have changed, e.g. a draft edited: built again
+		// after the page, so that the new UIDs are in the mailboxes it is
+		// in then.
+		return ups, eventMessage.Action == protonmail.EventUpdate, nil
 	case protonmail.EventDelete:
 		log.Println("Received delete event for message", eventMessage.ID)
-		return u.applyDelete(eventMessage.ID)
+		ups, err := u.applyDelete(eventMessage.ID)
+		return ups, false, err
 	default:
 		// Not a broken invariant: the action comes from the API. Nothing is
 		// known to be lost either.
 		log.Printf("cannot handle event for message %s: unknown action %v", eventMessage.ID, eventMessage.Action)
-		return nil, nil
+		return nil, false, nil
 	}
+}
+
+// refreshChanged builds again the messages a page of events changed, each
+// once whatever the number of its updates in the page (a burst of draft
+// autosaves), in parallel and holding no lock, so that the download and the
+// IMAP commands don't wait for these requests; renewals are delivered in
+// turn as they come (refreshMessage). It returns once all are done, so that
+// the next page sees them applied.
+func (u *user) refreshChanged(ids []string, deliver func([]imapbackend.Update)) {
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Go(func() {
+			if err := u.refreshMessage(id, deliver); err != nil {
+				log.Printf("cannot build message %v again: %v", id, err)
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // unknownMessageTimeout bounds the one request made while holding syncSem
