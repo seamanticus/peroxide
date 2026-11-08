@@ -592,10 +592,14 @@ with it.**
 - (done, 8bf8ea4) Body signatures are checked with the sender's
   Proton keys (GET /keys, cached a day) and the verdict written in
   `X-Peroxide-Signature` (docs/imap/messages.md#signatures), for aerc
-  to show (aerc_implementation.md section 6). Open: attachment
-  signatures (Proton's detached `Signature`); messages stored before
-  8bf8ea4 get no field until built again; Proton's contact key pinning
-  isn't read.
+  to show (aerc_implementation.md section 6). Open: messages stored
+  before 8bf8ea4 get no field until built again (decided: not
+  rebuilt); Proton's contact key pinning isn't read.
+- (done, a3e260e, 2d8b69d) Attachment signatures: checked (part fields
+  and `attachments=` on the message field); attachments sent through
+  SMTP signed and uploaded with their signature. Open, awaiting a
+  decision: signing the body sent to recipients without a key, whom
+  Proton delivers plain mail with no signature today.
 - 9.1 step 8 (one `syncSem` per mailbox) stays open.
 
 ### 9.1 Keep UIDs across sessions (option b)

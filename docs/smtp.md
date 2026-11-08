@@ -36,8 +36,10 @@ Proton's limits apply when it uploads.
    and an empty body encrypted to your own key.
 5. **Upload the attachments.** For each MIME part with an attachment
    disposition and a filename: a new session key, the data encrypted
-   with it (not signed), uploaded to `/attachments`, its key kept for
-   the send. A part's `Content-Id` is kept.
+   with it and signed with your key apart (a detached signature over
+   the file, uploaded beside it, as Proton's own clients do, so a
+   Proton recipient can check it), uploaded to `/attachments`, its key
+   kept for the send. A part's `Content-Id` is kept.
 6. **Store the body.** The first inline part becomes the body, and a
    later `text/html` one replaces it (so HTML wins over its text/plain
    alternative); other inline parts are dropped. It is encrypted to,
@@ -66,8 +68,9 @@ web app and send it from there.
   recipient with a key gets the "internal" package, Proton's scheme for
   mail between Proton users. Proton's contact settings (encrypt, sign,
   scheme) are not read.
-- **No signature for unencrypted recipients**, and attachments are
-  never signed.
+- **No signature for unencrypted recipients**: Proton delivers them
+  the body as plain mail. Attachments are signed, but only a Proton
+  recipient's client checks that signature.
 - Only the first key of a recipient is used, whatever its `Send` flag.
 - Only `In-Reply-To` sets the parent, as a reply: forwards are sent as
   new messages.

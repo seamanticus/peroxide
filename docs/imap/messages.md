@@ -234,6 +234,14 @@ the first signed message of a sender costs a request. A message that
 isn't signed gets no field. Mail you sent, signed with your own key,
 is checked with it.
 
+Proton's clients also sign each **attachment**, apart: a detached
+signature over the file, kept beside it. peroxide checks that too, over
+the decrypted file, with the same keys and no further request, and
+writes the result twice: in the attachment part's own header, and as
+a summary on the message's field (`attachments=`). Attachments sent
+through peroxide's SMTP server are signed the same way
+([../smtp.md](../smtp.md)).
+
 ### The field, for client authors
 
 The field is written once, when peroxide builds the message, and never
@@ -241,7 +249,7 @@ changes under the message's UID. It follows RFC 8601's
 `Authentication-Results` result values (section 2.7.1) and its
 `ptype.property=value` shape:
 
-    X-Peroxide-Signature: <result> [(<reason>)] [header.from=<address>] [key=<fingerprint>]
+    X-Peroxide-Signature: <result> [(<reason>)] [header.from=<address>] [key=<fingerprint>] [attachments=<result>]
 
 | Result | Meaning |
 |---|---|
@@ -249,7 +257,8 @@ changes under the message's UID. It follows RFC 8601's
 | `fail` | Made by the key in `key`, which the sender publishes, but it doesn't verify: the text changed after it was signed. `reason` says how |
 | `neutral` | Made by a key the sender doesn't publish (an old key, or someone else's): it can't vouch for the sender |
 | `permerror` | Can't be checked: Proton publishes no key for the sender (most senders outside Proton), or refused to say which |
-| (no field) | The body isn't signed, or is passed through still encrypted, or couldn't be decrypted |
+| `none` | The body isn't signed, but an attachment is (see `attachments`) |
+| (no field) | Neither the body nor any attachment is signed, or the body is passed through still encrypted, or couldn't be decrypted |
 
 - `header.from` is the sender address from Proton's metadata, the
   `From` peroxide writes; `key` is the signing key's fingerprint in
@@ -267,13 +276,37 @@ changes under the message's UID. It follows RFC 8601's
 - Received PGP/MIME (`multipart/signed`) gets the field too: a client
   that verifies such mail itself can ignore it.
 
+**Attachments.** The message's field carries `attachments=` when the
+message has attachments:
+
+| `attachments=` | Meaning |
+|---|---|
+| `pass` | Every attachment is signed and verifies with the sender's key |
+| `fail` | At least one is signed by the sender's key and doesn't verify: the file changed |
+| `permerror` | At least one can't be checked (no fail) |
+| `neutral` | At least one is signed by a key the sender doesn't publish, or isn't signed while others are (no fail, no permerror) |
+| `none` | No attachment is signed (mail from outside Proton, mostly) |
+
+Each decrypted attachment that is signed also carries the field in its
+own part header, `X-Peroxide-Signature: <result> [(<reason>)]
+[key=<fingerprint>]`, with the same results and no `header.from` (the
+signer is the message's sender); fetch it with `BODY.PEEK[<n>.MIME]` to
+say which file failed. An attachment that isn't signed, or is served
+still encrypted (`.pgp`), has none. A part's field, too, is written
+only by peroxide: it builds those headers itself from Proton's
+attachment list. That holds for the attachment parts of a
+`multipart/mixed` message peroxide built, its direct parts 2 and
+after; the parts inside a received PGP/MIME message are the sender's,
+byte for byte, and a field among them isn't peroxide's: ignore it.
+
 A client wanting to show the verdict reads it with the rest of the
 header (`BODY.PEEK[HEADER.FIELDS (X-PEROXIDE-SIGNATURE)]`, or the whole
 header it fetches anyway).
 
 Messages stored before peroxide checked signatures have no field until
 they are built again (edited, a key change, or `download-mailbox
--discard-local-copy`).
+-discard-local-copy`); those stored before it checked attachments have
+no `attachments=`.
 
 ## Where messages are kept
 
