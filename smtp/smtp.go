@@ -1,6 +1,7 @@
 package smtp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
 	"github.com/emersion/go-message/mail"
+	"github.com/emersion/go-message/textproto"
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 
@@ -58,8 +60,15 @@ func bccFromRest(rcpt []string, ignoreMails []*mail.Address) []*mail.Address {
 }
 
 func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.EntityList, addrs []*protonmail.Address, rcpt []string, r io.Reader) error {
+	// Kept whole: recipients without a key may get the message itself,
+	// signed (signedMIMEPackage). Unbounded, as go-smtp's MaxMessageBytes
+	// isn't set; the server takes only authenticated local clients.
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return fmt.Errorf("cannot read the message: %w", err)
+	}
 	// Parse the incoming MIME message header
-	mr, err := mail.CreateReader(r)
+	mr, err := mail.CreateReader(bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -324,32 +333,23 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 	outgoing := &protonmail.OutgoingMessage{ID: msg.ID}
 
 	if len(plaintextRecipients) > 0 {
-		plaintextSet := protonmail.NewMessagePackageSet(attachmentKeys)
-
-		plaintext, err := plaintextSet.Encrypt(bodyType, privateKey)
+		// Proton's setting "Sign external messages", as proton-bridge
+		// reads it for recipients without a key (setEncryptionPreferences);
+		// contacts' own sign preferences aren't read.
+		settings, err := c.GetMailSettings(context.Background())
+		if err != nil {
+			return fmt.Errorf("cannot get the mail settings: %w", err)
+		}
+		var set *protonmail.MessagePackageSet
+		if settings.Sign == protonmail.SignExternalEnabled {
+			set, err = signedMIMEPackage(raw, privateKey, plaintextRecipients)
+		} else {
+			set, err = cleartextPackage(body.Bytes(), bodyType, attachmentKeys, privateKey, plaintextRecipients)
+		}
 		if err != nil {
 			return err
 		}
-		if _, err := io.Copy(plaintext, bytes.NewReader(body.Bytes())); err != nil {
-			plaintext.Close()
-			return err
-		}
-		if err := plaintext.Close(); err != nil {
-			return err
-		}
-
-		for _, rcpt := range plaintextRecipients {
-			pkg, err := plaintextSet.AddCleartext(rcpt)
-			if err != nil {
-				return err
-			}
-
-			// Don't sign plaintext messages by default
-			// TODO: send inline singnature to opt-in contacts
-			pkg.Signature = 0
-		}
-
-		outgoing.Packages = append(outgoing.Packages, plaintextSet)
+		outgoing.Packages = append(outgoing.Packages, set)
 	}
 
 	if len(encryptedRecipients) > 0 {
@@ -382,6 +382,85 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 	}
 
 	return nil
+}
+
+// cleartextPackage is the package of recipients without a key when external
+// mail isn't signed: the body and the attachment keys for Proton to deliver
+// as plain mail, unsigned (Proton's Clear scheme).
+func cleartextPackage(body []byte, bodyType string, attachmentKeys map[string]*packet.EncryptedKey, signer *openpgp.Entity, rcpts []string) (*protonmail.MessagePackageSet, error) {
+	set := protonmail.NewMessagePackageSet(attachmentKeys)
+	if err := writeBody(set, bodyType, signer, body); err != nil {
+		return nil, err
+	}
+	for _, rcpt := range rcpts {
+		pkg, err := set.AddCleartext(rcpt)
+		if err != nil {
+			return nil, err
+		}
+		// Proton would sign the text inline, and only text/plain: the
+		// signed form is signedMIMEPackage.
+		pkg.Signature = 0
+	}
+	return set, nil
+}
+
+// signedMIMEPackage is the package of recipients without a key when Proton's
+// setting "Sign external messages" is on: the whole MIME message as one
+// body, attachments included, signed with signer, its session key in clear
+// (Proton's ClearMIME scheme), which Proton delivers as PGP/MIME
+// multipart/signed (RFC 3156), as proton-bridge sends it (createSendReq,
+// AddMIMEPackage). Recipients' clients then check the signature over the
+// text and every attachment.
+func signedMIMEPackage(raw []byte, signer *openpgp.Entity, rcpts []string) (*protonmail.MessagePackageSet, error) {
+	entity, err := mimeBody(raw)
+	if err != nil {
+		return nil, err
+	}
+	// The attachments are inside the body: no attachment key is sent.
+	set := protonmail.NewMessagePackageSet(nil)
+	if err := writeBody(set, "multipart/mixed", signer, entity); err != nil {
+		return nil, err
+	}
+	for _, rcpt := range rcpts {
+		if _, err := set.AddClearMIME(rcpt); err != nil {
+			return nil, err
+		}
+	}
+	return set, nil
+}
+
+// writeBody encrypts body into set, signed with signer.
+func writeBody(set *protonmail.MessagePackageSet, mimeType string, signer *openpgp.Entity, body []byte) error {
+	plaintext, err := set.Encrypt(mimeType, signer)
+	if err != nil {
+		return err
+	}
+	if _, err := plaintext.Write(body); err != nil {
+		plaintext.Close()
+		return err
+	}
+	return plaintext.Close()
+}
+
+// mimeBody returns the message raw as it goes, signed, to recipients without
+// a key: as the client sent it but for its Bcc field, which would show every
+// recipient who should be hidden. The header stays inside what is signed,
+// as proton-bridge sends it (buildMIMEBody).
+func mimeBody(raw []byte) ([]byte, error) {
+	br := bufio.NewReader(bytes.NewReader(raw))
+	h, err := textproto.ReadHeader(br)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the message header: %w", err)
+	}
+	h.Del("Bcc")
+	var b bytes.Buffer
+	if err := textproto.WriteHeader(&b, h); err != nil {
+		return nil, err
+	}
+	if _, err := io.Copy(&b, br); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
 }
 
 type session struct {

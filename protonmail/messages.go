@@ -705,6 +705,37 @@ func (set *MessagePackageSet) AddCleartext(addr string) (*MessagePackage, error)
 	return pkg, nil
 }
 
+// AddClearMIME adds addr as a recipient of the set's body sent as a signed
+// MIME message (Proton's ClearMIME scheme): the body is the whole MIME
+// message, encrypted and signed by Encrypt, and its session key goes to
+// Proton in clear, which delivers it as PGP/MIME multipart/signed (RFC 3156)
+// with the signature Encrypt made. The attachments are in the body, so no
+// attachment key is sent. As go-proton-api's newMIMEPackage, the set's MIME
+// type must be multipart/mixed and it must be signed.
+func (set *MessagePackageSet) AddClearMIME(addr string) (*MessagePackage, error) {
+	if set.MIMEType != "multipart/mixed" {
+		return nil, fmt.Errorf("cannot send a MIME package of type %q, only multipart/mixed", set.MIMEType)
+	}
+	if set.signature == 0 {
+		return nil, errors.New("cannot send an unsigned MIME package")
+	}
+	if set.BodyKey == nil {
+		bodyKey, err := packKey(set.bodyKey)
+		if err != nil {
+			return nil, fmt.Errorf("cannot pack body key: %w", err)
+		}
+		set.BodyKey = bodyKey
+	}
+
+	pkg := &MessagePackage{
+		Type:      MessagePackageMIME,
+		Signature: set.signature,
+	}
+	set.Addresses[addr] = pkg
+	set.Type |= MessagePackageMIME
+	return pkg, nil
+}
+
 func serializeEncryptedKey(symKey *packet.EncryptedKey, pub *packet.PublicKey, config *packet.Config) (string, error) {
 	var encoded bytes.Buffer
 	ciphertext := base64.NewEncoder(base64.StdEncoding, &encoded)
