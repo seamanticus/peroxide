@@ -93,6 +93,41 @@ after it reconnects). go-imap can send an unsolicited LIST
 4. Check live with a label (not a folder): create, rename and delete one
    while peroxide runs with `-debug`, and check the logs
    `Label ... created/renamed`. Folders were checked on 2026-11-04/05.
+5. What labels as mailboxes (item 1) would need from APPEND, learned on
+   branch append-import (2026-11-08/09, docs/imap/changes.md#append):
+   - Proton keeps one copy of a message: an import of one it has (same
+     `Message-Id`) files the copy it has in the mailbox, and a folder
+     takes it out of the folder it was in. So APPEND first looks the
+     message up (`existingMessages`, imap/append.go) and, when found,
+     imports nothing: OK [ALERT] if the message is in the mailbox
+     already, NO [ALERT] naming where it is otherwise
+     (`alreadyThere`). Not for Drafts: a draft is always imported.
+   - Exception today: INBOX and Sent. Proton keeps a message in both
+     (labels 0 and 7 together, seen in events), so an APPEND into one of
+     a message in the other labels it, as COPY, and answers OK [ALERT]
+     (`inboxSentPartner`). That is aerc's `copy-to-replied`.
+   - A label mailbox is the general case of that exception: adding a
+     label moves nothing. With `Labels/<name>` mailboxes, an APPEND
+     there of a message the account has should label it and answer OK
+     [ALERT] (generalise `inboxSentPartner` to "the target is a label,
+     or INBOX/Sent"). A new message bridge imports with the label alone
+     (`CreateMessage`: `wantLabelIDs` is the mailbox, plus Starred),
+     no folder, so Proton files it in All Mail only, where a client
+     hiding All Mail doesn't see it: decide whether peroxide adds INBOX
+     (Received) or Sent, or follows bridge.
+   - COPY to a label mailbox is `PUT /messages/label`, as bridge's
+     `AddMessagesToMailbox` and peroxide's CopyMessages already do for
+     any label ID; EXPUNGE from one unlabels (46d246c). Bridge's MOVE
+     out of a label mailbox labels the destination and unlabels the
+     source (`shouldExpungeOldLocation`: true when the source is a
+     label); peroxide refuses MOVE into and out of Starred, the one
+     label mailbox today (`moveAllowed`): decide whether `Labels/*`
+     follows Starred or bridge.
+   - Starred stays special: APPEND into it is refused (`appendAllowed`),
+     as it is the `\Flagged` flag. With labels as mailboxes, a label
+     that is also a flag today (`labelNameToFlag`) stops being a flag:
+     clients that set it with STORE lose that, and docs/imap/mailboxes.md
+     changes.
 
 ## 2. (done: STORE `\Deleted` sends FETCH, STORE FLAGS replaces, 1dfcddc)
 

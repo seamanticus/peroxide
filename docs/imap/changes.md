@@ -198,6 +198,11 @@ the one response code clients must show (RFC 3501 section 7.1):
   account, in INBOX: it was not copied, as Proton keeps one copy of a
   message`. A client moving it from another account keeps its copy
   there, as a move whose APPEND fails deletes nothing.
+- in the other of INBOX and Sent: Proton keeps a message in both (mail
+  to yourself), so it is added to this one, as COPY does, moving
+  nothing: `OK [ALERT] This message is already in Sent: it is now in
+  INBOX too, not copied again`. This is what aerc's `copy-to-replied`
+  asks after a reply.
 
 Either way the message found is left as it is: the flags the APPEND
 gives (`\Flagged`, `\Seen`) aren't applied to it.
