@@ -1,10 +1,78 @@
 package protonmail
 
 import (
+	"bytes"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
 )
+
+// An attachment signed with Sign is uploaded with its detached signature as
+// the Signature part, binary, as go-proton-api's UploadAttachment sends it;
+// one not signed has no such part.
+// evidence: witnesses
+func TestCreateAttachmentSendsSignature(t *testing.T) {
+	signer, err := openpgp.NewEntity("s", "", "s@example.org", &packet.Config{Algorithm: packet.PubKeyAlgoEdDSA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = make(map[string][]byte)
+		_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil {
+			t.Error(err)
+		}
+		mr := multipart.NewReader(r.Body, params["boundary"])
+		for {
+			p, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			} else if err != nil {
+				t.Error(err)
+				break
+			}
+			b, _ := io.ReadAll(p)
+			got[p.FormName()] = b
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"Code":1000,"Attachment":{"ID":"att"}}`)
+	}))
+	defer srv.Close()
+	c := &Client{RootURL: srv.URL}
+
+	for _, signed := range []bool{true, false} {
+		att := &Attachment{Name: "f.txt", MessageID: "m", MIMEType: "text/plain"}
+		var raw []byte
+		if signed {
+			if raw, err = att.Sign(signer, strings.NewReader("file")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := c.CreateAttachment(att, strings.NewReader("data")); err != nil {
+			t.Fatalf("CreateAttachment() = %v", err)
+		}
+		sig, ok := got["Signature"]
+		if signed && (!ok || !bytes.Equal(sig, raw)) {
+			t.Errorf("Signature part %x (sent %v), want %x", sig, ok, raw)
+		}
+		if !signed && ok {
+			t.Error("an unsigned attachment was sent with a Signature part")
+		}
+		if signed {
+			if _, err := openpgp.CheckDetachedSignature(openpgp.EntityList{signer}, strings.NewReader("file"), bytes.NewReader(sig), nil); err != nil {
+				t.Errorf("the uploaded signature doesn't verify over the file: %v", err)
+			}
+		}
+	}
+}
 
 // A message set whose keys use a cipher the API doesn't accept is reported,
 // not a panic, and left unchanged.

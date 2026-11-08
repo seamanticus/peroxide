@@ -224,6 +224,19 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 				return fmt.Errorf("cannot generate attachment key: %v", err)
 			}
 
+			// Read whole: signed, then encrypted. Proton's clients sign
+			// each attachment apart, a detached signature over the file
+			// uploaded beside it (go-proton-api UploadAttachment), which
+			// recipients check; Proton caps a message's attachments at
+			// 25 MB.
+			data, err := io.ReadAll(p.Body)
+			if err != nil {
+				return fmt.Errorf("cannot read attachment %q: %v", filename, err)
+			}
+			if _, err := att.Sign(privateKey, bytes.NewReader(data)); err != nil {
+				return err
+			}
+
 			log.Printf("uploading message attachment %q", filename)
 
 			pr, pw := io.Pipe()
@@ -234,7 +247,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 					pw.CloseWithError(err)
 					return
 				}
-				if _, err := io.Copy(cleartext, p.Body); err != nil {
+				if _, err := cleartext.Write(data); err != nil {
 					pw.CloseWithError(err)
 					return
 				}
