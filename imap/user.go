@@ -57,7 +57,8 @@ type user struct {
 
 	db             *database.User
 	eventsReceiver eventsReceiver
-	builds         builds // messages being built and stored
+	builds         builds    // messages being built and stored
+	mem            memBudget // memory the builds take
 
 	done      chan struct{} // closed by the last Logout
 	eventSent chan struct{}

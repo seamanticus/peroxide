@@ -28,10 +28,10 @@ func TestLimiterAIMD(t *testing.T) {
 		ctx := t.Context()
 		succeed := func(n int) {
 			for range n {
-				if err := l.acquire(ctx, 1); err != nil {
+				if err := l.acquire(ctx); err != nil {
 					t.Fatal(err)
 				}
-				l.release(1, false, 0)
+				l.release(false, 0)
 			}
 		}
 		succeed(2) // one round of 2: 2 + 1/2 + 1/2.5
@@ -44,19 +44,19 @@ func TestLimiterAIMD(t *testing.T) {
 		}
 
 		for want := float64(maxParallel / 2); want >= 1; want /= 2 {
-			if err := l.acquire(ctx, 1); err != nil {
+			if err := l.acquire(ctx); err != nil {
 				t.Fatal(err)
 			}
-			l.release(1, true, time.Second)
+			l.release(true, time.Second)
 			if p, _ := l.state(); p != want {
 				t.Errorf("parallelism %v after a throttled request, want %v", p, want)
 			}
 			time.Sleep(time.Second)
 		}
-		if err := l.acquire(ctx, 1); err != nil {
+		if err := l.acquire(ctx); err != nil {
 			t.Fatal(err)
 		}
-		l.release(1, true, time.Second)
+		l.release(true, time.Second)
 		if p, _ := l.state(); p != minParallel {
 			t.Errorf("parallelism %v, want at least %v", p, minParallel)
 		}
@@ -71,59 +71,60 @@ func TestLimiterCoolDown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		l := testLimiter()
 		ctx := t.Context()
-		if err := l.acquire(ctx, 1); err != nil {
+		if err := l.acquire(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if err := l.acquire(ctx, 1); err != nil {
+		if err := l.acquire(ctx); err != nil {
 			t.Fatal(err)
 		}
 		start := time.Now()
-		l.release(1, true, 7*time.Second)
-		l.release(1, false, 0) // in the cool-down: no increase
+		l.release(true, 7*time.Second)
+		l.release(false, 0) // in the cool-down: no increase
 		if p, _ := l.state(); p != 1 {
 			t.Errorf("parallelism %v, want 1: halved, not raised during the cool-down", p)
 		}
-		if err := l.acquire(ctx, 1); err != nil {
+		if err := l.acquire(ctx); err != nil {
 			t.Fatal(err)
 		}
 		if waited := time.Since(start); waited != 7*time.Second {
 			t.Errorf("waited %v after a Retry-After of 7s", waited)
 		}
-		l.release(1, false, 0)
+		l.release(false, 0)
 
 		// Without a Retry-After: up to minCoolDown, then twice as long, capped.
 		for _, ceiling := range []time.Duration{minCoolDown, 2 * minCoolDown, 4 * minCoolDown} {
-			if err := l.acquire(ctx, 1); err != nil {
+			if err := l.acquire(ctx); err != nil {
 				t.Fatal(err)
 			}
 			start := time.Now()
-			l.release(1, true, 0)
-			if err := l.acquire(ctx, 1); err != nil {
+			l.release(true, 0)
+			if err := l.acquire(ctx); err != nil {
 				t.Fatal(err)
 			}
 			waited := time.Since(start)
 			if waited < ceiling/2 || waited > ceiling {
 				t.Errorf("cool-down %v, want between %v and %v", waited, ceiling/2, ceiling)
 			}
-			l.release(1, true, time.Nanosecond) // keep the back-off growing
+			l.release(true, time.Nanosecond) // keep the back-off growing
 			time.Sleep(time.Nanosecond)
 		}
 	})
 }
 
-// A request bigger than the bytes left waits for the others, but one alone
-// always starts, however big.
+// A build bigger than the bytes left waits for the others, but one alone
+// always starts, however big; a waiting build gives up when its context
+// ends.
 // evidence: witnesses
-func TestLimiterBytes(t *testing.T) {
+func TestMemBudget(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		l := testLimiter()
+		var b memBudget
 		ctx := t.Context()
-		if err := l.acquire(ctx, maxInFlightBytes+1); err != nil {
+		if err := b.acquire(ctx, maxInFlightBytes+1); err != nil {
 			t.Fatalf("acquire() of one big message alone = %v", err)
 		}
 		started := make(chan struct{})
 		go func() {
-			if err := l.acquire(ctx, 1); err != nil {
+			if err := b.acquire(ctx, 1); err != nil {
 				t.Error(err)
 			}
 			close(started)
@@ -131,12 +132,64 @@ func TestLimiterBytes(t *testing.T) {
 		synctest.Wait()
 		select {
 		case <-started:
-			t.Fatal("a second request started beside one over the byte limit")
+			t.Fatal("a second build started beside one over the byte limit")
 		default:
 		}
-		l.release(maxInFlightBytes+1, false, 0)
+		b.release(maxInFlightBytes + 1)
 		<-started
-		l.release(1, false, 0)
+
+		// 1 byte held: a build of the whole budget doesn't fit.
+		cancelled, cancel := context.WithCancel(ctx)
+		errs := make(chan error)
+		go func() { errs <- b.acquire(cancelled, maxInFlightBytes) }()
+		synctest.Wait()
+		cancel()
+		if err := <-errs; err == nil {
+			t.Error("acquire() returned nil after its context was cancelled")
+		}
+		b.release(1)
+		if err := b.acquire(ctx, maxInFlightBytes); err != nil {
+			t.Errorf("acquire() of the whole budget, nothing held = %v", err)
+		}
+		b.release(maxInFlightBytes)
+	})
+}
+
+// A FETCH of a message not stored yet waits for room in the account's
+// memory budget, as the background download's builds do: no request is made
+// until the build holding it ends.
+func TestFetchBuildWaitsForMemory(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setBubbleClock()
+		msg := inboxMessage("a", 0)
+		msg.Size = 1 << 20
+		api := &fakeMetadata{t: t, msgs: []*protonmail.Message{msg}}
+		u, _, _, _ := newDownloadTestUser(t, api)
+		if _, err := u.db.CreateMessage(msg); err != nil {
+			t.Fatal(err)
+		}
+		// Another build holds all but less than the message.
+		held := int64(maxInFlightBytes - msg.Size + 1)
+		if err := u.mem.acquire(t.Context(), held); err != nil {
+			t.Fatal(err)
+		}
+
+		done := make(chan error)
+		go func() {
+			_, _, err := u.storedMessage(t.Context(), "a")
+			done <- err
+		}()
+		synctest.Wait()
+		api.mu.Lock()
+		fulls := api.fulls
+		api.mu.Unlock()
+		if fulls != 0 {
+			t.Fatalf("made %v requests while the budget was full, want none", fulls)
+		}
+		u.mem.release(held)
+		if err := <-done; err != nil {
+			t.Errorf("storedMessage() = %v", err)
+		}
 	})
 }
 
@@ -144,13 +197,13 @@ func TestLimiterBytes(t *testing.T) {
 func TestLimiterCancelled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		l := testLimiter()
-		if err := l.acquire(t.Context(), 1); err != nil {
+		if err := l.acquire(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		l.release(1, true, time.Hour)
+		l.release(true, time.Hour)
 		ctx, cancel := context.WithCancel(t.Context())
 		errs := make(chan error)
-		go func() { errs <- l.acquire(ctx, 1) }()
+		go func() { errs <- l.acquire(ctx) }()
 		synctest.Wait()
 		cancel()
 		if err := <-errs; err == nil {

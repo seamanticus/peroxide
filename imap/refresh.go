@@ -96,8 +96,25 @@ func (u *user) renewalUpdates(r database.Renewal) []imapbackend.Update {
 }
 
 // downloadAndBuild downloads and builds the message apiID. A message Proton
-// no longer has is errMessageGone.
+// no longer has is errMessageGone. It holds its share of the account's
+// memory budget (u.mem), by Proton's size of the message, while downloading
+// and building: a FETCH waits, as the background download does, until the
+// builds running leave it room. The built bytes outlive the budget, held by
+// the caller until stored or written.
 func (u *user) downloadAndBuild(ctx context.Context, apiID string) (builtMessage, error) {
+	var size int64
+	msg, err := u.db.Message(apiID)
+	if err == nil {
+		size = msg.Size
+	} else if !errors.Is(err, database.ErrNotFound) {
+		return builtMessage{}, fmt.Errorf("cannot read the size of message %v: %w", apiID, err)
+	}
+	// Deleted meanwhile: built all the same, at no cost to the budget.
+	if err := u.mem.acquire(ctx, size); err != nil {
+		return builtMessage{}, err
+	}
+	defer u.mem.release(size)
+
 	full, err := u.c.GetMessage(ctx, apiID)
 	if gone(err) {
 		return builtMessage{}, fmt.Errorf("%w: %v", errMessageGone, err)

@@ -14,8 +14,9 @@ const (
 	minParallel   = 1
 	startParallel = 2
 	maxParallel   = 32
-	// maxInFlightBytes bounds the memory messages being downloaded and built
-	// take, by Proton's sizes, as bridge's DownloadRequestMem.
+	// maxInFlightBytes bounds the memory the messages of an account being
+	// downloaded and built take at once, by Proton's sizes, as bridge's
+	// DownloadRequestMem (memBudget).
 	maxInFlightBytes = 64 << 20
 	// The cool-down after a throttled request when Proton gives no
 	// Retry-After: exponential, with jitter.
@@ -28,13 +29,13 @@ const (
 // 1/parallelism (so +1 per round of requests), up to maxParallel; a throttled
 // one (429, 5xx, the network) halves it, at least to minParallel, and starts
 // a cool-down, the Retry-After Proton gives or else an exponential back-off
-// with jitter, during which no request starts. It also bounds the bytes in
-// flight. Safe for concurrent use.
+// with jitter, during which no request starts. The memory they take is
+// bounded apart, for every build of the account (memBudget). Safe for
+// concurrent use.
 type downloadLimiter struct {
 	mu        sync.Mutex
 	parallel  float64   // requests allowed at once
 	inFlight  int       // requests started and not done
-	bytes     int64     // their sizes
 	coolUntil time.Time // no request starts before
 	backoff   time.Duration
 	rng       *rand.Rand
@@ -46,16 +47,15 @@ func newDownloadLimiter(rng *rand.Rand) *downloadLimiter {
 	return &downloadLimiter{parallel: startParallel, backoff: minCoolDown, rng: rng, changed: make(chan struct{})}
 }
 
-// acquire waits until a request of size bytes may start, and counts it in
-// flight: no cool-down runs, fewer than the parallelism are in flight, and
-// its bytes fit, or nothing else is in flight. It fails only when ctx ends.
-func (l *downloadLimiter) acquire(ctx context.Context, size int64) error {
+// acquire waits until a request may start, and counts it in flight: no
+// cool-down runs, and fewer than the parallelism are in flight. It fails
+// only when ctx ends.
+func (l *downloadLimiter) acquire(ctx context.Context) error {
 	for {
 		l.mu.Lock()
 		wait := time.Until(l.coolUntil)
-		if wait <= 0 && l.inFlight < int(l.parallel) && (l.inFlight == 0 || l.bytes+size <= maxInFlightBytes) {
+		if wait <= 0 && l.inFlight < int(l.parallel) {
 			l.inFlight++
-			l.bytes += size
 			l.mu.Unlock()
 			return nil
 		}
@@ -82,16 +82,15 @@ func (l *downloadLimiter) acquire(ctx context.Context, size int64) error {
 	}
 }
 
-// release ends a request of size bytes acquire let start. throttled says
-// Proton asked to slow down, with retryAfter its Retry-After (0 if none).
-func (l *downloadLimiter) release(size int64, throttled bool, retryAfter time.Duration) {
+// release ends a request acquire let start. throttled says Proton asked to
+// slow down, with retryAfter its Retry-After (0 if none).
+func (l *downloadLimiter) release(throttled bool, retryAfter time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.inFlight <= 0 {
 		panic("invariant: downloadLimiter.release without acquire")
 	}
 	l.inFlight--
-	l.bytes -= size
 	now := time.Now()
 	switch {
 	case throttled:
@@ -117,4 +116,56 @@ func (l *downloadLimiter) state() (parallel float64, inFlight int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.parallel, l.inFlight
+}
+
+// memBudget bounds the memory taken by the messages of an account being
+// downloaded and built, whoever builds them (the background download, a
+// FETCH, an edited draft): at most maxInFlightBytes by Proton's sizes, but
+// one build alone always starts, however big. Not first come first served: a
+// big message waits until the others leave it room. The zero value is
+// ready. Safe for concurrent use.
+type memBudget struct {
+	mu      sync.Mutex
+	builds  int
+	bytes   int64
+	changed chan struct{} // closed and dropped when room is made
+}
+
+// acquire waits until a build of size bytes fits, and counts it. It fails
+// only when ctx ends.
+func (b *memBudget) acquire(ctx context.Context, size int64) error {
+	for {
+		b.mu.Lock()
+		if b.builds == 0 || b.bytes+size <= maxInFlightBytes {
+			b.builds++
+			b.bytes += size
+			b.mu.Unlock()
+			return nil
+		}
+		if b.changed == nil {
+			b.changed = make(chan struct{})
+		}
+		changed := b.changed
+		b.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// release ends a build of size bytes acquire counted.
+func (b *memBudget) release(size int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.builds <= 0 {
+		panic("invariant: memBudget.release without acquire")
+	}
+	b.builds--
+	b.bytes -= size
+	if b.changed != nil {
+		close(b.changed)
+		b.changed = nil
+	}
 }

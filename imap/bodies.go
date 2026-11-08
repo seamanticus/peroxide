@@ -50,7 +50,7 @@ func (u *user) downloadBodies(ctx context.Context, retryFailed bool) bool {
 				continue
 			}
 		}
-		if err := limiter.acquire(ctx, m.Size); err != nil {
+		if err := limiter.acquire(ctx); err != nil {
 			break
 		}
 		wg.Go(func() {
@@ -85,7 +85,7 @@ func (u *user) downloadBody(ctx context.Context, limiter *downloadLimiter, m dat
 		if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok {
 			after = apiErr.RetryAfter
 		}
-		limiter.release(m.Size, throttled, after)
+		limiter.release(throttled, after)
 		switch {
 		case err == nil, errors.Is(err, errMessageGone), errors.Is(err, database.ErrNotFound):
 			return true
@@ -95,7 +95,7 @@ func (u *user) downloadBody(ctx context.Context, limiter *downloadLimiter, m dat
 			}
 			return false
 		}
-		if err := limiter.acquire(ctx, m.Size); err != nil {
+		if err := limiter.acquire(ctx); err != nil {
 			return false
 		}
 	}
