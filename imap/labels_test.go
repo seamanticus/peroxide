@@ -148,25 +148,28 @@ func TestCreateMailboxThenEvent(t *testing.T) {
 }
 
 // DELETE deletes folders and labels in Proton and removes their mailboxes at
-// once, with a BYE for clients that have them selected; system mailboxes, the
-// placeholders and a mailbox there isn't make no request.
+// once, a folder's subfolders with it, with a BYE for each, for the clients
+// that have it selected; system mailboxes, the placeholders and a mailbox
+// there isn't make no request.
 // evidence: witnesses
 func TestDeleteMailbox(t *testing.T) {
 	for _, tc := range []struct {
 		name, mailbox string
 		wantErrIn     string
 		wantRequests  []string
-		wantBye       bool
+		wantByes      []string // also the mailboxes gone
 	}{
-		{"folder", "Folders/Work/Old", "", []string{"DELETE /core/v4/labels/o"}, true},
-		{"label", "Labels/Todo", "", []string{"DELETE /core/v4/labels/l"}, true},
-		{"INBOX", "INBOX", "peroxide's own", nil, false},
-		{"placeholder", "Folders", "peroxide's own", nil, false},
-		{"missing", "Folders/Nope", imapbackend.ErrNoSuchMailbox.Error(), nil, false},
+		{"folder", "Folders/Work/Old", "", []string{"DELETE /core/v4/labels/o"}, []string{"Folders/Work/Old"}},
+		// Proton deletes the folders inside too; their events come later.
+		{"folder with a subfolder", "Folders/Work", "", []string{"DELETE /core/v4/labels/f"}, []string{"Folders/Work", "Folders/Work/Old"}},
+		{"label", "Labels/Todo", "", []string{"DELETE /core/v4/labels/l"}, []string{"Labels/Todo"}},
+		{"INBOX", "INBOX", "peroxide's own", nil, nil},
+		{"placeholder", "Folders", "peroxide's own", nil, nil},
+		{"missing", "Folders/Nope", imapbackend.ErrNoSuchMailbox.Error(), nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			u, api, sent := newLabelsTestUser(t)
-			before := u.getMailbox(tc.mailbox)
+			before := mailboxNameSet(u)
 			err := u.DeleteMailbox(tc.mailbox)
 			if tc.wantErrIn != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrIn) {
@@ -178,12 +181,14 @@ func TestDeleteMailbox(t *testing.T) {
 			if got := api.madeRequests(); !slices.Equal(got, tc.wantRequests) {
 				t.Errorf("made requests %q, want %q", got, tc.wantRequests)
 			}
-			after := u.getMailbox(tc.mailbox)
-			if tc.wantBye && after != nil {
-				t.Errorf("getMailbox(%q) = %v after DELETE, want none", tc.mailbox, after)
+			var gone []string
+			for _, name := range before {
+				if u.getMailbox(name) == nil {
+					gone = append(gone, name)
+				}
 			}
-			if !tc.wantBye && after != before {
-				t.Errorf("getMailbox(%q) = %v after a refused DELETE, was %v", tc.mailbox, after, before)
+			if !slices.Equal(gone, tc.wantByes) {
+				t.Errorf("mailboxes gone %q, want %q", gone, tc.wantByes)
 			}
 			var byes []string
 			for _, up := range sent() {
@@ -191,12 +196,8 @@ func TestDeleteMailbox(t *testing.T) {
 					byes = append(byes, s.Mailbox())
 				}
 			}
-			var wantByes []string
-			if tc.wantBye {
-				wantByes = []string{tc.mailbox}
-			}
-			if !slices.Equal(byes, wantByes) {
-				t.Errorf("BYE sent for %q, want %q", byes, wantByes)
+			if !slices.Equal(byes, tc.wantByes) {
+				t.Errorf("BYE sent for %q, want %q", byes, tc.wantByes)
 			}
 		})
 	}

@@ -1194,33 +1194,61 @@ func (u *user) checkFolderNames() {
 	}
 }
 
-// deleteLabel removes the folder or label and returns a BYE for the clients
-// that have it selected, as gluon sends ("Mailbox was deleted"): their next
-// command would find no mailbox. go-imap sends an update naming a mailbox to
-// those connections only. aerc's client closes the connection on a BYE and
-// reconnects, which lists the mailboxes again.
+// deleteLabel removes the folder or label, and the folders inside a folder:
+// Proton deletes those too, but sends their events later (seen 6 s after,
+// 2026-11-09), and until then they would show at the top of Folders. It
+// returns a BYE for the clients that have one of them selected, as gluon
+// sends ("Mailbox was deleted"): their next command would find no mailbox.
+// go-imap sends an update naming a mailbox to those connections only. aerc's
+// client closes the connection on a BYE and reconnects, which lists the
+// mailboxes again. The later events find nothing to delete.
 func (u *user) deleteLabel(labelID string) []imapbackend.Update {
 	u.Lock()
-	mbox, ok := u.mailboxes[labelID]
-	delete(u.mailboxes, labelID)
-	if ok {
+	var gone []*mailbox
+	seen := make(map[string]bool)
+	queue := []string{labelID}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		mbox, ok := u.mailboxes[id]
+		if !ok || seen[id] {
+			continue
+		}
+		seen[id] = true
+		gone = append(gone, mbox)
+		if mbox.kind == kindFolder {
+			for _, childID := range slices.Sorted(maps.Keys(u.mailboxes)) {
+				if child := u.mailboxes[childID]; child.kind == kindFolder && child.parentID == id {
+					queue = append(queue, childID)
+				}
+			}
+		}
+	}
+	kinds := make([]mailboxKind, len(gone))
+	names := make([]string, len(gone))
+	for i, mbox := range gone {
+		// Names and kinds before nameMailboxes, which no longer sees them.
+		kinds[i], names[i] = mbox.kind, mbox.Name()
+		delete(u.mailboxes, mbox.label)
+	}
+	if len(gone) > 0 {
 		u.nameMailboxes()
 	}
 	u.Unlock()
 
-	if !ok {
-		return nil
+	var ups []imapbackend.Update
+	for i, mbox := range gone {
+		log.Printf("%v %v %q deleted", kindNoun(kinds[i]), mbox.label, names[i])
+		if err := mbox.delete(); err != nil {
+			log.Printf("cannot delete mailbox of label %v: %v", mbox.label, err)
+		}
+		ups = append(ups, &imapbackend.StatusUpdate{
+			Update: imapbackend.NewUpdate(u.u.Name, names[i]),
+			StatusResp: &imap.StatusResp{
+				Type: imap.StatusRespBye,
+				Info: fmt.Sprintf("%v was deleted in Proton: please log in again", names[i]),
+			},
+		})
 	}
-	name := mbox.Name()
-	log.Printf("%v %v %q deleted", kindNoun(mbox.kind), labelID, name)
-	if err := mbox.delete(); err != nil {
-		log.Printf("cannot delete mailbox of label %v: %v", labelID, err)
-	}
-	return []imapbackend.Update{&imapbackend.StatusUpdate{
-		Update: imapbackend.NewUpdate(u.u.Name, name),
-		StatusResp: &imap.StatusResp{
-			Type: imap.StatusRespBye,
-			Info: fmt.Sprintf("%v was deleted in Proton: please log in again", name),
-		},
-	}}
+	return ups
 }
