@@ -62,6 +62,7 @@ func (c *Client) AuthInfoWithVerification(username string, hv *HumanVerification
 	if err != nil {
 		return nil, err
 	}
+	withoutSession(req)
 	hv.setRequestHeaders(req)
 
 	var respData AuthInfoResp
@@ -156,6 +157,7 @@ func (c *Client) AuthWithVerification(username, password string, info *AuthInfo,
 	if err != nil {
 		return nil, err
 	}
+	withoutSession(req)
 	hv.setRequestHeaders(req)
 
 	var respData authResp
@@ -168,8 +170,7 @@ func (c *Client) AuthWithVerification(username, password string, info *AuthInfo,
 	}
 
 	auth := respData.auth()
-	c.uid = auth.UID
-	c.accessToken = auth.AccessToken
+	c.setSession(auth.UID, auth.AccessToken)
 	return auth, nil
 }
 
@@ -217,6 +218,7 @@ func (c *Client) AuthRefresh(expiredAuth *Auth) (*Auth, error) {
 	if err != nil {
 		return nil, err
 	}
+	withoutSession(req)
 	req.Header.Set("X-Pm-Uid", expiredAuth.UID)
 
 	var respData authResp
@@ -353,8 +355,7 @@ func unlockKeyRing(keys []*PrivateKey, userKeyRing openpgp.EntityList, keySalts 
 }
 
 func (c *Client) Unlock(auth *Auth, keySalts map[string][]byte, passphrase string) (openpgp.EntityList, error) {
-	c.uid = auth.UID
-	c.accessToken = auth.AccessToken
+	c.setSession(auth.UID, auth.AccessToken)
 
 	u, err := c.GetCurrentUser()
 	if err != nil {
@@ -401,8 +402,7 @@ func (c *Client) Logout() error {
 		return err
 	}
 
-	c.uid = ""
-	c.accessToken = ""
+	c.setSession("", "")
 	c.keyRing = nil
 	return nil
 }

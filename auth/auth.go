@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sync"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"golang.org/x/crypto/bcrypt"
@@ -235,12 +236,32 @@ var ErrUnauthorized = errors.New("Invalid username or password")
 
 type Manager struct {
 	newClient func() *protonmail.Client
-	sessions  map[string]*session
+
+	// mu guards sessions and logins. A login holds its account's entry in
+	// logins, a channel of one, so that two clients logging in at once don't
+	// both spend the stored refresh token: Proton's are single use, and the
+	// second would fail (10013) and log in again, maybe into CAPTCHA.
+	mu       sync.Mutex
+	sessions map[string]*session
+	logins   map[string]chan struct{}
+}
+
+// loginLock returns the lock of username's login: send to take it, receive
+// to give it back.
+func (m *Manager) loginLock(username string) chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l, ok := m.logins[username]
+	if !ok {
+		l = make(chan struct{}, 1)
+		m.logins[username] = l
+	}
+	return l
 }
 
 // Auth logs username in with its bridge password, once per process, and
 // returns its API client, its unlocked keys and the key sealing its stored
-// messages.
+// messages. Logins of one account wait for each other; of others, not.
 func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.EntityList, StoreKey, error) {
 	var secretKey [32]byte
 	passwordBytes, err := base64.StdEncoding.DecodeString(password)
@@ -249,7 +270,13 @@ func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.E
 	}
 	copy(secretKey[:], passwordBytes)
 
+	login := m.loginLock(username)
+	login <- struct{}{}
+	defer func() { <-login }()
+
+	m.mu.Lock()
 	s, ok := m.sessions[username]
+	m.mu.Unlock()
 	if ok {
 		err := bcrypt.CompareHashAndPassword(s.hashedSecretKey, secretKey[:])
 		if err != nil {
@@ -317,7 +344,9 @@ func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.E
 			hashedSecretKey: hashed,
 			storeKey:        storeKey,
 		}
+		m.mu.Lock()
 		m.sessions[username] = s
+		m.mu.Unlock()
 	}
 
 	return s.c, s.privateKeys, s.storeKey, nil
@@ -327,5 +356,6 @@ func NewManager(newClient func() *protonmail.Client) *Manager {
 	return &Manager{
 		newClient: newClient,
 		sessions:  make(map[string]*session),
+		logins:    make(map[string]chan struct{}),
 	}
 }

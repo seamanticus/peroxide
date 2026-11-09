@@ -4,10 +4,13 @@ package protonmail
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
@@ -100,18 +103,83 @@ type Client struct {
 	Debug bool
 
 	HTTPClient *http.Client
-	ReAuth     func() error
+	// ReAuth renews the session after a 401. Concurrent requests that get one
+	// call it once between them (reauth).
+	ReAuth func() error
 
+	// reauthing serializes ReAuth, a channel of one: Proton's refresh tokens
+	// are single use, so two refreshes at once would spend the token twice,
+	// the second failing with 10013 and logging in again, maybe into CAPTCHA.
+	reauthOnce sync.Once
+	reauthing  chan struct{}
+
+	// tokenMu guards uid, accessToken and renewing, read by every request
+	// and written by a login or a refresh while other requests run.
+	tokenMu     sync.Mutex
 	uid         string
 	accessToken string
-	keyRing     openpgp.EntityList
+	// renewing is the access token ReAuth is replacing, "" when none is.
+	renewing string
+	keyRing  openpgp.EntityList
+}
+
+func (c *Client) setSession(uid, accessToken string) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	c.uid, c.accessToken = uid, accessToken
 }
 
 func (c *Client) setRequestAuthorization(req *http.Request) {
-	if c.uid != "" && c.accessToken != "" {
-		req.Header.Set("X-Pm-Uid", c.uid)
-		req.Header.Set("Authorization", "Bearer "+c.accessToken)
+	c.tokenMu.Lock()
+	uid, token := c.uid, c.accessToken
+	c.tokenMu.Unlock()
+	if uid != "" && token != "" {
+		req.Header.Set("X-Pm-Uid", uid)
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
+}
+
+// withoutSession takes the session headers off a login request (/auth/info,
+// /auth, /auth/refresh): they need none, and an expired token on one would
+// send it to reauth, which a login runs inside.
+func withoutSession(req *http.Request) {
+	req.Header.Del("Authorization")
+	req.Header.Del("X-Pm-Uid")
+}
+
+// reauth runs ReAuth after a request sent with the access token stale got
+// 401, unless another request has renewed the session meanwhile: then the
+// request is just sent again with the new token. A request ReAuth itself
+// makes (Unlock's, with the new token) that gets 401 fails instead: waiting
+// for the ReAuth it is part of would never end.
+func (c *Client) reauth(stale string) error {
+	c.tokenMu.Lock()
+	// A request inside ReAuth was sent with the token ReAuth just set; one
+	// sent with an older token waits for the renewal like the others.
+	inside := c.renewing != "" && stale != c.renewing && stale == c.accessToken
+	c.tokenMu.Unlock()
+	if inside {
+		return errors.New("the session renewed just now was refused")
+	}
+
+	c.reauthOnce.Do(func() { c.reauthing = make(chan struct{}, 1) })
+	c.reauthing <- struct{}{}
+	defer func() { <-c.reauthing }()
+	c.tokenMu.Lock()
+	renewed := c.accessToken != "" && c.accessToken != stale
+	if !renewed {
+		c.renewing = stale
+	}
+	c.tokenMu.Unlock()
+	if renewed {
+		return nil
+	}
+	defer func() {
+		c.tokenMu.Lock()
+		c.renewing = ""
+		c.tokenMu.Unlock()
+	}()
+	return c.ReAuth()
 }
 
 func (c *Client) newRequest(method, path string, body io.Reader) (*http.Request, error) {
@@ -168,12 +236,11 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	}
 
 	// Check if access token has expired
-	_, hasAuth := req.Header["Authorization"]
+	bearer, hasAuth := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
 	canRetry := req.Body == nil || req.GetBody != nil
 	if resp.StatusCode == http.StatusUnauthorized && hasAuth && c.ReAuth != nil && canRetry {
 		resp.Body.Close()
-		c.accessToken = ""
-		if err := c.ReAuth(); err != nil {
+		if err := c.reauth(bearer); err != nil {
 			return resp, err
 		}
 		c.setRequestAuthorization(req) // Access token has changed
