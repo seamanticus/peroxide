@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/rand/v2"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -19,7 +21,7 @@ import (
 	"github.com/emersion/go-message"
 )
 
-func newImportKey(t *testing.T) *openpgp.Entity {
+func newImportKey(t testing.TB) *openpgp.Entity {
 	t.Helper()
 	e, err := openpgp.NewEntity("i", "", "i@example.org", &packet.Config{Algorithm: packet.PubKeyAlgoEdDSA})
 	if err != nil {
@@ -328,4 +330,54 @@ func TestImportMessageTooBig(t *testing.T) {
 	if !errors.Is(err, ErrImportSizeExceeded) {
 		t.Errorf("ImportMessage() = %v, want ErrImportSizeExceeded", err)
 	}
+}
+
+// BenchmarkImportMessage20MiB imports a message with a 20 MiB attachment
+// (seeded random bytes, base64 in the literal, as a client APPENDs it) to a
+// server that discards the request. B/op divided by the literal's size, the
+// "copies" metric, is how many times ImportMessage allocates the message:
+// what decoding, encrypting and building the request cost per APPEND.
+func BenchmarkImportMessage20MiB(b *testing.B) {
+	key := newImportKey(b)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			b.Error(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"Code":1001,"Responses":[{"Name":"0","Response":{"Code":1000,"MessageID":"m1"}}]}`)
+	}))
+	defer srv.Close()
+	c := &Client{RootURL: srv.URL}
+
+	att := make([]byte, 20<<20)
+	rand.NewChaCha8([32]byte{1, 2}).Read(att)
+	var lit bytes.Buffer
+	lit.WriteString("From: a@example.org\r\nTo: b@example.org\r\nSubject: big\r\n" +
+		"Content-Type: multipart/mixed; boundary=b1\r\n\r\n" +
+		"--b1\r\nContent-Type: text/plain\r\n\r\nsee attached\r\n" +
+		"--b1\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=big.bin\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n")
+	enc := base64.StdEncoding.EncodeToString(att)
+	for len(enc) > 76 {
+		lit.WriteString(enc[:76] + "\r\n")
+		enc = enc[76:]
+	}
+	lit.WriteString(enc + "\r\n--b1--\r\n")
+	literal := lit.Bytes()
+	meta := &ImportMetadata{AddressID: "a1", LabelIDs: []string{"0"}}
+
+	b.SetBytes(int64(len(literal)))
+	b.ReportAllocs()
+	var total uint64
+	for b.Loop() {
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		if _, err := c.ImportMessage(b.Context(), key, meta, literal); err != nil {
+			b.Fatal(err)
+		}
+		runtime.ReadMemStats(&after)
+		total += after.TotalAlloc - before.TotalAlloc
+	}
+	b.ReportMetric(float64(total)/float64(b.N)/float64(len(literal)), "copies")
 }
