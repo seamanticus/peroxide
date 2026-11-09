@@ -450,13 +450,13 @@ func TestLabelEvents(t *testing.T) {
 		// Proton accepts "/" in a name: it must not read as nesting.
 		{"create subfolder", create(folder("s", "A/B", "f")), with("f", "Folders/Projects", "s", "Folders/Projects/A\u2215B", "l", `Labels/Later\on`), "", nil},
 		// Proton sends no event for the folders in a renamed one.
-		{"rename parent", update(folder("f", "P", "")), with("f", "Folders/P", "s", "Folders/P/A\u2215B", "l", `Labels/Later\on`), "", nil},
+		{"rename parent", update(folder("f", "P", "")), with("f", "Folders/P", "s", "Folders/P/A\u2215B", "l", `Labels/Later\on`), "", []string{"GET /labels"}},
 		{"move subfolder to the top", update(folder("s", "A/B", "")), with("f", "Folders/P", "s", "Folders/A\u2215B", "l", `Labels/Later\on`), "", nil},
-		{"delete subfolder", &protonmail.EventLabel{ID: "s", Action: protonmail.EventDelete}, with("f", "Folders/P", "l", `Labels/Later\on`), "", nil},
+		{"delete subfolder", &protonmail.EventLabel{ID: "s", Action: protonmail.EventDelete}, with("f", "Folders/P", "l", `Labels/Later\on`), "Folders/A\u2215B", nil},
 		{"folder becomes label", update(&protonmail.Label{ID: "f", Name: "Other", Type: protonmail.LabelMessage}), with("f", "Labels/Other", "l", `Labels/Later\on`), "", nil},
 		{"label becomes folder", update(folder("f", "Other", "")), with("f", "Folders/Other", "l", `Labels/Later\on`), "", nil},
-		{"delete label", &protonmail.EventLabel{ID: "l", Action: protonmail.EventDelete}, with("f", "Folders/Other"), "", nil},
-		{"delete folder", &protonmail.EventLabel{ID: "f", Action: protonmail.EventDelete}, with(), "", nil},
+		{"delete label", &protonmail.EventLabel{ID: "l", Action: protonmail.EventDelete}, with("f", "Folders/Other"), `Labels/Later\on`, nil},
+		{"delete folder", &protonmail.EventLabel{ID: "f", Action: protonmail.EventDelete}, with(), "Folders/Other", nil},
 	}
 
 	var created *mailbox

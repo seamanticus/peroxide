@@ -642,10 +642,13 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			u.replayPending = false
 		}
 		refresh := event.Refresh&protonmail.EventRefreshMail != 0
+		checkNames := false
 		if !refresh {
 			// First, so that messages moved into a new folder find its mailbox.
 			for _, eventLabel := range event.Labels {
-				u.handleLabelEvent(eventLabel)
+				ups, check := u.handleLabelEvent(eventLabel)
+				eventUpdates = append(eventUpdates, ups...)
+				checkNames = checkNames || check
 			}
 			for _, eventAddress := range event.Addresses {
 				u.handleAddressEvent(eventAddress)
@@ -688,6 +691,10 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			}
 		}
 		u.unlockSyncAndSend(eventUpdates, deliver)
+		if checkNames {
+			// A request: without syncSem, as refreshChanged.
+			u.checkFolderNames()
+		}
 		if !refresh && failed == 0 {
 			// After the page, without syncSem (refreshChanged).
 			u.refreshChanged(changed, deliver)
@@ -873,8 +880,10 @@ func isSystemLabel(labelID string) bool {
 }
 
 // handleLabelEvent applies a folder or label created, renamed or deleted in
-// Proton, as initMailboxes would. Clients see it on their next LIST.
-func (u *user) handleLabelEvent(event *protonmail.EventLabel) {
+// Proton, as initMailboxes would. Clients see it on their next LIST, but
+// those with a deleted mailbox selected get the BYE it returns. checkNames
+// asks for checkFolderNames: a folder holding others got a new name.
+func (u *user) handleLabelEvent(event *protonmail.EventLabel) (ups []imapbackend.Update, checkNames bool) {
 	// Proton updates system labels after every read or unread change, with
 	// names and Exclusive values that don't match their mailboxes and flags.
 	// Their events have IDs of their own: only Label holds the label ID.
@@ -883,27 +892,28 @@ func (u *user) handleLabelEvent(event *protonmail.EventLabel) {
 		labelID = event.Label.ID
 	}
 	if isSystemLabel(labelID) {
-		return
+		return nil, false
 	}
 
 	switch event.Action {
 	case protonmail.EventCreate:
 		if event.Label == nil {
 			log.Printf("cannot handle create event for label %v: no label", event.ID)
-			return
+			return nil, false
 		}
 		u.createLabel(event.Label)
 	case protonmail.EventUpdate, protonmail.EventUpdateFlags:
 		if event.Label == nil {
 			log.Printf("cannot handle update event for label %v: no label", event.ID)
-			return
+			return nil, false
 		}
-		u.updateLabel(event.Label)
+		return nil, u.updateLabel(event.Label)
 	case protonmail.EventDelete:
-		u.deleteLabel(event.ID)
+		return u.deleteLabel(event.ID), false
 	default:
 		log.Printf("cannot handle event for label %v: unknown action %v", event.ID, event.Action)
 	}
+	return nil, false
 }
 
 func (u *user) createLabel(label *protonmail.Label) {
@@ -945,16 +955,17 @@ func kindNoun(k mailboxKind) string {
 // updateLabel renames the folder or label, moves a folder into another, or
 // makes a folder a label or back (Exclusive changed), in place: the mailbox
 // keeps its messages, UIDs and selections. A folder's new name renames the
-// folders in it, for which Proton sends no event. Updates also follow every
-// read or unread change in a folder, and then change nothing.
-func (u *user) updateLabel(label *protonmail.Label) {
+// folders in it, for which Proton sends no event; it reports whether there
+// are any, for checkFolderNames. Updates also follow every read or unread
+// change in a folder, and then change nothing.
+func (u *user) updateLabel(label *protonmail.Label) (renamedParent bool) {
 	u.Lock()
 	defer u.Unlock()
 
 	mbox, ok := u.mailboxes[label.ID]
 	if !ok {
 		// A contact group, or a label peroxide never saw created.
-		return
+		return false
 	}
 	oldName, oldKind := mbox.Name(), mbox.kind
 	mbox.setLabel(label)
@@ -966,9 +977,45 @@ func (u *user) updateLabel(label *protonmail.Label) {
 	} else if name != oldName {
 		log.Printf("%v %v renamed from %q to %q", kindNoun(mbox.kind), label.ID, oldName, name)
 	}
+	return name != oldName && u.hasChildFolder(label.ID)
 }
 
-func (u *user) deleteLabel(labelID string) {
+// checkFolderNames reads every label again after a folder holding others got
+// a new name, and takes their names and parents: Proton sends no event for
+// the folders inside, and nameMailboxes renamed them from what it knew. A
+// difference means Proton changed one without an event, and is logged.
+func (u *user) checkFolderNames() {
+	labels, err := u.c.ListLabels()
+	if err != nil {
+		log.Printf("cannot check the names of the folders in a renamed one: %v", err)
+		return
+	}
+
+	u.Lock()
+	defer u.Unlock()
+	before := make(map[string]string, len(u.mailboxes))
+	for labelID, mbox := range u.mailboxes {
+		before[labelID] = mbox.Name()
+	}
+	for _, label := range labels {
+		if mbox, ok := u.mailboxes[label.ID]; ok && mbox.kind != kindSystem && label.Type == protonmail.LabelMessage {
+			mbox.setLabel(label)
+		}
+	}
+	u.nameMailboxes()
+	for _, labelID := range slices.Sorted(maps.Keys(before)) {
+		if name := u.mailboxes[labelID].Name(); name != before[labelID] {
+			log.Printf("%v %v renamed from %q to %q without an event", kindNoun(u.mailboxes[labelID].kind), labelID, before[labelID], name)
+		}
+	}
+}
+
+// deleteLabel removes the folder or label and returns a BYE for the clients
+// that have it selected, as gluon sends ("Mailbox was deleted"): their next
+// command would find no mailbox. go-imap sends an update naming a mailbox to
+// those connections only. aerc's client closes the connection on a BYE and
+// reconnects, which lists the mailboxes again.
+func (u *user) deleteLabel(labelID string) []imapbackend.Update {
 	u.Lock()
 	mbox, ok := u.mailboxes[labelID]
 	delete(u.mailboxes, labelID)
@@ -978,10 +1025,18 @@ func (u *user) deleteLabel(labelID string) {
 	u.Unlock()
 
 	if !ok {
-		return
+		return nil
 	}
-	log.Printf("%v %v %q deleted", kindNoun(mbox.kind), labelID, mbox.Name())
+	name := mbox.Name()
+	log.Printf("%v %v %q deleted", kindNoun(mbox.kind), labelID, name)
 	if err := mbox.delete(); err != nil {
 		log.Printf("cannot delete mailbox of label %v: %v", labelID, err)
 	}
+	return []imapbackend.Update{&imapbackend.StatusUpdate{
+		Update: imapbackend.NewUpdate(u.u.Name, name),
+		StatusResp: &imap.StatusResp{
+			Type: imap.StatusRespBye,
+			Info: fmt.Sprintf("%v was deleted in Proton: please log in again", name),
+		},
+	}}
 }
