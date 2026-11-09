@@ -58,10 +58,11 @@ type mailbox struct {
 
 	// For folders and labels, under u's lock: what the mailbox's name is
 	// made of (user.nameMailboxes), the label's own name and the folder it
-	// is in.
+	// is in; and its color, which a RENAME sends back unchanged.
 	kind      mailboxKind
 	labelName string
 	parentID  string
+	color     string
 
 	u  *user
 	db *database.Mailbox

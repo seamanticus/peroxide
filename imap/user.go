@@ -267,9 +267,16 @@ func (u *user) initSession() (lastEventID string, err error) {
 
 // labelNameToMailbox makes a Proton label name one level of an IMAP name. A
 // "/" would read as nesting, so it becomes U+2215 DIVISION SLASH, which looks
-// the same. Proton accepts both "/" and "\" in names; "\" needs nothing.
+// the same; mailboxToLabelName undoes it. Proton accepts both "/" and "\" in
+// names; "\" needs nothing.
 func labelNameToMailbox(name string) string {
 	return strings.ReplaceAll(name, delimiter, "\u2215")
+}
+
+// mailboxToLabelName is the Proton name of one level of an IMAP name given to
+// CREATE or RENAME. A name holding U+2215 itself comes back with "/".
+func mailboxToLabelName(level string) string {
+	return strings.ReplaceAll(level, "\u2215", delimiter)
 }
 
 // setMailboxes makes the mailboxes of the system labels, folders and labels,
@@ -312,6 +319,7 @@ func (u *user) setMailboxes(labels []*protonmail.Label) error {
 func (mbox *mailbox) setLabel(label *protonmail.Label) {
 	mbox.kind = labelKind(label)
 	mbox.labelName = label.Name
+	mbox.color = label.Color
 	mbox.parentID = ""
 	if mbox.kind == kindFolder {
 		// Labels can't be nested in Proton.
@@ -430,16 +438,190 @@ func (u *user) GetMailbox(name string) (imapbackend.Mailbox, error) {
 	return mbox, nil
 }
 
+// parseMailboxName splits a name given to CREATE or RENAME into the kind of
+// mailbox it names and its levels below Folders or Labels, as IMAP levels
+// (mailboxToLabelName gives Proton's names), as proton-bridge's CreateMailbox
+// accepts them: Folders/<path>, Labels/<name>. A trailing delimiter is
+// dropped (RFC 3501 section 6.3.3).
+func parseMailboxName(name string) (mailboxKind, []string, error) {
+	levels := strings.Split(strings.TrimSuffix(name, delimiter), delimiter)
+	var kind mailboxKind
+	switch levels[0] {
+	case kindFolder.prefix():
+		kind = kindFolder
+	case kindLabel.prefix():
+		kind = kindLabel
+	default:
+		return kindSystem, nil, fmt.Errorf("%q: it is not in Folders or Labels: name a folder Folders/<name>, a label Labels/<name>", name)
+	}
+	levels = levels[1:]
+	if len(levels) == 0 {
+		return kindSystem, nil, fmt.Errorf("%q: it names no folder or label inside it", name)
+	}
+	if slices.Contains(levels, "") {
+		return kindSystem, nil, fmt.Errorf("%q: it has an empty level", name)
+	}
+	if kind == kindLabel && len(levels) > 1 {
+		return kindSystem, nil, fmt.Errorf("%q: labels can't be nested in Proton", name)
+	}
+	return kind, levels, nil
+}
+
+// isPlaceholder reports whether name is Folders or Labels.
+func isPlaceholder(name string) bool {
+	return name == kindFolder.prefix() || name == kindLabel.prefix()
+}
+
+// CreateMailbox creates a folder or label in Proton, as proton-bridge does
+// (connector.go, createFolder and createLabel), and adds its mailbox at once
+// from Proton's answer: aerc opens a mailbox it created right away, and the
+// Labels event that follows finds it there (createLabel keeps it). The
+// folders a new folder is in are created first if missing, as gluon creates
+// a mailbox's superiors. CREATE of a mailbox there is, which aerc sends
+// before every APPEND, makes no request.
 func (u *user) CreateMailbox(name string) error {
-	return errNotYetImplemented // TODO
+	if u.getMailbox(name) != nil || isPlaceholder(name) {
+		return imapbackend.ErrMailboxAlreadyExists
+	}
+	kind, levels, err := parseMailboxName(name)
+	if err != nil {
+		return fmt.Errorf("cannot create %w", err)
+	}
+	if kind == kindFolder {
+		_, err := u.ensureFolder(levels)
+		return err
+	}
+	label, err := u.c.CreateLabel(mailboxToLabelName(levels[0]), protonmail.LabelMessage, "")
+	if err != nil {
+		return fmt.Errorf("cannot create label %v: %w", name, err)
+	}
+	u.createLabel(label)
+	return nil
 }
 
+// ensureFolder returns the label ID of the folder Folders/<levels...>,
+// creating it and the folders it is in where missing. levels empty is the
+// top, "".
+func (u *user) ensureFolder(levels []string) (string, error) {
+	parentID := ""
+	for i := range levels {
+		name := kindFolder.prefix() + delimiter + strings.Join(levels[:i+1], delimiter)
+		if mbox := u.getMailbox(name); mbox != nil {
+			parentID = mbox.label
+			continue
+		}
+		label, err := u.c.CreateLabel(mailboxToLabelName(levels[i]), protonmail.LabelFolder, parentID)
+		if err != nil {
+			return "", fmt.Errorf("cannot create folder %v: %w", name, err)
+		}
+		asFolder(label, parentID)
+		u.createLabel(label)
+		parentID = label.ID
+	}
+	return parentID, nil
+}
+
+// asFolder makes Proton's answer to a request for a folder in parentID say
+// so in the form events use: the answer may give Type 3 alone, and no
+// ParentID.
+func asFolder(label *protonmail.Label, parentID string) {
+	label.Exclusive = 1
+	if label.ParentID == "" {
+		label.ParentID = parentID
+	}
+}
+
+// labelOf returns what a RENAME or DELETE of mbox needs, under u's lock.
+func (u *user) labelOf(mbox *mailbox) (kind mailboxKind, color, parentID string) {
+	u.Lock()
+	defer u.Unlock()
+	return mbox.kind, mbox.color, mbox.parentID
+}
+
+// systemMailboxError refuses to change a system mailbox or a placeholder, as
+// proton-bridge refuses (ErrOperationNotAllowed); INBOX can't be deleted in
+// any server (RFC 3501 section 6.3.4).
+func systemMailboxError(verb, name string) error {
+	return fmt.Errorf("cannot %v %v: it is one of peroxide's own mailboxes", verb, name)
+}
+
+// DeleteMailbox deletes a folder or label in Proton (DELETE
+// /core/v4/labels/{id}), as proton-bridge does, and removes its mailbox at
+// once, as the Labels event would: clients that have it selected get BYE.
 func (u *user) DeleteMailbox(name string) error {
-	return errNotYetImplemented // TODO
+	mbox := u.getMailbox(name)
+	if mbox == nil {
+		if isPlaceholder(name) {
+			return systemMailboxError("delete", name)
+		}
+		return imapbackend.ErrNoSuchMailbox
+	}
+	if kind, _, _ := u.labelOf(mbox); kind == kindSystem {
+		return systemMailboxError("delete", name)
+	}
+	if err := u.c.DeleteLabel(mbox.label); err != nil {
+		return fmt.Errorf("cannot delete %v: %w", name, err)
+	}
+	// Its bucket is deleted: not while a page fills it (deleteLabel).
+	u.lockSync()
+	ups := u.deleteLabel(mbox.label)
+	u.unlockSyncAndSend(ups, u.sendUpdates)
+	return nil
 }
 
+// RenameMailbox renames a folder or label in Proton (PUT
+// /core/v4/labels/{id} with its color), as proton-bridge does, and applies the
+// answer at once. A folder may move into another, created if missing; a
+// folder can't become a label or a label a folder, and system mailboxes,
+// INBOX too, can't be renamed (RFC 3501's RENAME of INBOX moves its messages
+// out, which Proton has no way to do).
 func (u *user) RenameMailbox(existingName, newName string) error {
-	return errNotYetImplemented // TODO
+	mbox := u.getMailbox(existingName)
+	if mbox == nil {
+		if isPlaceholder(existingName) {
+			return systemMailboxError("rename", existingName)
+		}
+		return imapbackend.ErrNoSuchMailbox
+	}
+	oldKind, color, oldParentID := u.labelOf(mbox)
+	if oldKind == kindSystem {
+		return systemMailboxError("rename", existingName)
+	}
+	if u.getMailbox(newName) != nil || isPlaceholder(newName) {
+		return imapbackend.ErrMailboxAlreadyExists
+	}
+	kind, levels, err := parseMailboxName(newName)
+	if err != nil {
+		return fmt.Errorf("cannot rename to %w", err)
+	}
+	if kind != oldKind {
+		return fmt.Errorf("cannot rename %v to %v: a folder stays a folder and a label a label", existingName, newName)
+	}
+
+	parentID := ""
+	if kind == kindFolder {
+		if strings.HasPrefix(newName, existingName+delimiter) {
+			return fmt.Errorf("cannot move %v into itself", existingName)
+		}
+		if len(levels) == 1 && oldParentID != "" {
+			// An empty ParentID is left out of the request, as
+			// go-proton-api leaves it, which would keep the folder where it
+			// is: what Proton takes for "no parent" is not known.
+			return fmt.Errorf("cannot move %v to the top of Folders: move it in Proton's web client", existingName)
+		}
+		if parentID, err = u.ensureFolder(levels[:len(levels)-1]); err != nil {
+			return err
+		}
+	}
+	label, err := u.c.UpdateLabel(mbox.label, mailboxToLabelName(levels[len(levels)-1]), color, parentID)
+	if err != nil {
+		return fmt.Errorf("cannot rename %v: %w", existingName, err)
+	}
+	if kind == kindFolder {
+		asFolder(label, parentID)
+	}
+	u.updateLabel(label)
+	return nil
 }
 
 func (u *user) Logout() error {

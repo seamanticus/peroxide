@@ -52,6 +52,9 @@ type fakeAPI struct {
 	actionStatus map[string]int
 	// metadataStatus, if set, fails the metadata request with that status.
 	metadataStatus int
+	// labels, if set, answers requests to /core/v4/labels with a status and
+	// a JSON body; it gets the request's decoded body.
+	labels func(method, path string, body map[string]any) (int, string)
 
 	mu       sync.Mutex
 	requests []string
@@ -94,6 +97,19 @@ func (api *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost && r.URL.Path == "/mail/v4/messages/import" {
 		api.serveImport(w, r)
+		return
+	}
+	if api.labels != nil && strings.HasPrefix(r.URL.Path, "/core/v4/labels") {
+		var body map[string]any
+		if b, _ := io.ReadAll(r.Body); len(b) > 0 {
+			if err := json.Unmarshal(b, &body); err != nil {
+				api.t.Errorf("%v %v body %q: %v", r.Method, r.URL.Path, b, err)
+			}
+		}
+		status, reply := api.labels(r.Method, r.URL.Path, body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		io.WriteString(w, reply)
 		return
 	}
 	if r.Method != http.MethodPut || !strings.HasPrefix(r.URL.Path, "/messages/") {
