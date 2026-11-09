@@ -1,16 +1,23 @@
-# Commands and flags
+# Commands and options
 
-    peroxide [global options...] <command> [command options...] [arguments...]
+    peroxide [-debug] <command> [options] [arguments]
+    peroxide -V
 
-Global options come **before** the command: `peroxide -debug serve`,
-not `peroxide serve -debug`. They are parsed by Go's `flag` package:
-`-flag value` or `-flag=value` for options taking a value, `-flag` for
-on/off ones, and `--flag` works as `-flag`. `peroxide help`,
-or any unknown command, prints the usage text; an unknown command then
-exits with status 1.
+A command's options come **after** the command: `peroxide serve
+-disable-smtp`. `-debug`, `-V`, `-api-endpoint` and `-app-version` are
+accepted before the command or after it. Options are parsed by Go's
+`flag` package: `-flag value` or `-flag=value` for options taking a
+value, `-flag` for on/off ones, and `--flag` works as `-flag`.
 
-Every error ends the program with a message on stderr (stdout with
-`-debug`) and status 1.
+Nothing is ignored. A command's option written before the command
+(`peroxide -disable-smtp serve`) is refused with the line to type
+instead; so are an unknown option, an unknown command and arguments a
+command doesn't take. These exit with status 2. `peroxide help`,
+`peroxide`, or `-h` after any command, print the help: one page, every
+command and option.
+
+Every other error ends the program with a message on stderr (stdout
+with `-debug`) and status 1.
 
 ## Commands
 
@@ -114,25 +121,48 @@ While `serve` runs, `sendmail` hands the message to `serve`'s SMTP
 server (`-smtp-host`, `-smtp-port`), logged in with the username and
 bridge password, so that the account keeps the one session `serve`
 holds; the envelope sender is the message's From. Give it the same
-`-smtp-*` and `-tls-*` options as `serve`: with TLS it trusts only the
-certificate `-tls-cert` names, byte for byte, so a self-signed one
+`-smtp-host`, `-smtp-port` and `-tls-cert` as `serve`, after the
+command (`peroxide sendmail -tls-cert cert.pem <username> -- ...`):
+with TLS it trusts only the certificate that file holds, byte for byte,
+so a self-signed one
 works. If `serve` runs with `-disable-smtp` or `-tls-client-ca`,
 `sendmail` fails rather than log in itself. With no `serve` running,
 it sends on its own, as `serve` would.
 
-## Global options
+## Options
 
-| Option | Default | Meaning |
-|---|---|---|
-| `-debug` | off | Log API traffic, IMAP and SMTP sessions to stdout. Read [debug.md](debug.md) first |
-| `-imap-host`, `-imap-port` | `127.0.0.1`, `1143` | Where the IMAP server listens |
-| `-smtp-host`, `-smtp-port` | `127.0.0.1`, `1025` | Where the SMTP server listens |
-| `-disable-imap`, `-disable-smtp` | off | For `serve`: don't start that server |
-| `-show-all-mail` | on | `=false` leaves All Mail out of IMAP LIST, as proton-bridge's "Show All Mail" off; see [imap/mailboxes.md](imap/mailboxes.md) |
-| `-tls-cert`, `-tls-key` | none | Serve IMAP and SMTP over TLS with this certificate |
-| `-tls-client-ca` | none | With TLS: require a client certificate signed by this CA |
-| `-api-endpoint` | `https://mail.proton.me/api` | Proton's API base URL |
-| `-app-version` | `Other` | The `x-pm-appversion` peroxide reports to Proton |
+| Option | Commands | Default | Meaning |
+|---|---|---|---|
+| `-debug` | all | off | Log API traffic, IMAP and SMTP sessions to stdout. Read [debug.md](debug.md) first |
+| `-V` | all | | Print the commit the binary was built from, and exit (below) |
+| `-imap-host`, `-imap-port` | `serve` | `127.0.0.1`, `1143` | Where the IMAP server listens |
+| `-smtp-host`, `-smtp-port` | `serve`, `sendmail` | `127.0.0.1`, `1025` | Where the SMTP server listens; for `sendmail`, where `serve`'s is |
+| `-disable-imap`, `-disable-smtp` | `serve` | off | Don't start that server |
+| `-show-all-mail` | `serve` | on | `=false` leaves All Mail out of IMAP LIST, as proton-bridge's "Show All Mail" off; see [imap/mailboxes.md](imap/mailboxes.md) |
+| `-tls-cert`, `-tls-key` | `serve` (`sendmail`: `-tls-cert`) | none | Serve IMAP and SMTP over TLS with this certificate; `sendmail` trusts only that certificate |
+| `-tls-client-ca` | `serve` | none | With TLS: require a client certificate signed by this CA |
+| `-api-endpoint` | all | `https://mail.proton.me/api` | Proton's API base URL, for testing |
+| `-app-version` | all | `Other` | The `x-pm-appversion` peroxide reports to Proton, for testing |
+
+The options of `auth` and `download-mailbox` are under those commands.
+
+### `-V`
+
+Prints where the binary comes from, from what Go records in a binary
+built in a git checkout (no build flags needed):
+
+    this peroxide binary was compiled from:
+
+    commit   : cab57103b0b089db065f1b29d2420f6b13ae14bf
+    date     : 2026-11-09 20:13 UTC
+    modified : no (HEAD)
+    go       : go1.27.3 linux/amd64
+    url      : <https://github.com/seamanticus/peroxide/commit/cab57103...>
+
+`date` is the commit's, not the build's. `modified : yes (dirty)` means
+the tree had uncommitted changes when it was built, which the commit
+doesn't hold, and says so in a warning. A binary built outside a
+checkout (`go install ...@version`) shows its module version instead.
 
 ### Listening and TLS
 
