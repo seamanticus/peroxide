@@ -100,32 +100,36 @@ A MOVE into the mailbox itself does nothing.
 ## EXPUNGE
 
 EXPUNGE removes the messages marked `\Deleted` **from this mailbox**.
-It does not delete them from your account, except from Trash or Drafts:
+Messages are deleted for good **only from Trash, Spam and Drafts**, the
+mailboxes Proton's web client deletes for good from:
 
-- From a folder, the messages are unlabelled from it
-  (`PUT /messages/unlabel`), and left in All Mail (and any labels they
-  have). Proton puts no folder in their place.
-- **From Trash or Drafts**, peroxide first looks up what else holds
-  each message (one metadata request per 150), and **deletes for good**
-  (`PUT /messages/delete`) those no other mailbox or label shows. Only
-  the others, still in another folder or with a label, are then
-  unlabelled from Trash. A message whose delete fails is left exactly
-  as it was: in Trash, still marked `\Deleted`. EXPUNGE then answers NO
-  for it, and the next EXPUNGE tries again. If the lookup fails, nothing
-  is expunged and the answer is NO.
+| Expunged from | What happens |
+|---|---|
+| Trash, Spam, Drafts | deleted for good, unless another mailbox or label holds them (then only removed from here) |
+| any other folder: INBOX, Sent, Archive, `Folders/...` | **moved to Trash**, answered `OK [ALERT] N messages moved to Trash: messages are deleted for good only from Trash, Spam or Drafts` |
+| a label (`Labels/...`) or Starred | the label is removed; the message stays in its folder |
+| All Mail | refused |
+
+- **From a folder**, the move is the same as `MOVE` to Trash: label
+  Trash, then unlabel the folder (two requests). A message the move
+  fails for stays in the folder, still marked `\Deleted`, for the next
+  EXPUNGE. Proton unstars messages filed in Trash. So aerc's `:delete`
+  (mark `\Deleted`, expunge in place) does what the web client's
+  Delete does, and a second `:delete` in Trash removes the message for
+  good.
+- **From Trash, Spam or Drafts**, peroxide first looks up what else
+  holds each message (one metadata request per 150), and **deletes for
+  good** (`PUT /messages/delete`) those no other mailbox or label
+  shows. Only the others are then unlabelled from here. A message whose
+  delete fails is left exactly as it was, still marked `\Deleted`:
+  EXPUNGE answers NO for it, and the next EXPUNGE tries again. If the
+  lookup fails, nothing is expunged and the answer is NO.
 - **In All Mail, EXPUNGE is refused**: nothing can leave All Mail
   except by being deleted, and deleting everything marked there is
-  rarely what a client means. Move messages to Trash and expunge there.
+  rarely what a client means.
 
-Deleting before unlabelling means a message expunged from Trash is
-either gone or still in Trash: never left in All Mail alone, where a
-client that doesn't show All Mail couldn't reach it, and never
-announced as expunged when it wasn't.
-
-So the usual "delete" of a client (move to Trash, then expunge Trash
-when emptying it) behaves as in Proton's web app. A client that
-"deletes" by marking `\Deleted` and expunging in place (mutt with
-`$trash` unset, some IMAP scripts) archives to All Mail instead.
+No message is ever left in All Mail alone by an EXPUNGE, where a
+client that doesn't show All Mail couldn't reach it.
 
 `CLOSE` expunges too (RFC 3501), with the same effect. go-imap runs it
 even in a mailbox opened with EXAMINE, which RFC 3501 forbids: don't
@@ -307,10 +311,13 @@ created, and drops what `:rmdir` deleted, only after it reconnects.
   one unlabels (bridge then also expunges the message from the source
   mailbox in Gluon).
 - **EXPUNGE**: bridge unlabels first, then deletes for good, from Trash
-  and Drafts, what no other shown label holds; All Mail refuses.
-  peroxide decides the same, in the other order, so that a failed
-  delete leaves the message in Trash rather than only in All Mail,
-  which bridge can hide ("Show All Mail" off).
+  and Drafts, what no other shown label holds; from any other folder it
+  only unlabels, leaving the message in All Mail alone; All Mail
+  refuses. peroxide deletes from Spam too, as the web client does,
+  moves to Trash from other folders, as the web client's Delete does,
+  and deletes before unlabelling, so that a failed delete leaves the
+  message where it was rather than only in All Mail, which bridge can
+  hide ("Show All Mail" off).
 - **APPEND** (`Connector.CreateMessage`) imports the message into any
   mailbox but All Mail and Scheduled, through go-proton-api's
   `ImportMessages`, with the labels, flags, address and encryption
