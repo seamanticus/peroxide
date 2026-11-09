@@ -28,7 +28,11 @@ const (
 )
 
 type Label struct {
-	ID        string
+	ID string
+	// The folder this one is in, "" at the top. Path is not decoded: it
+	// escapes a "/" in a name as "\/" but leaves "\" alone, so "A\" holding
+	// "B" and a folder named "A/B" have the same Path.
+	ParentID  string
 	Name      string
 	Color     string
 	Display   int

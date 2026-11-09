@@ -199,7 +199,6 @@ func TestSelectPrioritizes(t *testing.T) {
 	mbox, _ := newTestMailbox(t, nil)
 	u := mbox.u
 	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: mbox}
-	u.flags = map[string]string{}
 	for i, name := range []string{"SELECT", "EXAMINE"} {
 		cmd := Extension{}.Command(name)()
 		sel, ok := cmd.(*selectCommand)

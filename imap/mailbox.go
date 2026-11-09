@@ -20,9 +20,48 @@ import (
 
 const delimiter = "/"
 
+// mailboxKind is what a mailbox shows of Proton. The zero value is a system
+// mailbox, named and attributed by systemMailboxes.
+type mailboxKind uint8
+
+const (
+	kindSystem mailboxKind = iota
+	kindFolder             // Folders/<path>: a message is in one folder
+	kindLabel              // Labels/<name>: a message has any number of labels
+)
+
+// prefix is the parent mailbox of the folders or of the labels, as
+// proton-bridge names them (imap_updates.go, GetMailboxName).
+func (k mailboxKind) prefix() string {
+	switch k {
+	case kindFolder:
+		return "Folders"
+	case kindLabel:
+		return "Labels"
+	case kindSystem:
+		panic("invariant: system mailboxes have no prefix")
+	}
+	panic("invariant: unknown mailbox kind")
+}
+
+// labelKind is the kind of mailbox that shows label, a folder or a label.
+func labelKind(label *protonmail.Label) mailboxKind {
+	if label.Exclusive == 1 {
+		return kindFolder
+	}
+	return kindLabel
+}
+
 type mailbox struct {
 	label string
 	attrs []string
+
+	// For folders and labels, under u's lock: what the mailbox's name is
+	// made of (user.nameMailboxes), the label's own name and the folder it
+	// is in.
+	kind      mailboxKind
+	labelName string
+	parentID  string
 
 	u  *user
 	db *database.Mailbox
@@ -67,25 +106,77 @@ func (mbox *mailbox) setName(name string) {
 	mbox.name = name
 }
 
+// Info gives folders \HasChildren or \HasNoChildren (RFC 3348, go-imap
+// announces CHILDREN). Labels and system mailboxes can't hold others in
+// Proton: \Noinferiors.
 func (mbox *mailbox) Info() (*imap.MailboxInfo, error) {
+	attrs := []string{imap.NoInferiorsAttr}
+	mbox.u.Lock()
+	if mbox.kind == kindFolder {
+		attrs = []string{childrenAttr(mbox.u.hasChildFolder(mbox.label))}
+	}
+	mbox.u.Unlock()
 	return &imap.MailboxInfo{
-		Attributes: append([]string{imap.NoInferiorsAttr}, mbox.attrs...),
+		Attributes: append(attrs, mbox.attrs...),
 		Delimiter:  delimiter,
 		Name:       mbox.Name(),
 	}, nil
 }
 
-func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
-	mbox.u.Lock()
-	flags := []string{imap.SeenFlag, imap.DeletedFlag}
-	permFlags := []string{imap.SeenFlag, imap.DeletedFlag}
-	for _, label := range slices.Sorted(maps.Keys(mbox.u.flags)) {
-		// By label ID, not map order: FLAGS and PERMANENTFLAGS read the same
-		// on every SELECT.
-		flags = append(flags, mbox.u.flags[label])
-		permFlags = append(permFlags, mbox.u.flags[label])
+func childrenAttr(has bool) string {
+	if has {
+		return imap.HasChildrenAttr
 	}
-	mbox.u.Unlock()
+	return imap.HasNoChildrenAttr
+}
+
+// placeholder is Folders or Labels, the parent of the folders or of the
+// labels, listed as proton-bridge lists them (syncLabels) so that clients
+// show the hierarchy. It holds no messages and can't be selected: GetMailbox
+// never returns it, and LIST is the only command that sees it.
+type placeholder struct {
+	kind     mailboxKind
+	children bool
+}
+
+var _ imapbackend.Mailbox = placeholder{} // proof: compile-time
+
+var errPlaceholder = errors.New("this mailbox holds no messages: open one inside it")
+
+func (p placeholder) Name() string { return p.kind.prefix() }
+
+func (p placeholder) Info() (*imap.MailboxInfo, error) {
+	return &imap.MailboxInfo{
+		Attributes: []string{imap.NoSelectAttr, childrenAttr(p.children)},
+		Delimiter:  delimiter,
+		Name:       p.Name(),
+	}, nil
+}
+
+func (placeholder) Status([]imap.StatusItem) (*imap.MailboxStatus, error) {
+	return nil, errPlaceholder
+}
+func (placeholder) SetSubscribed(bool) error { return errPlaceholder }
+func (placeholder) Check() error             { return errPlaceholder }
+func (placeholder) ListMessages(bool, *imap.SeqSet, []imap.FetchItem, chan<- *imap.Message) error {
+	return errPlaceholder
+}
+func (placeholder) SearchMessages(bool, *imap.SearchCriteria) ([]uint32, error) {
+	return nil, errPlaceholder
+}
+func (placeholder) CreateMessage([]string, time.Time, imap.Literal) error { return errPlaceholder }
+func (placeholder) UpdateMessagesFlags(bool, *imap.SeqSet, imap.FlagsOp, []string) error {
+	return errPlaceholder
+}
+func (placeholder) CopyMessages(bool, *imap.SeqSet, string) error { return errPlaceholder }
+func (placeholder) Expunge() error                                { return errPlaceholder }
+
+func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
+	flags := []string{imap.SeenFlag, imap.DeletedFlag}
+	for _, data := range systemFlags {
+		flags = append(flags, data.name)
+	}
+	permFlags := slices.Clone(flags)
 
 	status := imap.NewMailboxStatus(mbox.Name(), items)
 	status.Flags = flags
@@ -154,14 +245,11 @@ func (mbox *mailbox) fetchFlags(msg *protonmail.Message) []string {
 	}
 	mbox.Unlock()
 
-	mbox.u.Lock()
 	for _, label := range msg.LabelIDs {
-		if flag, ok := mbox.u.flags[label]; ok {
+		if flag, ok := systemFlag(label); ok {
 			flags = append(flags, flag)
 		}
 	}
-	mbox.u.Unlock()
-
 	return flags
 }
 
@@ -562,11 +650,8 @@ func (mbox *mailbox) applyFlag(apiIDs []string, flag string, add bool) error {
 	case imap.DraftFlag:
 		// Drafts are a mailbox in Proton, not a label a message can be given.
 		return nil
-	default:
-		label := mbox.u.getFlag(flag)
-		if label == "" {
-			return nil
-		}
+	case imap.FlaggedFlag:
+		label := protonmail.LabelStarred
 		var failed map[string]error
 		var err error
 		if add {
@@ -578,6 +663,9 @@ func (mbox *mailbox) applyFlag(apiIDs []string, flag string, add bool) error {
 			return err
 		}
 		return mbox.u.applyAction(apiIDs, failed, labelUpdate(label, add))
+	default:
+		// A keyword: Proton has none. Labels are mailboxes (Labels/<name>).
+		return nil
 	}
 }
 
@@ -662,8 +750,10 @@ func (mbox *mailbox) CopyMessages(uid bool, seqSet *imap.SeqSet, destName string
 
 // MoveMessages moves the messages to dest as proton-bridge does by default
 // (connector.go, moveMessagesWithUnlabelCallOnFolders): label with dest, then
-// unlabel from mbox. Labelling into a folder already takes a message out of
-// the folder it was in, and bridge once dropped the unlabel for that
+// unlabel from mbox, unless dest is a label and mbox is not: adding a label
+// takes a message out of nothing, so it stays in its folder (bridge's
+// shouldExpungeOldLocation). Labelling into a folder already takes a message
+// out of the folder it was in, and bridge once dropped the unlabel for that
 // (BRIDGE-451), but put it back after clients broke (BRIDGE-522); a message
 // the unlabel finds already gone answers "does not exist", which counts as
 // done. Each message must end in one of the two, and should not end in both,
@@ -695,7 +785,8 @@ func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string
 	}
 	labelErr := mbox.u.applyAction(apiIDs, failed, labelUpdate(dest.label, true))
 	labelled := succeeded(apiIDs, failed)
-	if len(labelled) == 0 {
+	if len(labelled) == 0 || (dest.isLabel() && !mbox.isLabel()) {
+		// Adding a label takes the message out of nothing.
 		return labelErr
 	}
 
@@ -749,6 +840,14 @@ func moveAllowed(from, to string) error {
 		return errors.New("cannot move between INBOX and Sent")
 	}
 	return nil
+}
+
+// isLabel reports whether mbox is a label (Labels/<name>), whose messages are
+// kept in folders.
+func (mbox *mailbox) isLabel() bool {
+	mbox.u.Lock()
+	defer mbox.u.Unlock()
+	return mbox.kind == kindLabel
 }
 
 // succeeded returns the messages of apiIDs that an action's failures don't
@@ -936,11 +1035,13 @@ func (u *user) keepsMessage(msg *protonmail.Message, from string, listed *map[st
 
 // showsLabel reports whether labelID is a mailbox or a flag of the account.
 func (u *user) showsLabel(labelID string) bool {
+	if _, isFlag := systemFlag(labelID); isFlag {
+		return true
+	}
 	u.Lock()
 	defer u.Unlock()
 	_, isMailbox := u.mailboxes[labelID]
-	_, isFlag := u.flags[labelID]
-	return isMailbox || isFlag
+	return isMailbox
 }
 
 func (mbox *mailbox) Poll() error {

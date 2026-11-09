@@ -376,6 +376,7 @@ func TestListShowAllMail(t *testing.T) {
 			u.backend = &backend{showAllMail: show}
 			allMail := &mailbox{name: "All Mail", label: protonmail.LabelAllMail, u: u}
 			u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox, protonmail.LabelAllMail: allMail}
+			u.nameMailboxes()
 
 			list, err := u.ListMailboxes(false)
 			if err != nil {
@@ -383,7 +384,9 @@ func TestListShowAllMail(t *testing.T) {
 			}
 			var names []string
 			for _, mbox := range list {
-				names = append(names, mbox.Name())
+				if _, ok := mbox.(placeholder); !ok {
+					names = append(names, mbox.Name())
+				}
 			}
 			slices.Sort(names)
 			want := []string{imap.InboxName}
@@ -396,6 +399,85 @@ func TestListShowAllMail(t *testing.T) {
 
 			if got, err := u.GetMailbox("All Mail"); err != nil || got != allMail {
 				t.Errorf("GetMailbox(All Mail) = %v, %v; want the All Mail mailbox", got, err)
+			}
+		})
+	}
+}
+
+// LIST lists system mailboxes in systemMailboxes' order, then Folders and the
+// folders by name, then Labels and the labels by name, the same whatever order
+// Proton lists the labels in; folders nest under their parents, and a "/" in a
+// name doesn't read as nesting. Every listed name opens its mailbox.
+// evidence: witnesses
+func TestListOrderAndHierarchy(t *testing.T) {
+	labels := []*protonmail.Label{
+		{ID: "z", Name: "FOLDER_TEST", Type: protonmail.LabelMessage, Exclusive: 1},
+		{ID: "y", Name: "SUB", ParentID: "z", Type: protonmail.LabelMessage, Exclusive: 1},
+		{ID: "x", Name: "A/B", Type: protonmail.LabelMessage, Exclusive: 1},
+		{ID: "w", Name: `A\`, Type: protonmail.LabelMessage, Exclusive: 1},
+		{ID: "v", Name: "B", ParentID: "w", Type: protonmail.LabelMessage, Exclusive: 1},
+		{ID: "u", Name: "WORK", Type: protonmail.LabelMessage},
+		{ID: "t", Name: "GITHUB", Type: protonmail.LabelMessage},
+		{ID: "s", Name: "Inbox", Type: protonmail.LabelMessage, Exclusive: 1},
+		{ID: "c", Name: "Friends", Type: protonmail.LabelContact},
+	}
+	want := []string{
+		`INBOX (\Noinferiors)`,
+		`Drafts (\Noinferiors \Drafts)`,
+		`Sent (\Noinferiors \Sent)`,
+		`Starred (\Noinferiors \Flagged)`,
+		`Archive (\Noinferiors \Archive)`,
+		`Spam (\Noinferiors \Junk)`,
+		`Trash (\Noinferiors \Trash)`,
+		`All Mail (\Noinferiors \All)`,
+		`Folders (\Noselect \HasChildren)`,
+		`Folders/A\ (\HasChildren)`,
+		`Folders/A\/B (\HasNoChildren)`,
+		"Folders/A\u2215B (\\HasNoChildren)",
+		`Folders/FOLDER_TEST (\HasChildren)`,
+		`Folders/FOLDER_TEST/SUB (\HasNoChildren)`,
+		`Folders/Inbox (\HasNoChildren)`,
+		`Labels (\Noselect \HasChildren)`,
+		`Labels/GITHUB (\Noinferiors)`,
+		`Labels/WORK (\Noinferiors)`,
+	}
+
+	for _, order := range []string{"as listed", "reversed"} {
+		t.Run(order, func(t *testing.T) {
+			inbox, _ := newTestMailbox(t, nil)
+			u := inbox.u
+			u.backend = &backend{showAllMail: true}
+			ls := slices.Clone(labels)
+			if order == "reversed" {
+				slices.Reverse(ls)
+			}
+			if err := u.setMailboxes(ls); err != nil {
+				t.Fatalf("setMailboxes() = %v", err)
+			}
+
+			list, err := u.ListMailboxes(false)
+			if err != nil {
+				t.Fatalf("ListMailboxes() = %v", err)
+			}
+			var got []string
+			for _, mbox := range list {
+				info, err := mbox.Info()
+				if err != nil {
+					t.Fatalf("%v: Info() = %v", mbox.Name(), err)
+				}
+				if info.Name != mbox.Name() || info.Delimiter != delimiter {
+					t.Errorf("Info() = %+v for %q", info, mbox.Name())
+				}
+				got = append(got, fmt.Sprintf("%v (%v)", info.Name, strings.Join(info.Attributes, " ")))
+
+				_, isPlaceholder := mbox.(placeholder)
+				opened, err := u.GetMailbox(info.Name)
+				if isPlaceholder != (err != nil) || (!isPlaceholder && opened != mbox) {
+					t.Errorf("GetMailbox(%q) = %v, %v", info.Name, opened, err)
+				}
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("LIST =\n%v\nwant\n%v", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
 		})
 	}
@@ -451,12 +533,13 @@ func TestStoreDeletedSendsFlags(t *testing.T) {
 
 // STORE FLAGS replaces the flags (RFC 3501 section 6.4.6): flags it doesn't
 // list are removed, from the messages holding them only; flags it lists are
-// added; flags with no Proton meaning are left alone.
+// added; flags with no Proton meaning are left alone, a keyword named like a
+// label too: labels are mailboxes.
 // evidence: witnesses
 func TestStoreSetFlagsReplaces(t *testing.T) {
 	const work = "label-work"
 	msgs := []*protonmail.Message{
-		{ID: "a", Unread: 0, LabelIDs: []string{protonmail.LabelInbox, work}},
+		{ID: "a", Unread: 0, LabelIDs: []string{protonmail.LabelInbox, protonmail.LabelStarred, work}},
 		{ID: "b", Unread: 1, LabelIDs: []string{protonmail.LabelInbox}},
 	}
 	tests := []struct {
@@ -468,10 +551,12 @@ func TestStoreSetFlagsReplaces(t *testing.T) {
 		{"empty clears", nil,
 			[]string{"PUT /messages/unlabel", "PUT /messages/unread"},
 			[][]string{nil, nil}},
-		// go-imap lowercases a label flag: it must still count as listed.
-		{"keeps listed label", []string{"work"},
+		{"keeps listed flag", []string{imap.FlaggedFlag},
 			[]string{"PUT /messages/label", "PUT /messages/unread"},
-			[][]string{{"Work"}, {"Work"}}},
+			[][]string{{imap.FlaggedFlag}, {imap.FlaggedFlag}}},
+		{"keyword named like a label", []string{"work"},
+			[]string{"PUT /messages/unlabel", "PUT /messages/unread"},
+			[][]string{nil, nil}},
 		{"sets seen and deleted", []string{imap.SeenFlag, imap.DeletedFlag},
 			[]string{"PUT /messages/read", "PUT /messages/unlabel"},
 			[][]string{{imap.SeenFlag, imap.DeletedFlag}, {imap.SeenFlag, imap.DeletedFlag}}},
@@ -483,7 +568,7 @@ func TestStoreSetFlagsReplaces(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			api := &fakeAPI{t: t}
 			mbox, _ := newActionTestMailbox(t, api, msgs)
-			mbox.u.flags = map[string]string{work: "Work"}
+			addTestMailbox(t, mbox.u, "Labels/Work", work, nil)
 			mbox.deleted["b"] = struct{}{}
 
 			if err := mbox.UpdateMessagesFlags(true, uidSet(1, 2), imap.SetFlags, tt.flags); err != nil {
@@ -555,6 +640,54 @@ func TestMoveAppliedWithoutEvent(t *testing.T) {
 	checkStatus(t, archive, 1, 1)
 	if got, want := api.madeRequests(), []string{"PUT /messages/label", "PUT /messages/unlabel"}; !slices.Equal(got, want) {
 		t.Errorf("made requests %q, want %q", got, want)
+	}
+}
+
+// MOVE into a label only labels: the message stays where it was, as
+// proton-bridge's shouldExpungeOldLocation decides (aerc adds a label with
+// UID MOVE into Labels/<name>). Out of a label it unlabels, into a label too.
+// evidence: witnesses
+func TestMoveLabels(t *testing.T) {
+	tests := []struct {
+		name, from, to string
+		wantRequests   []string
+		wantLeft       uint32 // messages left in from
+	}{
+		{"folder to label", "INBOX", "Labels/Work", []string{"PUT /messages/label"}, 1},
+		{"label to folder", "Labels/Work", "Archive", []string{"PUT /messages/label", "PUT /messages/unlabel"}, 0},
+		{"label to label", "Labels/Work", "Labels/Home", []string{"PUT /messages/label", "PUT /messages/unlabel"}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeAPI{t: t}
+			msg := &protonmail.Message{ID: "a", Unread: 1, LabelIDs: []string{protonmail.LabelInbox, "w"}}
+			inbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{msg})
+			u := inbox.u
+			for _, mb := range []struct{ name, id string }{{"Work", "w"}, {"Home", "h"}} {
+				var msgs []*protonmail.Message
+				if mb.id == "w" {
+					msgs = []*protonmail.Message{msg}
+				}
+				addTestMailbox(t, u, "", mb.id, msgs).setLabel(&protonmail.Label{ID: mb.id, Name: mb.name, Type: protonmail.LabelMessage})
+			}
+			addTestMailbox(t, u, "Archive", protonmail.LabelArchive, nil)
+			u.Lock()
+			u.nameMailboxes()
+			u.Unlock()
+
+			from, to := u.getMailbox(tt.from), u.getMailbox(tt.to)
+			if from == nil || to == nil {
+				t.Fatalf("getMailbox(%q), getMailbox(%q) = %v, %v", tt.from, tt.to, from, to)
+			}
+			if err := from.MoveMessages(true, uidSet(1), tt.to); err != nil {
+				t.Fatalf("MoveMessages() = %v", err)
+			}
+			if got := api.madeRequests(); !slices.Equal(got, tt.wantRequests) {
+				t.Errorf("made requests %q, want %q", got, tt.wantRequests)
+			}
+			checkStatus(t, from, tt.wantLeft, tt.wantLeft)
+			checkStatus(t, to, 1, 1)
+		})
 	}
 }
 
@@ -933,6 +1066,7 @@ func addTestMailbox(t *testing.T, u *user, name, labelID string, msgs []*protonm
 	mboxDB := syncTestMailbox(t, u.db, labelID, msgs)
 	mbox := &mailbox{name: name, label: labelID, u: u, db: mboxDB, deleted: make(map[string]struct{})}
 	u.mailboxes[labelID] = mbox
+	u.nameMailboxes()
 	return mbox
 }
 

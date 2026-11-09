@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -46,6 +47,17 @@ var systemFlags = []struct {
 }{
 	{imap.FlaggedFlag, protonmail.LabelStarred},
 	{imap.DraftFlag, protonmail.LabelDraft},
+}
+
+// systemFlag returns the flag that shows labelID, if it is one of
+// systemFlags.
+func systemFlag(labelID string) (string, bool) {
+	for _, data := range systemFlags {
+		if data.label == labelID {
+			return data.name, true
+		}
+	}
+	return "", false
 }
 
 type user struct {
@@ -98,7 +110,10 @@ type user struct {
 	// Set by rebuild: no login joins this user, which is ending.
 	rebuilding bool
 	mailboxes  map[string]*mailbox // indexed by label ID
-	flags      map[string]string   // indexed by label ID
+	// Every mailbox by name, and folders and labels in LIST order: rebuilt
+	// by nameMailboxes whenever a name may have changed.
+	byName map[string]*mailbox
+	listed []*mailbox
 	// Replaced, never changed in place, by Addresses events: read it with
 	// addresses.
 	addrs []*protonmail.Address
@@ -248,35 +263,15 @@ func (u *user) initSession() (lastEventID string, err error) {
 	return lastEventID, nil
 }
 
-func labelNameToFlag(s string) string {
-	var sb strings.Builder
-	var lastValid bool
-	for _, r := range s {
-		// See atom-specials in RFC 3501
-		var valid bool
-		switch r {
-		case '(', ')', '{':
-		case ' ', '\t': // SP
-		case '%', '*': // list-wildcards
-		case '"', '\\': // quoted-specials
-		case ']': // resp-specials
-		default:
-			valid = r <= '~' && r > 31
-		}
-		if !valid {
-			if !lastValid {
-				continue
-			}
-			r = '_'
-		}
-		sb.WriteRune(r)
-		lastValid = valid
-	}
-	return sb.String()
+// labelNameToMailbox makes a Proton label name one level of an IMAP name. A
+// "/" would read as nesting, so it becomes U+2215 DIVISION SLASH, which looks
+// the same. Proton accepts both "/" and "\" in names; "\" needs nothing.
+func labelNameToMailbox(name string) string {
+	return strings.ReplaceAll(name, delimiter, "\u2215")
 }
 
-// setMailboxes makes the mailboxes and flags of the system labels and of
-// labels, creating their buckets if the database has none.
+// setMailboxes makes the mailboxes of the system labels, folders and labels,
+// creating their buckets if the database has none.
 func (u *user) setMailboxes(labels []*protonmail.Label) error {
 	u.Lock()
 	defer u.Unlock()
@@ -290,51 +285,125 @@ func (u *user) setMailboxes(labels []*protonmail.Label) error {
 		}
 	}
 
-	flags := make(map[string]string)
-	for _, data := range systemFlags {
-		flags[data.label] = data.name
+	for _, label := range labels {
+		if label.Type != protonmail.LabelMessage {
+			continue
+		}
+		if _, ok := mailboxes[label.ID]; ok {
+			continue
+		}
+		mbox, err := newMailbox("", label.ID, nil, u)
+		if err != nil {
+			return err
+		}
+		mbox.setLabel(label)
+		mailboxes[label.ID] = mbox
 	}
 
-	for _, label := range labels {
-		if label.Exclusive == 1 {
-			if _, ok := mailboxes[label.ID]; ok {
-				continue
-			}
+	u.mailboxes = mailboxes
+	u.nameMailboxes()
+	return nil
+}
 
-			var err error
-			mailboxes[label.ID], err = newMailbox(label.Name, label.ID, nil, u)
-			if err != nil {
-				return err
-			}
-		} else {
-			if _, ok := flags[label.ID]; ok {
-				continue
-			}
+// setLabel takes the kind, name and parent of label. Under u's lock, and
+// followed by nameMailboxes.
+func (mbox *mailbox) setLabel(label *protonmail.Label) {
+	mbox.kind = labelKind(label)
+	mbox.labelName = label.Name
+	mbox.parentID = ""
+	if mbox.kind == kindFolder {
+		// Labels can't be nested in Proton.
+		mbox.parentID = label.ParentID
+	}
+}
 
-			flags[label.ID] = labelNameToFlag(label.Name)
+// nameMailboxes names every folder and label after its kind and, for a
+// folder, its parents' names, as proton-bridge does (Folders/<path>,
+// Labels/<name>), and rebuilds byName and listed. Under u's lock.
+func (u *user) nameMailboxes() {
+	names := make(map[string]string, len(u.mailboxes))
+	var name func(mbox *mailbox, depth int) string
+	name = func(mbox *mailbox, depth int) string {
+		if n, ok := names[mbox.label]; ok {
+			return n
+		}
+		level := labelNameToMailbox(mbox.labelName)
+		parent, ok := u.mailboxes[mbox.parentID]
+		var n string
+		switch {
+		case mbox.parentID == "":
+			n = mbox.kind.prefix() + delimiter + level
+		case !ok || parent.kind != kindFolder || depth > len(u.mailboxes):
+			// Proton lists every folder with its parents, and a cycle can't
+			// be made: neither should happen.
+			log.Printf("Folder %v has no parent folder %v: shown at the top", mbox.label, mbox.parentID)
+			n = mbox.kind.prefix() + delimiter + level
+		default:
+			n = name(parent, depth+1) + delimiter + level
+		}
+		names[mbox.label] = n
+		return n
+	}
+
+	u.byName = make(map[string]*mailbox, len(u.mailboxes))
+	u.listed = u.listed[:0]
+	for _, labelID := range slices.Sorted(maps.Keys(u.mailboxes)) {
+		mbox := u.mailboxes[labelID]
+		if mbox.kind != kindSystem {
+			mbox.setName(name(mbox, 0))
+			u.listed = append(u.listed, mbox)
+		}
+		u.byName[mbox.Name()] = mbox
+	}
+	// Folders before labels, each by name; label IDs (sorted above, and
+	// SortStableFunc) break no ties, as names are unique within a kind.
+	slices.SortStableFunc(u.listed, func(a, b *mailbox) int {
+		return cmp.Or(cmp.Compare(a.kind, b.kind), cmp.Compare(a.Name(), b.Name()))
+	})
+}
+
+// hasChildFolder reports whether a folder is in the folder labelID. Under u's
+// lock.
+func (u *user) hasChildFolder(labelID string) bool {
+	for _, mbox := range u.mailboxes {
+		if mbox.kind == kindFolder && mbox.parentID == labelID {
+			return true
 		}
 	}
-
-	u.mailboxes, u.flags = mailboxes, flags
-	return nil
+	return false
 }
 
 func (u *user) Username() string {
 	return u.u.Name
 }
 
+// ListMailboxes lists the system mailboxes in systemMailboxes' order, then
+// Folders and the folders, then Labels and the labels, each by name: the same
+// on every LIST, whatever the order the labels came in.
 func (u *user) ListMailboxes(subscribed bool) ([]imapbackend.Mailbox, error) {
 	u.Lock()
 	defer u.Unlock()
 
-	list := make([]imapbackend.Mailbox, 0, len(u.mailboxes))
-	for _, mbox := range u.mailboxes {
+	list := make([]imapbackend.Mailbox, 0, len(u.mailboxes)+2)
+	for _, data := range systemMailboxes {
 		// Hidden from LIST only, as proton-bridge hides it (gluon's
 		// GetMailboxVisibility): SELECT and STATUS still find it by name.
-		if mbox.label == protonmail.LabelAllMail && !u.backend.showAllMail {
+		if data.label == protonmail.LabelAllMail && !u.backend.showAllMail {
 			continue
 		}
-		list = append(list, mbox)
+		if mbox, ok := u.mailboxes[data.label]; ok {
+			list = append(list, mbox)
+		}
+	}
+	for _, kind := range []mailboxKind{kindFolder, kindLabel} {
+		var children []imapbackend.Mailbox
+		for _, mbox := range u.listed {
+			if mbox.kind == kind {
+				children = append(children, mbox)
+			}
+		}
+		list = append(list, placeholder{kind: kind, children: len(children) > 0})
+		list = append(list, children...)
 	}
 	return list, nil
 }
@@ -348,13 +417,7 @@ func (u *user) getMailboxByLabel(labelID string) *mailbox {
 func (u *user) getMailbox(name string) *mailbox {
 	u.Lock()
 	defer u.Unlock()
-
-	for _, mbox := range u.mailboxes {
-		if mbox.Name() == name {
-			return mbox
-		}
-	}
-	return nil
+	return u.byName[name]
 }
 
 func (u *user) GetMailbox(name string) (imapbackend.Mailbox, error) {
@@ -363,22 +426,6 @@ func (u *user) GetMailbox(name string) (imapbackend.Mailbox, error) {
 		return nil, imapbackend.ErrNoSuchMailbox
 	}
 	return mbox, nil
-}
-
-// getFlag returns the label whose flag is name. Flags are case-insensitive,
-// and go-imap hands over every flag RFC 3501 doesn't define in lower case
-// (imap.CanonicalFlag) while label flags keep their case. Labels are tried in
-// ID order, so two that differ only in case resolve the same way every time.
-func (u *user) getFlag(name string) string {
-	u.Lock()
-	defer u.Unlock()
-
-	for _, label := range slices.Sorted(maps.Keys(u.flags)) {
-		if strings.EqualFold(u.flags[label], name) {
-			return label
-		}
-	}
-	return ""
 }
 
 func (u *user) CreateMailbox(name string) error {
@@ -860,76 +907,81 @@ func (u *user) handleLabelEvent(event *protonmail.EventLabel) {
 }
 
 func (u *user) createLabel(label *protonmail.Label) {
-	if label.Type == protonmail.LabelContact {
+	if label.Type != protonmail.LabelMessage {
 		return
 	}
 
-	if label.Exclusive != 1 {
-		log.Printf("Label %v %q created", label.ID, label.Name)
-		u.Lock()
-		u.flags[label.ID] = labelNameToFlag(label.Name)
-		u.Unlock()
-		return
-	}
-
-	log.Printf("Folder %v %q created", label.ID, label.Name)
+	log.Printf("%v %v %q created", kindNoun(labelKind(label)), label.ID, label.Name)
 	// Outside u's lock: newMailbox writes to the database, and u's lock is
 	// taken by commands that shouldn't wait for that write.
-	mbox, err := newMailbox(label.Name, label.ID, nil, u)
+	mbox, err := newMailbox("", label.ID, nil, u)
 	if err != nil {
-		log.Printf("cannot create mailbox for folder %v: %v", label.ID, err)
+		log.Printf("cannot create mailbox for label %v: %v", label.ID, err)
 		return
 	}
 	u.Lock()
-	if _, ok := u.mailboxes[label.ID]; !ok {
-		u.mailboxes[label.ID] = mbox
+	defer u.Unlock()
+	if _, ok := u.mailboxes[label.ID]; ok {
+		// Keep the mailbox clients may have selected.
+		return
 	}
-	u.Unlock()
+	mbox.setLabel(label)
+	u.mailboxes[label.ID] = mbox
+	u.nameMailboxes()
 }
 
-// updateLabel renames the folder or label. Updates also follow every read or
-// unread change in it, and then change nothing.
+func kindNoun(k mailboxKind) string {
+	switch k {
+	case kindFolder:
+		return "Folder"
+	case kindLabel:
+		return "Label"
+	case kindSystem:
+		return "System mailbox"
+	}
+	panic("invariant: unknown mailbox kind")
+}
+
+// updateLabel renames the folder or label, moves a folder into another, or
+// makes a folder a label or back (Exclusive changed), in place: the mailbox
+// keeps its messages, UIDs and selections. A folder's new name renames the
+// folders in it, for which Proton sends no event. Updates also follow every
+// read or unread change in a folder, and then change nothing.
 func (u *user) updateLabel(label *protonmail.Label) {
 	u.Lock()
 	defer u.Unlock()
 
-	if mbox, ok := u.mailboxes[label.ID]; ok {
-		if label.Exclusive != 1 {
-			log.Printf("Folder %v became a label: ignored until the next login", label.ID)
-			return
-		}
-		if old := mbox.Name(); old != label.Name {
-			log.Printf("Folder %v renamed from %q to %q", label.ID, old, label.Name)
-			mbox.setName(label.Name)
-		}
+	mbox, ok := u.mailboxes[label.ID]
+	if !ok {
+		// A contact group, or a label peroxide never saw created.
 		return
 	}
-
-	if flag, ok := u.flags[label.ID]; ok {
-		if label.Exclusive == 1 {
-			log.Printf("Label %v became a folder: ignored until the next login", label.ID)
-			return
-		}
-		if name := labelNameToFlag(label.Name); name != flag {
-			log.Printf("Label %v renamed from %q to %q", label.ID, flag, name)
-			u.flags[label.ID] = name
-		}
+	oldName, oldKind := mbox.Name(), mbox.kind
+	mbox.setLabel(label)
+	u.nameMailboxes()
+	name := mbox.Name()
+	if mbox.kind != oldKind {
+		log.Printf("%v %v became a %v: %q is now %q", kindNoun(oldKind), label.ID,
+			strings.ToLower(kindNoun(mbox.kind)), oldName, name)
+	} else if name != oldName {
+		log.Printf("%v %v renamed from %q to %q", kindNoun(mbox.kind), label.ID, oldName, name)
 	}
-	// Anything else, such as a contact group, has no mailbox or flag.
 }
 
 func (u *user) deleteLabel(labelID string) {
 	u.Lock()
-	mbox, isFolder := u.mailboxes[labelID]
+	mbox, ok := u.mailboxes[labelID]
 	delete(u.mailboxes, labelID)
-	delete(u.flags, labelID)
+	if ok {
+		u.nameMailboxes()
+	}
 	u.Unlock()
 
-	if !isFolder {
+	if !ok {
 		return
 	}
-	log.Printf("Folder %v %q deleted", labelID, mbox.Name())
+	log.Printf("%v %v %q deleted", kindNoun(mbox.kind), labelID, mbox.Name())
 	if err := mbox.delete(); err != nil {
-		log.Printf("cannot delete mailbox of folder %v: %v", labelID, err)
+		log.Printf("cannot delete mailbox of label %v: %v", labelID, err)
 	}
 }

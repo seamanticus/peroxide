@@ -115,17 +115,18 @@ func checkStatus(t *testing.T, mbox *mailbox, wantMessages, wantUnseen uint32) {
 	}
 }
 
-// FLAGS and PERMANENTFLAGS list label flags by label ID, not in map order:
-// with this many labels, map order would differ between runs.
+// FLAGS and PERMANENTFLAGS list the system flags only: labels are mailboxes
+// (Labels/<name>), not keywords.
 // evidence: witnesses
-func TestStatusFlagsSorted(t *testing.T) {
+func TestStatusFlagsNoLabels(t *testing.T) {
 	mbox, _ := newTestMailbox(t, nil)
-	mbox.u.flags = map[string]string{"e": "E", "a": "A", "d": "D", "b": "B", "c": "C", "f": "F"}
+	mbox.u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: mbox}
+	mbox.u.createLabel(&protonmail.Label{ID: "l", Name: "Work", Type: protonmail.LabelMessage})
 	status, err := mbox.Status([]imap.StatusItem{imap.StatusMessages})
 	if err != nil {
 		t.Fatalf("Status() = %v", err)
 	}
-	want := []string{imap.SeenFlag, imap.DeletedFlag, "A", "B", "C", "D", "E", "F"}
+	want := []string{imap.SeenFlag, imap.DeletedFlag, imap.FlaggedFlag, imap.DraftFlag}
 	if !slices.Equal(status.Flags, want) {
 		t.Errorf("Flags = %v, want %v", status.Flags, want)
 	}
@@ -298,7 +299,6 @@ func TestLabelEventFolderHoldsStoredMessages(t *testing.T) {
 	}
 	u := inbox.u
 	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
-	u.flags = map[string]string{}
 	events := make(chan *protonmail.Event, 1)
 	events <- &protonmail.Event{ID: "e1", Labels: []*protonmail.EventLabel{{
 		ID: "f", Action: protonmail.EventCreate,
@@ -376,7 +376,7 @@ func BenchmarkFetchFlags(b *testing.B) {
 	}
 	mbox := &mailbox{
 		name: imap.InboxName, label: protonmail.LabelInbox, db: mboxDB, deleted: make(map[string]struct{}),
-		u: &user{db: db, u: &protonmail.User{Name: "bob"}, flags: map[string]string{}},
+		u: &user{db: db, u: &protonmail.User{Name: "bob"}},
 	}
 	all, err := imap.ParseSeqSet("1:*")
 	if err != nil {
@@ -394,65 +394,116 @@ func BenchmarkFetchFlags(b *testing.B) {
 	}
 }
 
-// Folders and labels created, renamed and deleted in Proton change mailboxes
-// and flags without waiting for the next login, and without telling clients.
+// Folders and labels created, renamed, moved and deleted in Proton change
+// mailboxes without waiting for the next login, and without telling clients
+// but those with a deleted one selected, who get a BYE. A mailbox keeps its
+// *mailbox (UIDs, selections) through every update. A folder holding others
+// renamed has Proton's labels read again, once.
+// evidence: witnesses
 func TestLabelEvents(t *testing.T) {
-	inbox, _ := newTestMailbox(t, nil)
+	// What Proton lists once the parent is renamed P: only the names matter.
+	api := &fakeAPI{t: t, gets: map[string]fakeResponse{"/labels": {http.StatusOK, "application/json",
+		`{"Code":1000,"Labels":[{"ID":"f","Name":"P","Type":1,"Exclusive":1},{"ID":"s","Name":"A/B","ParentID":"f","Type":1,"Exclusive":1},{"ID":"l","Name":"Later\\on","Type":1}]}`}}}
+	inbox, _ := newActionTestMailbox(t, api, nil)
 	u := inbox.u
 	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
-	u.flags = map[string]string{protonmail.LabelStarred: imap.FlaggedFlag}
 
-	folder := func(name string) *protonmail.Label {
-		return &protonmail.Label{ID: "f", Name: name, Type: protonmail.LabelMessage, Exclusive: 1}
+	folder := func(id, name, parent string) *protonmail.Label {
+		return &protonmail.Label{ID: id, ParentID: parent, Name: name, Type: protonmail.LabelMessage, Exclusive: 1}
 	}
 	label := func(name string) *protonmail.Label {
 		return &protonmail.Label{ID: "l", Name: name, Type: protonmail.LabelMessage}
 	}
-	inboxOnly := map[string]string{protonmail.LabelInbox: imap.InboxName}
-	withFolder := map[string]string{protonmail.LabelInbox: imap.InboxName, "f": "Work"}
-	renamed := map[string]string{protonmail.LabelInbox: imap.InboxName, "f": "Projects"}
-	starredOnly := map[string]string{protonmail.LabelStarred: imap.FlaggedFlag}
-	withLabel := map[string]string{protonmail.LabelStarred: imap.FlaggedFlag, "l": "To_do"}
+	create := func(l *protonmail.Label) *protonmail.EventLabel {
+		return &protonmail.EventLabel{ID: l.ID, Action: protonmail.EventCreate, Label: l}
+	}
+	update := func(l *protonmail.Label) *protonmail.EventLabel {
+		return &protonmail.EventLabel{ID: l.ID, Action: protonmail.EventUpdate, Label: l}
+	}
+	with := func(names ...string) map[string]string {
+		m := map[string]string{protonmail.LabelInbox: imap.InboxName}
+		for i := 0; i < len(names); i += 2 {
+			m[names[i]] = names[i+1]
+		}
+		return m
+	}
 
 	steps := []struct {
 		name          string
 		event         *protonmail.EventLabel
 		wantMailboxes map[string]string
-		wantFlags     map[string]string
+		wantBye       string // the mailbox a BYE is sent for
+		wantRequests  []string
 	}{
-		{"create folder", &protonmail.EventLabel{ID: "f", Action: protonmail.EventCreate, Label: folder("Work")}, withFolder, starredOnly},
-		{"create label", &protonmail.EventLabel{ID: "l", Action: protonmail.EventCreate, Label: label("To do")}, withFolder, withLabel},
-		{"create contact group", &protonmail.EventLabel{ID: "c", Action: protonmail.EventCreate, Label: &protonmail.Label{ID: "c", Name: "Friends", Type: protonmail.LabelContact}}, withFolder, withLabel},
+		{"create folder", create(folder("f", "Work", "")), with("f", "Folders/Work"), "", nil},
+		{"create label", create(label("To do")), with("f", "Folders/Work", "l", "Labels/To do"), "", nil},
+		{"create contact group", create(&protonmail.Label{ID: "c", Name: "Friends", Type: protonmail.LabelContact}), with("f", "Folders/Work", "l", "Labels/To do"), "", nil},
 		// Sent after every read or unread change in the folder.
-		{"update without changes", &protonmail.EventLabel{ID: "f", Action: protonmail.EventUpdate, Label: folder("Work")}, withFolder, withLabel},
+		{"update without changes", update(folder("f", "Work", "")), with("f", "Folders/Work", "l", "Labels/To do"), "", nil},
 		// Seen in Proton's events: names and Exclusive don't match INBOX or
 		// \Flagged, and the event ID differs from the label ID.
-		{"update system folder", &protonmail.EventLabel{ID: "k7rAD-", Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: protonmail.LabelInbox, Name: "Inbox", Type: protonmail.LabelMessage}}, withFolder, withLabel},
-		{"update system label", &protonmail.EventLabel{ID: "ZIZtzh", Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: protonmail.LabelStarred, Name: "Starred", Type: protonmail.LabelMessage}}, withFolder, withLabel},
-		{"update unknown label", &protonmail.EventLabel{ID: "u", Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: "u", Name: "Primary", Type: protonmail.LabelMessage}}, withFolder, withLabel},
-		{"rename folder", &protonmail.EventLabel{ID: "f", Action: protonmail.EventUpdate, Label: folder("Projects")}, renamed, withLabel},
-		{"rename label", &protonmail.EventLabel{ID: "l", Action: protonmail.EventUpdateFlags, Label: label("Later on")}, renamed, map[string]string{protonmail.LabelStarred: imap.FlaggedFlag, "l": "Later_on"}},
-		{"folder becomes label", &protonmail.EventLabel{ID: "f", Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: "f", Name: "Other", Type: protonmail.LabelMessage}}, renamed, map[string]string{protonmail.LabelStarred: imap.FlaggedFlag, "l": "Later_on"}},
-		{"delete label", &protonmail.EventLabel{ID: "l", Action: protonmail.EventDelete}, renamed, starredOnly},
-		{"delete folder", &protonmail.EventLabel{ID: "f", Action: protonmail.EventDelete}, inboxOnly, starredOnly},
+		{"update system folder", &protonmail.EventLabel{ID: "k7rAD-", Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: protonmail.LabelInbox, Name: "Inbox", Type: protonmail.LabelMessage}}, with("f", "Folders/Work", "l", "Labels/To do"), "", nil},
+		{"update system label", &protonmail.EventLabel{ID: "ZIZtzh", Action: protonmail.EventUpdate, Label: &protonmail.Label{ID: protonmail.LabelStarred, Name: "Starred", Type: protonmail.LabelMessage}}, with("f", "Folders/Work", "l", "Labels/To do"), "", nil},
+		{"update unknown label", update(&protonmail.Label{ID: "u", Name: "Primary", Type: protonmail.LabelMessage}), with("f", "Folders/Work", "l", "Labels/To do"), "", nil},
+		{"rename folder", update(folder("f", "Projects", "")), with("f", "Folders/Projects", "l", "Labels/To do"), "", nil},
+		{"rename label", &protonmail.EventLabel{ID: "l", Action: protonmail.EventUpdateFlags, Label: label(`Later\on`)}, with("f", "Folders/Projects", "l", `Labels/Later\on`), "", nil},
+		// Proton accepts "/" in a name: it must not read as nesting.
+		{"create subfolder", create(folder("s", "A/B", "f")), with("f", "Folders/Projects", "s", "Folders/Projects/A\u2215B", "l", `Labels/Later\on`), "", nil},
+		// Proton sends no event for the folders in a renamed one.
+		{"rename parent", update(folder("f", "P", "")), with("f", "Folders/P", "s", "Folders/P/A\u2215B", "l", `Labels/Later\on`), "", nil},
+		{"move subfolder to the top", update(folder("s", "A/B", "")), with("f", "Folders/P", "s", "Folders/A\u2215B", "l", `Labels/Later\on`), "", nil},
+		{"delete subfolder", &protonmail.EventLabel{ID: "s", Action: protonmail.EventDelete}, with("f", "Folders/P", "l", `Labels/Later\on`), "", nil},
+		{"folder becomes label", update(&protonmail.Label{ID: "f", Name: "Other", Type: protonmail.LabelMessage}), with("f", "Labels/Other", "l", `Labels/Later\on`), "", nil},
+		{"label becomes folder", update(folder("f", "Other", "")), with("f", "Folders/Other", "l", `Labels/Later\on`), "", nil},
+		{"delete label", &protonmail.EventLabel{ID: "l", Action: protonmail.EventDelete}, with("f", "Folders/Other"), "", nil},
+		{"delete folder", &protonmail.EventLabel{ID: "f", Action: protonmail.EventDelete}, with(), "", nil},
 	}
 
 	var created *mailbox
 	for _, step := range steps {
+		before := len(api.madeRequests())
 		events := make(chan *protonmail.Event, 1)
 		events <- &protonmail.Event{Labels: []*protonmail.EventLabel{step.event}}
 		close(events)
-		updates := make(chan imapbackend.Update, 10)
+		updates := make(chan imapbackend.Update)
+		var sent []imapbackend.Update
+		delivered := make(chan struct{})
+		go func() {
+			defer close(delivered)
+			for up := range updates {
+				sent = append(sent, up)
+				close(up.Done())
+			}
+		}()
 		u.receiveEvents(updates, events)
+		close(updates)
+		<-delivered
 
-		if n := len(updates); n != 0 {
-			t.Errorf("%v: sent %v updates, want none", step.name, n)
+		var byes []string
+		for _, up := range sent {
+			if s, ok := up.(*imapbackend.StatusUpdate); ok && s.Type == imap.StatusRespBye && s.Username() == "bob" {
+				byes = append(byes, s.Mailbox())
+			} else {
+				t.Errorf("%v: sent %#v, want only a BYE", step.name, up)
+			}
+		}
+		var wantByes []string
+		if step.wantBye != "" {
+			wantByes = []string{step.wantBye}
+		}
+		if !slices.Equal(byes, wantByes) {
+			t.Errorf("%v: BYE for %q, want %q", step.name, byes, wantByes)
+		}
+		if got := api.madeRequests()[before:]; !slices.Equal(got, step.wantRequests) {
+			t.Errorf("%v: made requests %q, want %q", step.name, got, step.wantRequests)
 		}
 		if got := mailboxNames(u); !maps.Equal(got, step.wantMailboxes) {
 			t.Errorf("%v: mailboxes = %v, want %v", step.name, got, step.wantMailboxes)
 		}
-		if !maps.Equal(u.flags, step.wantFlags) {
-			t.Errorf("%v: flags = %v, want %v", step.name, u.flags, step.wantFlags)
+		for labelID, name := range step.wantMailboxes {
+			if got := u.getMailbox(name); got == nil || got.label != labelID {
+				t.Errorf("%v: getMailbox(%q) = %v, want label %v", step.name, name, got, labelID)
+			}
 		}
 
 		if mbox, ok := u.mailboxes["f"]; ok {
@@ -589,7 +640,6 @@ func TestLogoutWhileApplyingEvents(t *testing.T) {
 		u.backend = be
 		u.username = "bob"
 		u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
-		u.flags = map[string]string{}
 		u.numClients = 1
 		u.done = make(chan struct{})
 		// A delete page makes no request.
@@ -799,7 +849,6 @@ func newDownloadTestUser(t *testing.T, api *fakeMetadata) (*user, *mailbox, chan
 	inbox, _ := newTestMailbox(t, nil)
 	u := inbox.u
 	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
-	u.flags = map[string]string{}
 	u.done = make(chan struct{})
 	u.eventSent = make(chan struct{}, 1)
 	updates := make(chan imapbackend.Update)
