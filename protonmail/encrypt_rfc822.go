@@ -53,10 +53,17 @@ import (
 // its text and attachments. A message it can't take apart, one already
 // signed or encrypted, or one with more than one text part is encrypted
 // whole instead, as PGP/MIME signed by key.
+//
+// Parts are encrypted as they are read, into one buffer sized for the
+// result up front: base64 attachments stay about their size, armored texts
+// grow by a third. A message is held twice at most, as literal and result.
 func encryptRFC822(key *openpgp.Entity, literal []byte) ([]byte, error) {
 	var buf bytes.Buffer
+	buf.Grow(len(literal) + len(literal)/8 + 4096)
 	if err := encryptParts(&buf, key, literal); err != nil {
-		return encryptFull(key, literal)
+		buf.Reset()
+		err = encryptFull(&buf, key, literal)
+		return buf.Bytes(), err
 	}
 	return buf.Bytes(), nil
 }
@@ -142,63 +149,45 @@ func encryptMultipart(w io.Writer, key *openpgp.Entity, e *message.Entity, bound
 // encryptText writes a text part as an armored PGP message, decoded from its
 // transfer encoding and, if it names one, its charset: it is UTF-8 after.
 func encryptText(w io.Writer, key *openpgp.Entity, e *message.Entity, mediaType string, params map[string]string) error {
-	body, err := io.ReadAll(e.Body)
-	if err != nil {
-		return err
-	}
+	var body io.Reader = e.Body
 	h := e.Header.Copy()
 	h.Del("Content-Transfer-Encoding")
 	if charset, ok := params["charset"]; ok {
-		if body, err = decodeCharset(body, charset); err != nil {
+		enc, err := charsetEncoding(charset)
+		if err != nil {
 			return err
 		}
+		body = enc.NewDecoder().Reader(body)
 		params["charset"] = "utf-8"
 		h.Set("Content-Type", mime.FormatMediaType(mediaType, params))
-	}
-	armored, err := encryptArmored(key, body, nil)
-	if err != nil {
-		return err
 	}
 	if err := textproto.WriteHeader(w, h.Header); err != nil {
 		return err
 	}
-	_, err = w.Write(armored)
-	return err
+	return encryptArmored(w, key, body, nil)
 }
 
 // encryptAttachment writes a part that isn't text as a binary PGP message,
 // base64-encoded.
 func encryptAttachment(w io.Writer, key *openpgp.Entity, e *message.Entity) error {
-	body, err := io.ReadAll(e.Body)
-	if err != nil {
-		return err
-	}
 	h := e.Header.Copy()
 	h.Set("Content-Transfer-Encoding", "base64")
-	var enc bytes.Buffer
-	if err := encryptTo(&enc, key, body, nil); err != nil {
-		return err
-	}
 	if err := textproto.WriteHeader(w, h.Header); err != nil {
 		return err
 	}
 	bw := base64.NewEncoder(base64.StdEncoding, w)
-	if _, err := bw.Write(enc.Bytes()); err != nil {
+	if err := encryptTo(bw, key, e.Body, nil); err != nil {
 		return err
 	}
 	return bw.Close()
 }
 
-// encryptFull writes literal whole as a PGP/MIME message, signed by key,
-// under a header holding the fields Proton lists messages by.
-func encryptFull(key *openpgp.Entity, literal []byte) ([]byte, error) {
-	armored, err := encryptArmored(key, literal, key)
-	if err != nil {
-		return nil, err
-	}
+// encryptFull writes literal whole to w as a PGP/MIME message, signed by
+// key, under a header holding the fields Proton lists messages by.
+func encryptFull(w io.Writer, key *openpgp.Entity, literal []byte) error {
 	orig, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(literal)))
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// From the message, not random as in go-proton-api: the same APPEND sends
@@ -228,67 +217,62 @@ func encryptFull(key *openpgp.Entity, literal []byte) ([]byte, error) {
 	attachment.Set("Content-Disposition", "inline; filename=encrypted.asc")
 	attachment.Set("Content-Type", mime.FormatMediaType("application/octet-stream", map[string]string{"name": "encrypted.asc"}))
 
-	var b bytes.Buffer
-	if err := textproto.WriteHeader(&b, h.Header); err != nil {
-		return nil, err
+	if err := textproto.WriteHeader(w, h.Header); err != nil {
+		return err
 	}
-	for _, part := range []struct {
-		h    textproto.Header
-		body []byte
-	}{{control, []byte("Version: 1")}, {attachment, armored}} {
-		fmt.Fprintf(&b, "--%v\r\n", boundary)
-		if err := textproto.WriteHeader(&b, part.h); err != nil {
-			return nil, err
-		}
-		b.Write(part.body)
-		b.WriteString("\r\n")
+	if _, err := fmt.Fprintf(w, "--%v\r\n", boundary); err != nil {
+		return err
 	}
-	fmt.Fprintf(&b, "--%v--\r\n", boundary)
-	return b.Bytes(), nil
+	if err := textproto.WriteHeader(w, control); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "Version: 1\r\n--%v\r\n", boundary); err != nil {
+		return err
+	}
+	if err := textproto.WriteHeader(w, attachment); err != nil {
+		return err
+	}
+	if err := encryptArmored(w, key, bytes.NewReader(literal), key); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "\r\n--%v--\r\n", boundary)
+	return err
 }
 
-// encryptArmored returns data encrypted to key, and signed by signer if it
-// isn't nil, as an armored PGP message.
-func encryptArmored(key *openpgp.Entity, data []byte, signer *openpgp.Entity) ([]byte, error) {
-	var b bytes.Buffer
-	aw, err := armor.Encode(&b, "PGP MESSAGE", nil)
+// encryptArmored writes data encrypted to key, and signed by signer if it
+// isn't nil, to w as an armored PGP message.
+func encryptArmored(w io.Writer, key *openpgp.Entity, data io.Reader, signer *openpgp.Entity) error {
+	aw, err := armor.Encode(w, "PGP MESSAGE", nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if err := encryptTo(aw, key, data, signer); err != nil {
-		return nil, err
+		return err
 	}
-	if err := aw.Close(); err != nil {
-		return nil, err
-	}
-	return b.Bytes(), nil
+	return aw.Close()
 }
 
-func encryptTo(w io.Writer, key *openpgp.Entity, data []byte, signer *openpgp.Entity) error {
+func encryptTo(w io.Writer, key *openpgp.Entity, data io.Reader, signer *openpgp.Entity) error {
 	pw, err := openpgp.Encrypt(w, []*openpgp.Entity{key}, signer, nil, nil)
 	if err != nil {
 		return err
 	}
-	if _, err := pw.Write(data); err != nil {
+	if _, err := io.Copy(pw, data); err != nil {
 		return err
 	}
 	return pw.Close()
 }
 
-// decodeCharset decodes body from charset to UTF-8, looking the charset up
-// as go-proton-api does: by its IANA name, by its "cs" alias, by its HTML
-// label.
-func decodeCharset(body []byte, charset string) ([]byte, error) {
+// charsetEncoding looks a charset up as go-proton-api does: by its IANA
+// name, by its "cs" alias, by its HTML label.
+func charsetEncoding(charset string) (encoding.Encoding, error) {
 	name := strings.ToLower(charset)
-	var enc encoding.Encoding
 	if e, err := ianaindex.MIME.Encoding(name); e != nil && err == nil {
-		enc = e
+		return e, nil
 	} else if e, err := ianaindex.MIME.Encoding("cs" + name); e != nil && err == nil {
-		enc = e
+		return e, nil
 	} else if e, err := htmlindex.Get(name); err == nil {
-		enc = e
-	} else {
-		return nil, fmt.Errorf("unknown charset: %s", charset)
+		return e, nil
 	}
-	return io.ReadAll(enc.NewDecoder().Reader(bytes.NewReader(body)))
+	return nil, fmt.Errorf("unknown charset: %s", charset)
 }

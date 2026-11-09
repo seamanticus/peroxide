@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -66,8 +67,13 @@ func (c *Client) ImportMessage(ctx context.Context, key *openpgp.Entity, meta *I
 		return "", ErrImportSizeExceeded
 	}
 
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
+	// The request is the encrypted message between a head (the boundary and
+	// the part's header) and a tail (the metadata part), sent from the three
+	// without copying the message into one body: it is the largest thing
+	// peroxide holds.
+	var head, tail bytes.Buffer
+	out := &switchWriter{&head}
+	mw := multipart.NewWriter(out)
 	h := make(textproto.MIMEHeader)
 	h.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
 		"name":     importName,
@@ -78,7 +84,8 @@ func (c *Client) ImportMessage(ctx context.Context, key *openpgp.Entity, meta *I
 	if err != nil {
 		return "", err
 	}
-	if _, err := part.Write(append(encrypted, "\r\n"...)); err != nil {
+	out.w = &tail
+	if _, err := part.Write([]byte("\r\n")); err != nil {
 		return "", err
 	}
 
@@ -109,13 +116,19 @@ func (c *Client) ImportMessage(ctx context.Context, key *openpgp.Entity, meta *I
 		return "", err
 	}
 
-	// A bytes.Reader body can be sent again after a re-authentication.
-	req, err := c.newRequest(http.MethodPost, "/mail/v4/messages/import", bytes.NewReader(body.Bytes()))
+	req, err := c.newRequest(http.MethodPost, "/mail/v4/messages/import", nil)
 	if err != nil {
 		return "", err
 	}
 	req = req.WithContext(ctx)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	// GetBody makes the request one that can be sent again after a
+	// re-authentication (Client.do).
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(io.MultiReader(bytes.NewReader(head.Bytes()), bytes.NewReader(encrypted), bytes.NewReader(tail.Bytes()))), nil
+	}
+	req.Body, _ = req.GetBody()
+	req.ContentLength = int64(head.Len() + len(encrypted) + tail.Len())
 
 	var respData struct {
 		resp
@@ -148,3 +161,8 @@ func (c *Client) ImportMessage(ctx context.Context, key *openpgp.Entity, meta *I
 	}
 	return "", errors.New("the import response holds no result for the message")
 }
+
+// switchWriter writes to w, which can be changed between writes.
+type switchWriter struct{ w io.Writer }
+
+func (s *switchWriter) Write(p []byte) (int, error) { return s.w.Write(p) }
