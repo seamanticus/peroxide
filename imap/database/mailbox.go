@@ -396,6 +396,15 @@ func (mbox *Mailbox) Delete() error {
 		if err := b.DeleteBucket([]byte(mbox.labelID)); err != nil {
 			return fmt.Errorf("cannot delete mailbox %v: %w", mbox.labelID, err)
 		}
+		// Its entry among the unsubscribed goes with it. LSUB lists only
+		// mailboxes there are, so a deleted one leaves the subscriptions,
+		// though RFC 3501 section 6.3.9 keeps its name (and gluon lists it):
+		// clients reading LSUB would show the deleted mailbox for good.
+		if unsub := tx.Bucket(unsubscribedBucket); unsub != nil {
+			if err := unsub.Delete([]byte(mbox.labelID)); err != nil {
+				return err
+			}
+		}
 		if counts := tx.Bucket(countsBucket); counts != nil {
 			return counts.Delete([]byte(mbox.labelID))
 		}
