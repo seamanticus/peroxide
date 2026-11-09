@@ -278,6 +278,14 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 			return mbox.alreadyThere(existing)
 		}
 	}
+	if mbox.isLabel() {
+		// proton-bridge imports it with the label alone, which files it in
+		// All Mail only, where a client hiding All Mail never shows it.
+		log.Printf("APPEND to label %v of a message not in the account: refused", mbox.Name())
+		return appendAlert(imap.StatusRespNo, fmt.Sprintf(
+			"%v is a label: it holds messages kept in a folder, and this message is in none. Append it to a folder, then add the label",
+			mbox.Name()))
+	}
 
 	// Into Drafts the message is imported too, not made a Proton draft
 	// (POST /messages), which keeps one body part and none of the header.
@@ -339,10 +347,12 @@ func (mbox *mailbox) existingMessages(ctx context.Context, h textproto.Header) (
 // The APPEND's flags aren't applied to the message found: it is the one
 // already there, flags and all.
 //
-// INBOX and Sent are the exception: Proton keeps a message in both (mail to
+// INBOX and Sent are an exception: Proton keeps a message in both (mail to
 // yourself), so adding one to a message in the other moves nothing, as COPY
 // does it. That is what a client saving its reply to the parent's mailbox
-// asks (aerc's copy-to-replied): the message is labelled, and OK.
+// asks (aerc's copy-to-replied): the message is labelled, and OK. A label
+// mailbox is the general case: adding a label moves nothing, so whatever
+// mailbox the message is in, it is labelled, and OK.
 func (mbox *mailbox) alreadyThere(existing []*protonmail.Message) error {
 	name := mbox.Name()
 	if slices.ContainsFunc(existing, func(m *protonmail.Message) bool {
@@ -351,27 +361,34 @@ func (mbox *mailbox) alreadyThere(existing []*protonmail.Message) error {
 		log.Printf("APPEND to %v of message %v, already there: not imported", name, existing[0].ID)
 		return appendAlert(imap.StatusRespOk, fmt.Sprintf("This message is already in %v: it was not copied again", name))
 	}
-	if partner, ok := inboxSentPartner(mbox.label); ok {
-		if i := slices.IndexFunc(existing, func(m *protonmail.Message) bool {
+	i := -1
+	var fromName string
+	if mbox.isLabel() {
+		i = 0
+		// Named before labelling: the lookup's labels are those it had.
+		fromName = mbox.u.mailboxNames(existing[:1])
+	} else if partner, ok := inboxSentPartner(mbox.label); ok {
+		i = slices.IndexFunc(existing, func(m *protonmail.Message) bool {
 			return slices.Contains(m.LabelIDs, partner)
-		}); i >= 0 {
-			apiID := existing[i].ID
-			failed, err := mbox.u.c.LabelMessages(mbox.label, []string{apiID})
-			if err != nil {
-				return fmt.Errorf("cannot add the message already in your account to %v: %w", name, err)
-			}
-			if err := mbox.u.applyAction([]string{apiID}, failed, labelUpdate(mbox.label, true)); err != nil {
-				return err
-			}
-			from := mbox.u.getMailboxByLabel(partner)
-			if from == nil {
-				panic("invariant: setMailboxes makes INBOX and Sent")
-			}
-			fromName := from.Name()
-			log.Printf("APPEND to %v of message %v, already in %v: labelled, not imported", name, apiID, fromName)
-			return appendAlert(imap.StatusRespOk, fmt.Sprintf(
-				"This message is already in %v: it is now in %v too, not copied again", fromName, name))
+		})
+		from := mbox.u.getMailboxByLabel(partner)
+		if from == nil {
+			panic("invariant: setMailboxes makes INBOX and Sent")
 		}
+		fromName = from.Name()
+	}
+	if i >= 0 {
+		apiID := existing[i].ID
+		failed, err := mbox.u.c.LabelMessages(mbox.label, []string{apiID})
+		if err != nil {
+			return fmt.Errorf("cannot add the message already in your account to %v: %w", name, err)
+		}
+		if err := mbox.u.applyAction([]string{apiID}, failed, labelUpdate(mbox.label, true)); err != nil {
+			return err
+		}
+		log.Printf("APPEND to %v of message %v, already in %v: labelled, not imported", name, apiID, fromName)
+		return appendAlert(imap.StatusRespOk, fmt.Sprintf(
+			"This message is already in %v: it is now in %v too, not copied again", fromName, name))
 	}
 	where := mbox.u.mailboxNames(existing)
 	log.Printf("APPEND to %v of message %v, already in %v: refused", name, existing[0].ID, where)

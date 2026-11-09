@@ -368,6 +368,15 @@ func TestAppendExisting(t *testing.T) {
 			[]string{metadata, "PUT /messages/label"}},
 		{"in INBOX, into Sent", withID, []string{protonmail.LabelInbox, protonmail.LabelAllMail}, protonmail.LabelSent, imap.StatusRespOk, "already in INBOX",
 			[]string{metadata, "PUT /messages/label"}},
+		// Dest "lw" is a label: adding one moves nothing.
+		{"in a folder, into a label", withID, []string{protonmail.LabelArchive, protonmail.LabelAllMail}, "lw", imap.StatusRespOk, "already in Archive: it is now in Labels/Dest too",
+			[]string{metadata, "PUT /messages/label"}},
+		{"in the label", withID, []string{protonmail.LabelArchive, "lw", protonmail.LabelAllMail}, "lw", imap.StatusRespOk, "already in Labels/Dest",
+			[]string{metadata}},
+		{"new message, into a label", withID, nil, "lw", imap.StatusRespNo, "Labels/Dest is a label",
+			[]string{metadata}},
+		{"no Message-Id, into a label", appendLiteral, nil, "lw", imap.StatusRespNo, "Labels/Dest is a label",
+			nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			api := &fakeAPI{t: t, labelIDs: map[string][]string{}, externalIDs: map[string]string{}}
@@ -376,8 +385,18 @@ func TestAppendExisting(t *testing.T) {
 				api.externalIDs["e"] = "m1@example.org"
 			}
 			inbox, _ := newAppendTestMailbox(t, api, nil)
-			addTestMailbox(t, inbox.u, "Sent", protonmail.LabelSent, nil)
+			for _, sys := range []struct{ name, id string }{{"Sent", protonmail.LabelSent}, {"Archive", protonmail.LabelArchive}} {
+				if sys.id != tt.dest {
+					addTestMailbox(t, inbox.u, sys.name, sys.id, nil)
+				}
+			}
 			mbox := addTestMailbox(t, inbox.u, "Dest", tt.dest, nil)
+			if tt.dest == "lw" {
+				inbox.u.Lock()
+				mbox.setLabel(&protonmail.Label{ID: "lw", Name: "Dest", Type: protonmail.LabelMessage})
+				inbox.u.nameMailboxes()
+				inbox.u.Unlock()
+			}
 
 			resp := statusResp(appendTo(mbox, []string{imap.SeenFlag}, tt.literal))
 			if resp.Type != tt.wantType || !strings.Contains(resp.Info, tt.wantIn) {
