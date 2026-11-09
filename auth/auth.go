@@ -164,13 +164,16 @@ func decrypt(encryptedString string, secretKey *[32]byte) ([]byte, error) {
 	return decrypted, nil
 }
 
-func EncryptAndSave(auth *CachedAuth, username string, secretKey *[32]byte) error {
+func seal(auth *CachedAuth, secretKey *[32]byte) (string, error) {
 	cleartext, err := json.Marshal(auth)
 	if err != nil {
-		return fmt.Errorf("failed to format cached auth: %v", err)
+		return "", fmt.Errorf("failed to format cached auth: %v", err)
 	}
+	return encrypt(cleartext, secretKey)
+}
 
-	encrypted, err := encrypt(cleartext, secretKey)
+func EncryptAndSave(auth *CachedAuth, username string, secretKey *[32]byte) error {
+	encrypted, err := seal(auth, secretKey)
 	if err != nil {
 		return err
 	}
@@ -179,6 +182,47 @@ func EncryptAndSave(auth *CachedAuth, username string, secretKey *[32]byte) erro
 		auths[username] = encrypted
 		return nil
 	})
+}
+
+// errSessionNotStored is saveSession's answer when username's record is gone
+// (`peroxide auth -remove`) or sealed with another bridge password (`peroxide
+// auth` again) since this process logged in.
+var errSessionNotStored = errors.New("the stored credentials were removed or replaced")
+
+// saveSession stores the session of a running login, sealed with secretKey,
+// only over the record it was read from: a session of an account removed or
+// logged in anew since must not bring back the old record.
+func saveSession(auth *CachedAuth, username string, secretKey *[32]byte) error {
+	encrypted, err := seal(auth, secretKey)
+	if err != nil {
+		return err
+	}
+
+	return updateAuths(func(auths map[string]string) error {
+		stored, ok := auths[username]
+		if !ok {
+			return errSessionNotStored
+		}
+		if _, err := decrypt(stored, secretKey); err != nil {
+			return errSessionNotStored
+		}
+		auths[username] = encrypted
+		return nil
+	})
+}
+
+// saveRenewed saves the session ReAuth just renewed, logging rather than
+// failing when it can't: the session works in memory either way, and failing
+// the request that set off the refresh would gain nothing.
+func saveRenewed(auth *CachedAuth, username string, secretKey *[32]byte) {
+	err := saveSession(auth, username, secretKey)
+	switch {
+	case err == nil:
+	case errors.Is(err, errSessionNotStored):
+		log.Printf("Not saving the renewed session of %v: %v since this process logged in; it keeps the session until it exits", username, err)
+	default:
+		log.Printf("warning: cannot save the renewed session of %v: %v; the refresh token auth.json holds is spent, so the next start logs in with the password again", username, err)
+	}
 }
 
 // isSpentRefreshToken reports whether err is Proton's answer to a refresh
@@ -386,7 +430,8 @@ func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.E
 			if _, err := authenticate(c, &cachedAuth, username, &secretKey); err != nil {
 				return err
 			}
-			return EncryptAndSave(&cachedAuth, username, &secretKey)
+			saveRenewed(&cachedAuth, username, &secretKey)
+			return nil
 		}
 
 		// authenticate updates cachedAuth with the new refresh token
@@ -395,8 +440,10 @@ func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.E
 			return nil, nil, StoreKey{}, err
 		}
 
-		if err := EncryptAndSave(&cachedAuth, username, &secretKey); err != nil {
-			return nil, nil, StoreKey{}, err
+		// Unlike a refresh's, a failed save fails the login: the record may
+		// be gone (removed: refuse it) or auth.json unwritable.
+		if err := saveSession(&cachedAuth, username, &secretKey); err != nil {
+			return nil, nil, StoreKey{}, fmt.Errorf("cannot save the session of %v: %w", username, err)
 		}
 
 		// The user ID from the account itself: the cached Auth holds what

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/hkdf"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -149,5 +150,77 @@ func TestEncryptAndSaveConcurrent(t *testing.T) {
 		if _, ok := auths[fmt.Sprint("user", i)]; !ok {
 			t.Errorf("auth.json has no user%v: %v of %v accounts kept", i, len(auths), accounts)
 		}
+	}
+}
+
+// A running session's renewal is saved over its own record only: once the
+// account is removed, or logged in anew with another bridge password, the
+// renewal leaves auth.json as it is.
+// evidence: witnesses
+func TestSaveSessionOwnRecordOnly(t *testing.T) {
+	session, _, err := GeneratePassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _, err := GeneratePassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		stored  *[32]byte // the key bob's record is sealed with; nil: no record
+		wantErr error
+		wantUID string // bob's UID in auth.json afterwards, "" for none
+	}{
+		{"own record", session, nil, "renewed"},
+		{"removed", nil, errSessionNotStored, ""},
+		{"logged in anew", other, errSessionNotStored, "anew"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("HOME", t.TempDir())
+			if err := EncryptAndSave(&CachedAuth{UID: "alice"}, "alice", other); err != nil {
+				t.Fatal(err)
+			}
+			if tc.stored != nil {
+				if err := EncryptAndSave(&CachedAuth{UID: "anew"}, "bob", tc.stored); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := saveSession(&CachedAuth{UID: "renewed"}, "bob", session); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("saveSession() = %v, want %v", err, tc.wantErr)
+			}
+
+			auths, err := readCachedAuths()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := auths["alice"]; !ok {
+				t.Error("alice's record is gone")
+			}
+			sealed, ok := auths["bob"]
+			if tc.wantUID == "" {
+				if ok {
+					t.Error("bob's removed record is back")
+				}
+				return
+			}
+			key := session
+			if tc.stored != nil {
+				key = tc.stored
+			}
+			plain, err := decrypt(sealed, key)
+			if err != nil {
+				t.Fatalf("bob's record doesn't open with the key it was sealed with: %v", err)
+			}
+			var got CachedAuth
+			if err := json.Unmarshal(plain, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.UID != tc.wantUID {
+				t.Errorf("bob's UID = %q, want %q", got.UID, tc.wantUID)
+			}
+		})
 	}
 }
