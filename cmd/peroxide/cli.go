@@ -190,9 +190,11 @@ func commandFlags(command string, inv *invocation) (*flag.FlagSet, bool) {
 
 var commands = []string{"auth", "serve", "sendmail", "download-mailbox", "status", "help"}
 
-// undefinedFlag returns the option a flag set's error names as unknown.
+// undefinedFlag returns the option a flag set's error names as unknown,
+// without its leading dash.
 func undefinedFlag(err error) (string, bool) {
-	return strings.CutPrefix(err.Error(), "flag provided but not defined: ")
+	name, ok := strings.CutPrefix(err.Error(), "flag provided but not defined: ")
+	return strings.TrimLeft(name, "-"), ok
 }
 
 // parseArgs parses peroxide's command line, args without the program's name.
