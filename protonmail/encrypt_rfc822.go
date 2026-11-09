@@ -261,7 +261,11 @@ func encryptTo(w io.Writer, key *openpgp.Entity, data io.Reader, signer *openpgp
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(pw, data); err != nil {
+	// In bounded writes: go-crypto buffers each Write whole before it splits
+	// it into packets (packet.partialLengthWriter), and its cipher allocates
+	// an output of the Write's size, so a bytes.Reader's one WriteTo of the
+	// whole message held two more copies of it. The struct hides WriteTo.
+	if _, err := io.CopyBuffer(pw, struct{ io.Reader }{data}, make([]byte, 64<<10)); err != nil {
 		return err
 	}
 	return pw.Close()
