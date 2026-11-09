@@ -357,7 +357,9 @@ func unlockKeyRing(keys []*PrivateKey, userKeyRing openpgp.EntityList, keySalts 
 func (c *Client) Unlock(auth *Auth, keySalts map[string][]byte, passphrase string) (openpgp.EntityList, error) {
 	c.setSession(auth.UID, auth.AccessToken)
 
-	u, err := c.GetCurrentUser()
+	// With the token just got, a 401 is the answer: renewing would refresh
+	// again, and inside ReAuth wait for itself.
+	u, err := c.currentUser(false)
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +369,7 @@ func (c *Client) Unlock(auth *Auth, keySalts map[string][]byte, passphrase strin
 		return nil, err
 	}
 
-	addrs, err := c.ListAddresses()
+	addrs, err := c.listAddresses(false)
 	if err != nil {
 		return nil, err
 	}
@@ -387,22 +389,5 @@ func (c *Client) Unlock(auth *Auth, keySalts map[string][]byte, passphrase strin
 		return nil, fmt.Errorf("failed to unlock any key")
 	}
 
-	c.keyRing = keyRing
-
 	return keyRing, nil
-}
-
-func (c *Client) Logout() error {
-	req, err := c.newRequest(http.MethodDelete, "/auth", nil)
-	if err != nil {
-		return err
-	}
-
-	if err := c.doJSON(req, nil); err != nil {
-		return err
-	}
-
-	c.setSession("", "")
-	c.keyRing = nil
-	return nil
 }

@@ -21,9 +21,18 @@ type User struct {
 }
 
 func (c *Client) GetCurrentUser() (*User, error) {
+	return c.currentUser(true)
+}
+
+// currentUser is GetCurrentUser; renew says whether a 401 may renew the
+// session (see withoutRenewal).
+func (c *Client) currentUser(renew bool) (*User, error) {
 	req, err := c.newRequest(http.MethodGet, "/users", nil)
 	if err != nil {
 		return nil, err
+	}
+	if !renew {
+		req = withoutRenewal(req)
 	}
 
 	var respData struct {

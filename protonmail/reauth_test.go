@@ -1,6 +1,7 @@
 package protonmail
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -70,8 +71,9 @@ func TestReAuthOnce(t *testing.T) {
 	})
 }
 
-// A 401 to a request ReAuth makes with the token it just got fails that
-// request and the ReAuth: it doesn't wait for the ReAuth it is part of.
+// A 401 to a request ReAuth makes with the token it just got, marked
+// withoutRenewal as Unlock's are, fails that request and the ReAuth: it
+// doesn't wait for the ReAuth it is part of.
 // evidence: witnesses
 func TestReAuthInsideFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -87,7 +89,7 @@ func TestReAuthInsideFails(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			inner = c.doJSON(req, nil)
+			inner = c.doJSON(withoutRenewal(req), nil)
 			return inner
 		}
 		req, err := c.newRequest(http.MethodGet, "/x", nil)
@@ -99,6 +101,95 @@ func TestReAuthInsideFails(t *testing.T) {
 		}
 		if inner == nil {
 			t.Error("request inside ReAuth = nil, want an error")
+		}
+	})
+}
+
+// A request that gets 401 again after the session was renewed fails: it
+// renews once, not once per 401.
+// evidence: witnesses
+func TestReAuthRetriesOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var sent int
+		transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			sent++
+			return jsonResponse(r, http.StatusUnauthorized, `{"Code":401}`), nil
+		})
+		c := &Client{RootURL: "https://api.test", HTTPClient: &http.Client{Transport: transport}}
+		c.setSession("uid", "t0")
+		var reauths int
+		c.ReAuth = func() error {
+			reauths++
+			c.setSession("uid", fmt.Sprint("t", reauths))
+			return nil
+		}
+		req, err := c.newRequest(http.MethodGet, "/x", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.doJSON(req, nil); err == nil {
+			t.Error("request = nil, want the second 401")
+		}
+		if reauths != 1 || sent != 2 {
+			t.Errorf("ReAuth ran %v times and %v requests were sent, want 1 and 2", reauths, sent)
+		}
+	})
+}
+
+// A request another goroutine sends with the new token while ReAuth is still
+// running (between its login and the end of Unlock) and that gets 401 waits
+// for that ReAuth and is sent again, rather than failing as one inside it.
+// evidence: witnesses
+func TestReAuthNewTokenOutsideWaits(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// "new" is refused until the ReAuth is done, as if Proton were
+		// slow to accept it; then "newer" works.
+		done := false
+		transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Header.Get("Authorization") == "Bearer newer" {
+				return jsonResponse(r, http.StatusOK, `{"Code":1000}`), nil
+			}
+			return jsonResponse(r, http.StatusUnauthorized, `{"Code":401}`), nil
+		})
+		c := &Client{RootURL: "https://api.test", HTTPClient: &http.Client{Transport: transport}}
+		c.setSession("uid", "old")
+		set, release := make(chan struct{}), make(chan struct{})
+		c.ReAuth = func() error {
+			c.setSession("uid", "new")
+			close(set)
+			<-release
+			c.setSession("uid", "newer")
+			done = true
+			return nil
+		}
+
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			req, err := c.newRequest(http.MethodGet, "/first", nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := c.doJSON(req, nil); err != nil {
+				t.Errorf("request setting off ReAuth = %v", err)
+			}
+		})
+		<-set
+		wg.Go(func() {
+			req, err := c.newRequest(http.MethodGet, "/second", nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := c.doJSON(req, nil); err != nil {
+				t.Errorf("request with the new token during ReAuth = %v, want it to wait", err)
+			}
+		})
+		synctest.Wait()
+		close(release)
+		wg.Wait()
+		if !done {
+			t.Error("ReAuth didn't finish")
 		}
 	})
 }

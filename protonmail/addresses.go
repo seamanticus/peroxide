@@ -48,10 +48,19 @@ type Address struct {
 }
 
 func (c *Client) ListAddresses() ([]*Address, error) {
+	return c.listAddresses(true)
+}
+
+// listAddresses is ListAddresses; renew says whether a 401 may renew the
+// session (see withoutRenewal).
+func (c *Client) listAddresses(renew bool) ([]*Address, error) {
 	// TODO: Page, PageSize
 	req, err := c.newRequest(http.MethodGet, "/addresses", nil)
 	if err != nil {
 		return nil, err
+	}
+	if !renew {
+		req = withoutRenewal(req)
 	}
 
 	var respData struct {

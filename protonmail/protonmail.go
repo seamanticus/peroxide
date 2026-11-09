@@ -3,19 +3,16 @@ package protonmail
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/ProtonMail/go-crypto/openpgp"
-
-	"log"
 )
 
 const Version = 3
@@ -113,14 +110,11 @@ type Client struct {
 	reauthOnce sync.Once
 	reauthing  chan struct{}
 
-	// tokenMu guards uid, accessToken and renewing, read by every request
-	// and written by a login or a refresh while other requests run.
+	// tokenMu guards uid and accessToken, read by every request and written
+	// by a login or a refresh while other requests run.
 	tokenMu     sync.Mutex
 	uid         string
 	accessToken string
-	// renewing is the access token ReAuth is replacing, "" when none is.
-	renewing string
-	keyRing  openpgp.EntityList
 }
 
 func (c *Client) setSession(uid, accessToken string) {
@@ -147,38 +141,28 @@ func withoutSession(req *http.Request) {
 	req.Header.Del("X-Pm-Uid")
 }
 
+// noRenewalKey marks a request whose 401 fails it rather than renewing the
+// session: Unlock's, sent with the token a login or a refresh just got, often
+// inside ReAuth, which would wait for itself.
+type noRenewalKey struct{}
+
+func withoutRenewal(req *http.Request) *http.Request {
+	return req.WithContext(context.WithValue(req.Context(), noRenewalKey{}, true))
+}
+
 // reauth runs ReAuth after a request sent with the access token stale got
 // 401, unless another request has renewed the session meanwhile: then the
-// request is just sent again with the new token. A request ReAuth itself
-// makes (Unlock's, with the new token) that gets 401 fails instead: waiting
-// for the ReAuth it is part of would never end.
+// request is just sent again with the new token.
 func (c *Client) reauth(stale string) error {
-	c.tokenMu.Lock()
-	// A request inside ReAuth was sent with the token ReAuth just set; one
-	// sent with an older token waits for the renewal like the others.
-	inside := c.renewing != "" && stale != c.renewing && stale == c.accessToken
-	c.tokenMu.Unlock()
-	if inside {
-		return errors.New("the session renewed just now was refused")
-	}
-
 	c.reauthOnce.Do(func() { c.reauthing = make(chan struct{}, 1) })
 	c.reauthing <- struct{}{}
 	defer func() { <-c.reauthing }()
 	c.tokenMu.Lock()
 	renewed := c.accessToken != "" && c.accessToken != stale
-	if !renewed {
-		c.renewing = stale
-	}
 	c.tokenMu.Unlock()
 	if renewed {
 		return nil
 	}
-	defer func() {
-		c.tokenMu.Lock()
-		c.renewing = ""
-		c.tokenMu.Unlock()
-	}()
 	return c.ReAuth()
 }
 
@@ -223,6 +207,13 @@ func (c *Client) newJSONRequest(method, path string, body any) (*http.Request, e
 }
 
 func (c *Client) do(req *http.Request) (*http.Response, error) {
+	_, noRenewal := req.Context().Value(noRenewalKey{}).(bool)
+	return c.send(req, !noRenewal)
+}
+
+// send is do; renew says whether a 401 may renew the session and send the
+// request again. It may once: a 401 to the token just renewed is the answer.
+func (c *Client) send(req *http.Request, renew bool) (*http.Response, error) {
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:101.0) Gecko/20100101 Firefox/101.0")
 
 	httpClient := c.HTTPClient
@@ -238,7 +229,7 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	// Check if access token has expired
 	bearer, hasAuth := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
 	canRetry := req.Body == nil || req.GetBody != nil
-	if resp.StatusCode == http.StatusUnauthorized && hasAuth && c.ReAuth != nil && canRetry {
+	if resp.StatusCode == http.StatusUnauthorized && renew && hasAuth && c.ReAuth != nil && canRetry {
 		resp.Body.Close()
 		if err := c.reauth(bearer); err != nil {
 			return resp, err
@@ -251,7 +242,7 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 			}
 			req.Body = body
 		}
-		return c.do(req)
+		return c.send(req, false)
 	}
 
 	return resp, nil
