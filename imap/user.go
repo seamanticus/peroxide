@@ -26,19 +26,21 @@ import (
 	"github.com/seamanticus/peroxide/protonmail"
 )
 
+// systemMailboxes in the order LIST gives them, Proton's sidebar order with
+// All Mail last.
 var systemMailboxes = []struct {
 	name  string
 	label string
 	attrs []string
 }{
 	{imap.InboxName, protonmail.LabelInbox, nil},
-	{"All Mail", protonmail.LabelAllMail, []string{imap.AllAttr}},
-	{"Archive", protonmail.LabelArchive, []string{imap.ArchiveAttr}},
 	{"Drafts", protonmail.LabelDraft, []string{imap.DraftsAttr}},
-	{"Starred", protonmail.LabelStarred, []string{imap.FlaggedAttr}},
-	{"Spam", protonmail.LabelSpam, []string{imap.JunkAttr}},
 	{"Sent", protonmail.LabelSent, []string{imap.SentAttr}},
+	{"Starred", protonmail.LabelStarred, []string{imap.FlaggedAttr}},
+	{"Archive", protonmail.LabelArchive, []string{imap.ArchiveAttr}},
+	{"Spam", protonmail.LabelSpam, []string{imap.JunkAttr}},
 	{"Trash", protonmail.LabelTrash, []string{imap.TrashAttr}},
+	{"All Mail", protonmail.LabelAllMail, []string{imap.AllAttr}},
 }
 
 var systemFlags = []struct {
