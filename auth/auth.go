@@ -144,9 +144,43 @@ func EncryptAndSave(auth *CachedAuth, username string, secretKey *[32]byte) erro
 	return saveAuths(auths)
 }
 
-func authenticate(c *protonmail.Client, cachedAuth *CachedAuth, username string) (openpgp.EntityList, error) {
+// isSpentRefreshToken reports whether err is Proton's answer to a refresh
+// token used already: refresh tokens are single use.
+func isSpentRefreshToken(err error) bool {
+	apiErr, ok := err.(*protonmail.APIError)
+	return ok && apiErr.Code == 10013
+}
+
+// storedAuth returns the session username has in auth.json now, which another
+// peroxide process (sendmail without serve, download-mailbox) may have
+// refreshed since this one read it, or nil if it can't be read.
+func storedAuth(username string, secretKey *[32]byte) *protonmail.Auth {
+	auths, err := readCachedAuths()
+	if err != nil || auths[username] == "" {
+		return nil
+	}
+	b, err := decrypt(auths[username], secretKey)
+	if err != nil {
+		return nil // sealed with another bridge password: `peroxide auth` ran
+	}
+	var stored CachedAuth
+	if err := json.Unmarshal(b, &stored); err != nil {
+		return nil
+	}
+	return &stored.Auth
+}
+
+func authenticate(c *protonmail.Client, cachedAuth *CachedAuth, username string, secretKey *[32]byte) (openpgp.EntityList, error) {
 	auth, err := c.AuthRefresh(&cachedAuth.Auth)
-	if apiErr, ok := err.(*protonmail.APIError); ok && apiErr.Code == 10013 {
+	if isSpentRefreshToken(err) {
+		// Before logging in again, which Proton may answer with CAPTCHA:
+		// another process may have spent the token and stored the next one.
+		if stored := storedAuth(username, secretKey); stored != nil && stored.RefreshToken != cachedAuth.RefreshToken {
+			log.Printf("The refresh token of %v was spent by another peroxide process: using the one it stored", username)
+			auth, err = c.AuthRefresh(stored)
+		}
+	}
+	if isSpentRefreshToken(err) {
 		// Invalid refresh token, re-authenticate
 		authInfo, err := c.AuthInfo(username)
 		if err != nil {
@@ -316,14 +350,14 @@ func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.E
 
 		c := m.newClient()
 		c.ReAuth = func() error {
-			if _, err := authenticate(c, &cachedAuth, username); err != nil {
+			if _, err := authenticate(c, &cachedAuth, username, &secretKey); err != nil {
 				return err
 			}
 			return EncryptAndSave(&cachedAuth, username, &secretKey)
 		}
 
 		// authenticate updates cachedAuth with the new refresh token
-		privateKeys, err := authenticate(c, &cachedAuth, username)
+		privateKeys, err := authenticate(c, &cachedAuth, username, &secretKey)
 		if err != nil {
 			return nil, nil, StoreKey{}, err
 		}

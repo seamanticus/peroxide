@@ -3,6 +3,7 @@ package auth
 import (
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,65 @@ import (
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A refresh token spent by another process (10013) is retried with the one
+// that process stored in auth.json, before any login; only when auth.json
+// holds the same spent token does it fall to logging in again.
+// evidence: witnesses
+func TestAuthenticateTriesStoredToken(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		stored       string // refresh token auth.json holds
+		wantRequests []string
+	}{
+		{"another process stored a new one", "new", []string{"refresh old", "refresh new", "GET /users"}},
+		{"the same one is stored", "old", []string{"refresh old", "POST /auth/info"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("HOME", t.TempDir())
+			secretKey, _, err := GeneratePassword()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := EncryptAndSave(&CachedAuth{UID: "u", RefreshToken: tc.stored}, "bob", secretKey); err != nil {
+				t.Fatal(err)
+			}
+
+			var requests []string
+			transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				body := `{"Code":2001,"Error":"refused"}`
+				status := http.StatusUnprocessableEntity
+				if r.URL.Path == "/auth/refresh" {
+					b, _ := io.ReadAll(r.Body)
+					switch {
+					case strings.Contains(string(b), `"RefreshToken":"old"`):
+						requests = append(requests, "refresh old")
+						body = `{"Code":10013,"Error":"Invalid refresh token"}`
+					case strings.Contains(string(b), `"RefreshToken":"new"`):
+						requests = append(requests, "refresh new")
+						status, body = http.StatusOK, `{"Code":1000,"UID":"u","AccessToken":"a","RefreshToken":"next","ExpiresIn":3600}`
+					default:
+						t.Errorf("refresh with %s", b)
+					}
+				} else {
+					requests = append(requests, r.Method+" "+r.URL.Path)
+				}
+				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}},
+					Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+			})
+			c := &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{Transport: transport}}
+			cached := &CachedAuth{UID: "u", RefreshToken: "old"}
+			// Fails after what is checked: GET /users and /auth/info are refused.
+			if _, err := authenticate(c, cached, "bob", secretKey); err == nil {
+				t.Error("authenticate() = nil, want the refused request after")
+			}
+			if !slices.Equal(requests, tc.wantRequests) {
+				t.Errorf("requests %q, want %q", requests, tc.wantRequests)
+			}
+		})
+	}
+}
 
 // Clients logging in to one account at the same time refresh its stored
 // token one after the other, never together: a refresh token is spent by its
