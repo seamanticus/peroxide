@@ -56,7 +56,12 @@ Proton's refresh tokens are single use, so two peroxide processes
 holding sessions for the same account would each refresh it, and the
 slower one, its token spent, is logged out until `peroxide auth` is run
 again. (Older peroxide had separate `imap` and `smtp` commands, which
-did exactly that when run side by side.)
+did exactly that when run side by side.) `serve` holds a lock,
+`serve.lock` in the configuration directory, while it runs: a second
+`serve` stops with "peroxide serve is already running", `sendmail`
+sends through it, and `download-mailbox` refuses to run. Clients
+logging in to one account at once share one login, and requests that
+meet an expired session renew it once between them.
 
 ### `status`
 
@@ -87,10 +92,9 @@ in Proton changes. It is what peroxide does by itself on a Refresh
 event or an event it can't apply (see
 [imap/sync.md](imap/sync.md#rebuilding-the-database)).
 
-The database file takes one process at a time, and `serve` holds an
-account's file while an IMAP client of that account is logged in.
-Then the command fails with "the database is in use by another peroxide
-process": log the client out, or stop `serve`, first.
+While `serve` runs, the command refuses at once, before logging in:
+`serve` downloads the account itself once a client logs in, and logging
+in here would spend the session `serve` holds. Stop `serve` first.
 
 ### `sendmail <username> -- <recipients...>`
 
@@ -105,6 +109,16 @@ password or reads `PEROXIDE_BRIDGE_PASS`.
 changes nothing: peroxide reads stdin to its end whatever it contains,
 so a line holding only `.` never ends
 the message. No other sendmail option is understood.
+
+While `serve` runs, `sendmail` hands the message to `serve`'s SMTP
+server (`-smtp-host`, `-smtp-port`), logged in with the username and
+bridge password, so that the account keeps the one session `serve`
+holds; the envelope sender is the message's From. Give it the same
+`-smtp-*` and `-tls-*` options as `serve`: with TLS it trusts only the
+certificate `-tls-cert` names, byte for byte, so a self-signed one
+works. If `serve` runs with `-disable-smtp` or `-tls-client-ca`,
+`sendmail` fails rather than log in itself. With no `serve` running,
+it sends on its own, as `serve` would.
 
 ## Global options
 

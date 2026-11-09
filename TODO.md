@@ -517,11 +517,22 @@ until `peroxide auth` was run again (seen 2026-11-09). `serve` runs both
 servers on one auth.Manager. Decided 2026-11-10: peroxide is a desktop
 server, `serve` is all it needs. Described in docs/commands.md.
 
-**Left open.** `sendmail` and `download-mailbox` also make a session of
-their own from the stored refresh token, so run beside `serve` they can
-spend the token `serve` holds in memory, with the same lockout.
-`download-mailbox` already says not to run it while a client is logged
-in; `sendmail` doesn't.
+**Then** (2026-11-10), every way two refreshes of one token could meet:
+
+- within `serve`: logins of one account, and requests meeting an
+  expired session, each refreshed on their own (b073584: one at a time);
+- `auth.json` written in place, readable half written (8f71c1e: temp
+  file and rename);
+- `download-mailbox` beside `serve` (4cdce52: `serve.lock`, refused
+  before logging in);
+- `sendmail` beside `serve` (43631a2: through `serve`'s SMTP, TLS
+  certificate pinned);
+- anything else that spends the token: on 10013, the token auth.json
+  holds is tried before logging in (9f63ab5).
+
+Left: two processes saving auth.json at once can still lose one's
+change (read, modify, write); with the lock, no second process
+refreshes while `serve` runs.
 
 ## 19. SMTP can't send a PGP/MIME message the client encrypted
 
