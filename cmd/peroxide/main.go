@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"flag"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,7 +17,6 @@ import (
 	rtdebug "runtime/debug"
 	"strings"
 	"syscall"
-	"time"
 
 	imapserver "github.com/emersion/go-imap/server"
 	"github.com/emersion/go-smtp"
@@ -30,11 +29,6 @@ import (
 	imapbackend "github.com/seamanticus/peroxide/imap"
 	"github.com/seamanticus/peroxide/protonmail"
 	smtpbackend "github.com/seamanticus/peroxide/smtp"
-)
-
-const (
-	defaultAPIEndpoint = "https://mail.proton.me/api"
-	defaultAppVersion  = "Other"
 )
 
 var (
@@ -165,129 +159,24 @@ func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, even
 	return s.ListenAndServe()
 }
 
-const usage = `usage: peroxide [options...] <command>
-Commands:
-
-	auth [options...] <username>			Login to ProtonMail via peroxide
-
-	sendmail <username> -- <args...>		sendmail(1) interface
-
-	download-mailbox [-discard-local-copy] <username>
-						Download the account's mail into peroxide's local copy
-						now, as serve does in the background after a login, and
-						exit once it is complete. Run it before the first client
-						connects to a large account; interrupted, it resumes.
-						Not while serve runs: it downloads by itself.
-						-discard-local-copy wipes the local copy first and
-						downloads it all again: every mailbox gets a new
-						UIDVALIDITY, so clients refetch.
-
-	serve									Run the IMAP and SMTP servers
-
-	status									View peroxide status
-
-Global options:
-
-	-debug
-		Log API requests and responses as received, and IMAP and SMTP
-		traffic, with credentials scrubbed. Everything else written to
-		stderr, prompts and crashes included, goes to stdout too
-	
-	-api-endpoint <url>
-		ProtonMail API endpoint
-	
-	-app-version <version>
-		ProtonMail application version
-	
-	-smtp-host example.com
-		Allowed SMTP email hostname on which peroxide listens, defaults to 127.0.0.1
-	
-	-imap-host example.com
-		Allowed IMAP email hostname on which peroxide listens, defaults to 127.0.0.1
-	
-	-smtp-port example.com
-		SMTP port on which peroxide listens, defaults to 1025
-
-	-imap-port example.com
-		IMAP port on which peroxide listens, defaults to 1143
-	
-	-disable-imap
-		Disable IMAP for peroxide serve
-	
-	-show-all-mail=false
-		Leave the All Mail mailbox out of IMAP LIST, defaults to true
-	
-	-disable-smtp
-		Disable SMTP for peroxide serve
-	
-	-tls-cert /path/to/cert.pem
-		Path to the certificate to use for incoming connections (Optional)
-	
-	-tls-key /path/to/key.pem
-		Path to the certificate key to use for incoming connections (Optional)
-	
-	-tls-client-ca /path/to/ca.pem
-		If set, clients must provide a certificate signed by the given CA (Optional)
-
-Options for "auth" command:
-	
-	-remove
-		Delete the stored credentials for the username instead of logging in
-	
-	-captcha-mode browser|manual|disabled
-		How to complete Proton's human verification challenge when it is
-		requested, defaults to browser
-	
-	-captcha-listen 127.0.0.1:8765
-		Address of the local, loopback-only CAPTCHA helper server
-	
-	-captcha-timeout 10m
-		Maximum time to wait for the challenge to be completed
-	
-	-no-open-browser
-		Print the CAPTCHA URL instead of trying to launch a browser
-	
-	-captcha-endpoint https://mail-api.proton.me
-		API host serving the CAPTCHA challenge. It must serve both
-		/core/v4/captcha and the widget's assets under /captcha/v1/assets/
-
-Environment variables:
-	PEROXIDE_BRIDGE_PASS	Don't prompt for the bridge password, use this variable instead
-
-`
-
 func main() {
-	flag.BoolVar(&debug, "debug", false, "Log API, IMAP and SMTP traffic to stdout, credentials scrubbed")
-	flag.StringVar(&apiEndpoint, "api-endpoint", defaultAPIEndpoint, "ProtonMail API endpoint")
-	flag.StringVar(&appVersion, "app-version", defaultAppVersion, "ProtonMail app version")
-
-	smtpHost := flag.String("smtp-host", "127.0.0.1", "Allowed SMTP email hostname on which peroxide listens, defaults to 127.0.0.1")
-	smtpPort := flag.String("smtp-port", "1025", "SMTP port on which peroxide listens, defaults to 1025")
-	disableSMTP := flag.Bool("disable-smtp", false, "Disable SMTP for peroxide serve")
-
-	imapHost := flag.String("imap-host", "127.0.0.1", "Allowed IMAP email hostname on which peroxide listens, defaults to 127.0.0.1")
-	imapPort := flag.String("imap-port", "1143", "IMAP port on which peroxide listens, defaults to 1143")
-	disableIMAP := flag.Bool("disable-imap", false, "Disable IMAP for peroxide serve")
-	showAllMail := flag.Bool("show-all-mail", true, "Show the All Mail mailbox in IMAP LIST")
-
-	tlsCert := flag.String("tls-cert", "", "Path to the certificate to use for incoming connections")
-	tlsCertKey := flag.String("tls-key", "", "Path to the certificate key to use for incoming connections")
-	tlsClientCA := flag.String("tls-client-ca", "", "If set, clients must provide a certificate signed by the given CA")
-
-	authCmd := flag.NewFlagSet("auth", flag.ExitOnError)
-	sendmailCmd := flag.NewFlagSet("sendmail", flag.ExitOnError)
-	downloadCmd := flag.NewFlagSet("download-mailbox", flag.ExitOnError)
-
-	flag.Usage = func() {
+	inv, err := parseArgs(os.Args[1:])
+	if errors.Is(err, errHelp) {
 		fmt.Print(usage)
+		return
 	}
-
-	flag.Parse()
-
-	tlsConfig, err := config.TLS(*tlsCert, *tlsCertKey, *tlsClientCA)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, "peroxide:", err)
+		os.Exit(2)
 	}
+	if inv.global.version {
+		info, ok := rtdebug.ReadBuildInfo()
+		fmt.Print(versionText(info, ok))
+		return
+	}
+	debug = inv.global.debug
+	apiEndpoint = inv.global.apiEndpoint
+	appVersion = inv.global.appVersion
 
 	if debug {
 		// One redirect then captures the whole session in order, as
@@ -298,26 +187,13 @@ func main() {
 			log.Fatalf("copy crashes to stdout: %v", err)
 		}
 	}
-	cmd := flag.Arg(0)
-	switch cmd {
+	switch inv.command {
 	case "auth":
-		var captchaMode, captchaListen string
-		var captchaTimeout time.Duration
-		var noOpenBrowser, remove bool
-		authCmd.StringVar(&captchaMode, "captcha-mode", string(captcha.ModeBrowser), "CAPTCHA behavior: browser, manual or disabled")
-		authCmd.StringVar(&captchaListen, "captcha-listen", captcha.DefaultListenAddr, "Local CAPTCHA callback address")
-		authCmd.DurationVar(&captchaTimeout, "captcha-timeout", captcha.DefaultTimeout, "Maximum time to wait for the CAPTCHA to be completed")
-		authCmd.BoolVar(&noOpenBrowser, "no-open-browser", false, "Print the CAPTCHA URL without trying to launch a browser")
-		captchaEndpoint := authCmd.String("captcha-endpoint", protonmail.CaptchaEndpoint, "API host serving the CAPTCHA challenge")
-		authCmd.BoolVar(&remove, "remove", false, "Delete the stored credentials for the username instead of logging in")
-		authCmd.Parse(flag.Args()[1:])
-		protonmail.CaptchaEndpoint = *captchaEndpoint
-		username := authCmd.Arg(0)
-		if username == "" {
-			log.Fatal("usage: peroxide auth [options...] <username>")
-		}
+		opts := inv.auth
+		protonmail.CaptchaEndpoint = opts.captchaEndpoint
+		username := inv.args[0]
 
-		if remove {
+		if opts.remove {
 			if err := auth.DeleteUsername(username); err != nil {
 				log.Fatal(err)
 			}
@@ -342,15 +218,15 @@ func main() {
 			break
 		}
 
-		mode, err := captcha.ParseMode(captchaMode)
+		mode, err := captcha.ParseMode(opts.captchaMode)
 		if err != nil {
 			log.Fatal(err)
 		}
 		captchaOpts := captcha.Options{
 			Mode:        mode,
-			ListenAddr:  captchaListen,
-			Timeout:     captchaTimeout,
-			OpenBrowser: !noOpenBrowser,
+			ListenAddr:  opts.captchaListen,
+			Timeout:     opts.captchaTimeout,
+			OpenBrowser: !opts.noOpenBrowser,
 			Output:      log.Writer(),
 		}
 
@@ -467,21 +343,26 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		smtpAddr := *smtpHost + ":" + *smtpPort
-		imapAddr := *imapHost + ":" + *imapPort
+		so := inv.serve
+		tlsConfig, err := config.TLS(so.tlsCert, so.tlsKey, so.tlsClientCA)
+		if err != nil {
+			log.Fatal(err)
+		}
+		smtpAddr := so.smtpHost + ":" + so.smtpPort
+		imapAddr := so.imapHost + ":" + so.imapPort
 
 		authManager := auth.NewManager(newClient)
 		eventsManager := events.NewManager()
 
 		done := make(chan error, 2)
-		if !*disableSMTP {
+		if !so.disableSMTP {
 			go func() {
 				done <- listenAndServeSMTP(smtpAddr, debug, authManager, tlsConfig)
 			}()
 		}
-		if !*disableIMAP {
+		if !so.disableIMAP {
 			go func() {
-				done <- listenAndServeIMAP(imapAddr, debug, authManager, eventsManager, tlsConfig, *showAllMail)
+				done <- listenAndServeIMAP(imapAddr, debug, authManager, eventsManager, tlsConfig, so.showAllMail)
 			}()
 		}
 		err = <-done
@@ -490,12 +371,7 @@ func main() {
 		runtime.KeepAlive(serveLock)
 		log.Fatal(err)
 	case "download-mailbox":
-		discard := downloadCmd.Bool("discard-local-copy", false, "wipe the local copy first and download it again from scratch")
-		downloadCmd.Parse(flag.Args()[1:])
-		username := downloadCmd.Arg(0)
-		if username == "" || downloadCmd.NArg() != 1 {
-			log.Fatal("usage: peroxide download-mailbox [-discard-local-copy] <username>")
-		}
+		username := inv.args[0]
 		// Before logging in: that spends the refresh token serve holds.
 		if running, err := config.ServeRunning(); err != nil {
 			log.Fatal(err)
@@ -513,21 +389,12 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		if err := imapbackend.DownloadAccount(c, privateKeys, storeKey, *discard); err != nil {
+		if err := imapbackend.DownloadAccount(c, privateKeys, storeKey, inv.discard); err != nil {
 			log.Fatal(err)
 		}
 	case "sendmail":
-		username := flag.Arg(1)
-		if username == "" || flag.Arg(2) != "--" {
-			log.Fatal("usage: peroxide sendmail <username> -- <args...>")
-		}
-
-		// git send-email always passes -i ("a line holding only . doesn't end
-		// the input"), and the FlagSet exits on a flag it doesn't define. stdin
-		// is read to its end anyway, so -i is accepted and changes nothing.
-		sendmailCmd.Bool("i", false, "accepted for sendmail(1) compatibility; stdin is always read to its end")
-		sendmailCmd.Parse(flag.Args()[3:])
-		rcpt := sendmailCmd.Args()
+		username := inv.args[0]
+		rcpt := inv.sendmail.recipients
 
 		bridgePassword, err := askBridgePass()
 		if err != nil {
@@ -543,8 +410,8 @@ func main() {
 		if running, err := config.ServeRunning(); err != nil {
 			log.Fatal(err)
 		} else if running {
-			addr := *smtpHost + ":" + *smtpPort
-			if err := sendThroughServe(addr, tlsConfig, username, bridgePassword, rcpt, msg); err != nil {
+			addr := inv.sendmail.smtpHost + ":" + inv.sendmail.smtpPort
+			if err := sendThroughServe(addr, inv.sendmail.tlsCert, username, bridgePassword, rcpt, msg); err != nil {
 				log.Fatal(err)
 			}
 			return
@@ -570,9 +437,6 @@ func main() {
 			log.Fatal(err)
 		}
 	default:
-		fmt.Print(usage)
-		if cmd != "help" {
-			log.Fatal("Unrecognized command")
-		}
+		panic("invariant: parseArgs returns known commands only")
 	}
 }

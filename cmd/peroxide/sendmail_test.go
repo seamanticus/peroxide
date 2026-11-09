@@ -6,10 +6,13 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"io"
 	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -124,13 +127,18 @@ func TestSendThroughServe(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &relay{wantUser: "bob", wantPass: "pw"}
-			var serverTLS, serveTLS *tls.Config
+			var serverTLS *tls.Config
+			certPath := ""
 			if tc.serverCert != nil {
 				serverTLS = &tls.Config{Certificates: []tls.Certificate{*tc.serverCert}}
-				serveTLS = &tls.Config{Certificates: []tls.Certificate{*tc.pinnedCert}}
+				certPath = filepath.Join(t.TempDir(), "cert.pem")
+				pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tc.pinnedCert.Certificate[0]})
+				if err := os.WriteFile(certPath, pemBytes, 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			addr := startRelay(t, r, serverTLS)
-			err := sendThroughServe(addr, serveTLS, "bob", tc.password, []string{"carol@example.org", "dan@example.org"}, []byte(relayMessage))
+			err := sendThroughServe(addr, certPath, "bob", tc.password, []string{"carol@example.org", "dan@example.org"}, []byte(relayMessage))
 			if tc.wantErrIn != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrIn) {
 					t.Errorf("sendThroughServe() = %v, want an error with %q", err, tc.wantErrIn)
@@ -167,7 +175,7 @@ func TestSendThroughServeNotListening(t *testing.T) {
 	}
 	addr := l.Addr().String()
 	l.Close()
-	err = sendThroughServe(addr, nil, "bob", "pw", []string{"carol@example.org"}, []byte(relayMessage))
+	err = sendThroughServe(addr, "", "bob", "pw", []string{"carol@example.org"}, []byte(relayMessage))
 	if err == nil || !strings.Contains(err.Error(), "can't be reached") {
 		t.Errorf("sendThroughServe() = %v, want it unreachable", err)
 	}

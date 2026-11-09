@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/mail"
+	"os"
 
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
@@ -16,11 +18,10 @@ import (
 // server at addr, logged in as username with the bridge password, so that the
 // account's Proton session stays the one serve holds: a session of its own
 // would spend the refresh token serve has (TODO 18). The envelope sender is
-// the message's From; the recipients are rcpt. With tlsConfig, serve's TLS
-// configuration from the same flags, the connection is TLS and serve's
-// certificate is pinned: only the very certificate serve presents is
-// trusted, whatever names it holds.
-func sendThroughServe(addr string, tlsConfig *tls.Config, username, password string, rcpt []string, msg []byte) error {
+// the message's From; the recipients are rcpt. With certPath, serve's
+// -tls-cert, the connection is TLS and that certificate is pinned: only the
+// very certificate serve presents is trusted, whatever names it holds.
+func sendThroughServe(addr, certPath string, username, password string, rcpt []string, msg []byte) error {
 	m, err := mail.ReadMessage(bytes.NewReader(msg))
 	if err != nil {
 		return fmt.Errorf("cannot read the message: %w", err)
@@ -31,16 +32,17 @@ func sendThroughServe(addr string, tlsConfig *tls.Config, username, password str
 	}
 
 	var c *smtp.Client
-	if tlsConfig == nil {
+	if certPath == "" {
 		c, err = smtp.Dial(addr)
 	} else {
 		var pinned *tls.Config
-		if pinned, err = pinnedTLS(tlsConfig); err == nil {
-			c, err = smtp.DialTLS(addr, pinned)
+		if pinned, err = pinnedTLS(certPath); err != nil {
+			return err
 		}
+		c, err = smtp.DialTLS(addr, pinned)
 	}
 	if err != nil {
-		return fmt.Errorf("peroxide serve is running, but its SMTP server at %v can't be reached (run with -disable-smtp?): %w", addr, err)
+		return fmt.Errorf("peroxide serve is running, but its SMTP server at %v can't be reached (run with -disable-smtp, or -tls-client-ca?): %w", addr, err)
 	}
 	defer c.Close()
 
@@ -69,17 +71,20 @@ func sendThroughServe(addr string, tlsConfig *tls.Config, username, password str
 	return c.Quit()
 }
 
-// pinnedTLS is a client configuration trusting only the certificate serve's
-// configuration presents, compared byte for byte: serve's certificate is
-// often self-signed, for a name other than the loopback address dialled.
-func pinnedTLS(serve *tls.Config) (*tls.Config, error) {
-	if serve.ClientAuth == tls.RequireAndVerifyClientCert {
-		return nil, errors.New("serve asks clients for a certificate (-tls-client-ca): sendmail has none")
+// pinnedTLS is a client configuration trusting only the certificate in the
+// PEM file certPath (serve's -tls-cert, its first certificate, the one serve
+// presents), compared byte for byte: serve's certificate is often
+// self-signed, for a name other than the loopback address dialled.
+func pinnedTLS(certPath string) (*tls.Config, error) {
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read serve's certificate: %w", err)
 	}
-	if len(serve.Certificates) == 0 || len(serve.Certificates[0].Certificate) == 0 {
-		return nil, errors.New("serve's TLS configuration has no certificate")
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("%v holds no PEM certificate", certPath)
 	}
-	want := serve.Certificates[0].Certificate[0]
+	want := block.Bytes
 	if _, err := x509.ParseCertificate(want); err != nil {
 		return nil, fmt.Errorf("cannot read serve's certificate: %w", err)
 	}
