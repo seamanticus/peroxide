@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+	"time"
 )
 
 // serveLockFile is held by peroxide serve while it runs, so that other
@@ -33,15 +34,23 @@ func openServeLock() (*os.File, error) {
 	return f, nil
 }
 
-// tryLock takes an exclusive flock on f without waiting; held reports that
-// another open file holds it.
-func tryLock(f *os.File) (held bool, err error) {
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+// tryLock takes a flock of kind (LOCK_EX or LOCK_SH) on f without waiting;
+// held reports that another open file holds a lock in the way.
+func tryLock(f *os.File, kind int) (held bool, err error) {
+	err = syscall.Flock(int(f.Fd()), kind|syscall.LOCK_NB)
 	if errors.Is(err, syscall.EWOULDBLOCK) {
 		return true, nil
 	}
 	return false, err
 }
+
+// lockServeTries and lockServeWait bound how long LockServe waits out a
+// ServeRunning check, which holds the lock shared for an instant; a serve holds
+// it for good.
+const (
+	lockServeTries = 20
+	lockServeWait  = 10 * time.Millisecond
+)
 
 // LockServe takes the serve lock for the life of the process, or returns
 // ErrServeRunning.
@@ -50,15 +59,19 @@ func LockServe() (*ServeLock, error) {
 	if err != nil {
 		return nil, err
 	}
-	held, err := tryLock(f)
-	if err != nil || held {
-		f.Close()
-		if held {
-			return nil, ErrServeRunning
+	for range lockServeTries {
+		held, err := tryLock(f, syscall.LOCK_EX)
+		if err != nil {
+			f.Close()
+			return nil, fmt.Errorf("cannot take the serve lock: %w", err)
 		}
-		return nil, fmt.Errorf("cannot take the serve lock: %w", err)
+		if !held {
+			return &ServeLock{f}, nil
+		}
+		time.Sleep(lockServeWait)
 	}
-	return &ServeLock{f}, nil
+	f.Close()
+	return nil, ErrServeRunning
 }
 
 // Release gives the lock back.
@@ -73,10 +86,11 @@ func ServeRunning() (bool, error) {
 		return false, err
 	}
 	defer f.Close()
-	held, err := tryLock(f)
+	// Shared, so that checks running at once don't see each other as a
+	// serve; only serve's exclusive lock is in the way. Closing f releases it.
+	held, err := tryLock(f, syscall.LOCK_SH)
 	if err != nil {
 		return false, fmt.Errorf("cannot check the serve lock: %w", err)
 	}
-	// Taken just to look: closing f releases it.
 	return held, nil
 }

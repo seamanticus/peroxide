@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"syscall"
 	"testing"
 )
 
@@ -33,6 +34,37 @@ func TestServeLock(t *testing.T) {
 	l, err = LockServe()
 	if err != nil {
 		t.Fatalf("LockServe() after release = %v", err)
+	}
+	l.Release()
+}
+
+// A check in progress, holding the lock shared, is not a serve: another
+// check still finds none running, and LockServe waits it out.
+// evidence: witnesses
+func TestServeRunningChecksDontConflict(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	check, err := openServeLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held, err := tryLock(check, syscall.LOCK_SH); err != nil || held {
+		t.Fatalf("shared lock = %v, %v", held, err)
+	}
+	if running, err := ServeRunning(); err != nil || running {
+		t.Errorf("ServeRunning() beside a check = %v, %v; want false", running, err)
+	}
+
+	// Held for good, the check looks like a serve that never ends.
+	if _, err := LockServe(); !errors.Is(err, ErrServeRunning) {
+		t.Errorf("LockServe() beside a lasting shared lock = %v, want ErrServeRunning", err)
+	}
+	// Released, it is gone.
+	if err := check.Close(); err != nil {
+		t.Fatal(err)
+	}
+	l, err := LockServe()
+	if err != nil {
+		t.Fatalf("LockServe() after the check = %v", err)
 	}
 	l.Release()
 }
