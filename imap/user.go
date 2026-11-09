@@ -288,7 +288,7 @@ func (u *user) setMailboxes(labels []*protonmail.Label) error {
 	}
 
 	for _, label := range labels {
-		if label.Type != protonmail.LabelMessage {
+		if !label.HoldsMessages() {
 			continue
 		}
 		if _, ok := mailboxes[label.ID]; ok {
@@ -919,7 +919,7 @@ func (u *user) handleLabelEvent(event *protonmail.EventLabel) (ups []imapbackend
 }
 
 func (u *user) createLabel(label *protonmail.Label) {
-	if label.Type != protonmail.LabelMessage {
+	if !label.HoldsMessages() {
 		return
 	}
 
@@ -1000,7 +1000,7 @@ func (u *user) checkFolderNames() {
 		before[labelID] = mbox.Name()
 	}
 	for _, label := range labels {
-		if mbox, ok := u.mailboxes[label.ID]; ok && mbox.kind != kindSystem && label.Type == protonmail.LabelMessage {
+		if mbox, ok := u.mailboxes[label.ID]; ok && mbox.kind != kindSystem && label.HoldsMessages() {
 			mbox.setLabel(label)
 		}
 	}

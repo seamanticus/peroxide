@@ -46,7 +46,7 @@ func (k mailboxKind) prefix() string {
 
 // labelKind is the kind of mailbox that shows label, a folder or a label.
 func labelKind(label *protonmail.Label) mailboxKind {
-	if label.Exclusive == 1 {
+	if label.IsFolder() {
 		return kindFolder
 	}
 	return kindLabel
@@ -1026,7 +1026,7 @@ func (u *user) keepsMessage(msg *protonmail.Message, from string, listed *map[st
 		}
 		// GET /labels lists folders and labels, not Proton's own: a label
 		// missing from it is one of those, which keeps nothing.
-		if label, ok := (*listed)[labelID]; ok && label.Type == protonmail.LabelMessage {
+		if label, ok := (*listed)[labelID]; ok && label.HoldsMessages() {
 			return labelID, nil
 		}
 	}
