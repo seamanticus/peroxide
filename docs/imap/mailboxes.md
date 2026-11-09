@@ -19,30 +19,40 @@ label you set by starring.
 
 | IMAP mailbox | Proton label ID | LIST attributes |
 |---|---|---|
-| `INBOX` | 0 | |
-| `All Mail` | 5 | `\All` (hidden from LIST with `-show-all-mail=false`) |
-| `Archive` | 6 | `\Archive` |
-| `Drafts` | 8 | `\Drafts` |
-| `Starred` | 10 | `\Flagged` |
-| `Spam` | 4 | `\Junk` |
-| `Sent` | 7 | `\Sent` |
-| `Trash` | 3 | `\Trash` |
-| each of your folders | its ID | |
+| `INBOX` | 0 | `\Noinferiors` |
+| `Drafts` | 8 | `\Noinferiors \Drafts` |
+| `Sent` | 7 | `\Noinferiors \Sent` |
+| `Starred` | 10 | `\Noinferiors \Flagged` |
+| `Archive` | 6 | `\Noinferiors \Archive` |
+| `Spam` | 4 | `\Noinferiors \Junk` |
+| `Trash` | 3 | `\Noinferiors \Trash` |
+| `All Mail` | 5 | `\Noinferiors \All` (hidden from LIST with `-show-all-mail=false`) |
+| `Folders` | none | `\Noselect` |
+| `Folders/<path>`, each of your folders | its ID | `\HasChildren` or `\HasNoChildren` |
+| `Labels` | none | `\Noselect` |
+| `Labels/<name>`, each of your labels | its ID | `\Noinferiors` |
 
-Every mailbox also has `\Noinferiors`: peroxide shows no hierarchy.
-A folder's name is Proton's name for it, as is. Nested Proton folders
-appear under their own name, not their path (`TODO.md` section 1).
+These are proton-bridge's names. `Folders` and `Labels` hold no
+messages: they are there so clients draw the hierarchy, and every
+command but LIST refuses them. A folder inside another is
+`Folders/<parent>/<name>`, to any depth; labels can't be nested in
+Proton.
 
-**Your labels are not mailboxes: they are IMAP flags (keywords).** A
-label named `To do` is the flag `To_do` on every message that has it.
-The name is made a valid IMAP atom: characters RFC 3501 forbids in an
-atom (space, `(`, `)`, `{`, `%`, `*`, `"`, `\`, `]`, controls and
-non-ASCII) become `_`, runs of them one `_`. Setting the flag on a
-message adds the label in Proton; removing it removes the label.
+Names are built from each folder's own name and its parent, never from
+Proton's `Path`: Proton escapes a `/` in a name as `\/` there but leaves
+`\` alone, so a folder `A/B` and a folder `B` inside `A\` have the same
+`Path`. A `/` in a name would read as nesting, so peroxide shows it as
+U+2215 (DIVISION SLASH), which looks the same: the folder `A/B` is
+`Folders/A\u2215B`. A `\` is shown as is.
 
-Two system labels are flags as well: Starred is `\Flagged`, and Drafts
-is `\Draft` (read-only: drafts are a mailbox in Proton, so `\Draft`
-can't be set or cleared).
+A message with three labels appears in its folder and in three
+`Labels/` mailboxes. To label a message, COPY or MOVE it into
+`Labels/<name>` (see [changes.md](changes.md)); to remove the label,
+EXPUNGE it from there or MOVE it out.
+
+Two system labels are flags: Starred is `\Flagged`, and Drafts is
+`\Draft` (read-only: drafts are a mailbox in Proton, so `\Draft` can't
+be set or cleared).
 
 Flags peroxide maps:
 
@@ -53,23 +63,18 @@ Flags peroxide maps:
 | `\Flagged` | label Starred | yes |
 | `\Draft` | label Drafts | no |
 | `\Deleted` | kept by peroxide only, per mailbox, until EXPUNGE or restart | yes |
-| each label's flag | that label | yes |
 
-Flags are matched without regard to case: go-imap lower-cases every
-flag RFC 3501 doesn't define, so `To_do`, `to_do` and `TO_DO` reach the
-same label. If two labels differ only in case, or map to the same atom
-(`To do` and `To_do`), a flag reaches the one with the lowest ID. SELECT
-lists `\Seen \Deleted` then the label flags, in label ID order, in both
-`FLAGS` and `PERMANENTFLAGS`. Any other flag a client sets is ignored
-(Proton has nowhere to keep it), and the client isn't told.
+SELECT lists `\Seen \Deleted \Flagged \Draft` in both `FLAGS` and
+`PERMANENTFLAGS`. Any other flag a client sets, keywords included, is
+ignored (Proton has nowhere to keep it), and the client isn't told.
 
 ## LIST, LSUB, SUBSCRIBE
 
-LIST returns every mailbox above (the order varies from one LIST to the
-next, `TODO.md` section 11). LSUB returns the same, as peroxide treats
-every mailbox as subscribed; SUBSCRIBE and UNSUBSCRIBE fail with "not
-yet implemented". Clients that LIST only subscribed mailboxes see them
-all.
+LIST returns every mailbox above, always in the order of the table:
+system mailboxes, then `Folders` and the folders by name, then `Labels`
+and the labels by name. LSUB returns the same, as peroxide treats every
+mailbox as subscribed; SUBSCRIBE and UNSUBSCRIBE fail with "not yet
+implemented". Clients that LIST only subscribed mailboxes see them all.
 
 ## STATUS and SELECT counts
 
@@ -86,44 +91,48 @@ Proton sends a `Labels` event when you create, rename or delete a
 folder or label (on the web, on your phone, anywhere). peroxide applies
 it within one poll (20 to 40 seconds while a client is connected):
 
-- A created folder becomes a mailbox; a created label, a flag.
-- A renamed folder keeps its messages and its local data (everything is
-  keyed by label ID); clients that have it selected keep it selected
-  under the new name.
-- A deleted folder's mailbox and local entries go (its messages stay in
-  the database, as other mailboxes may hold them).
-- A folder turned into a label, or the reverse, is ignored until the
-  next login.
+- A created folder or label becomes a mailbox, filled from the messages
+  already stored: nothing is downloaded again.
+- A renamed or moved folder or label keeps its messages, UIDs and
+  UIDVALIDITY (everything is keyed by label ID); clients that have it
+  selected keep it selected under the new name. The folders inside a
+  renamed folder are renamed with it. Proton sends no event for them,
+  so peroxide also reads the labels once more (`GET /labels`) and logs
+  any name that differs from the one it derived.
+- A folder turned into a label, or the reverse, moves from `Folders/`
+  to `Labels/` (or back) the same way, keeping its UIDs.
+- A deleted folder or label's mailbox and local entries go (its
+  messages stay in the database, as other mailboxes may hold them).
+  Clients that have it selected get `* BYE <name> was deleted in
+  Proton: please log in again`; aerc reconnects by itself.
 
-**Clients are not told.** go-imap could send an unsolicited LIST, but
-its own client library, which aerc uses, drops it. Your client sees
+**Other clients are not told.** go-imap could send an unsolicited LIST,
+but its own client library, which aerc uses, drops it. Your client sees
 the new mailbox list the next time it sends LIST. aerc sends LIST only
 when it connects, so reconnect it (`:connect`, or restart it).
 
-## Known collisions
+## Names that can't collide
 
-- Two folders with the same name (at different levels in Proton, or one
-  named like a system mailbox, "Sent") can't both be opened: a SELECT
-  of that name opens whichever peroxide finds first.
-- A folder named `Inbox` (any case) can't be opened at all: IMAP
-  reserves that name (RFC 3501 section 5.1), and go-imap turns it into
-  `INBOX` before peroxide sees it.
-
-`TODO.md` section 1 plans names that remove both, the way proton-bridge
-does.
+Proton keeps folder names unique among siblings, and labels unique, so
+the prefixes make every name unique: a folder named `Sent` is
+`Folders/Sent`, and one named `Inbox` is `Folders/Inbox`, which IMAP
+doesn't reserve (only a top-level `INBOX` is, RFC 3501 section 5.1).
+The one collision left is a name that already holds U+2215, which
+reads like one holding `/`.
 
 ## How proton-bridge does it
 
 proton-bridge shows folders as `Folders/<path>` and labels as
 `Labels/<name>`, both as mailboxes, with system mailboxes at the top
-level. A message with three labels then appears in three `Labels/`
-mailboxes plus its folder; COPY to `Labels/x` adds a label, EXPUNGE
-from it removes one. Names can't collide, nesting shows, and aerc
-recognises `Labels/` as labels when the server is on 127.0.0.1.
+level, as peroxide does. aerc recognises `Labels/` as labels when the
+server is on 127.0.0.1, so `:modify-labels` works.
 
-peroxide shows labels as flags, as hydroxide did: a message appears
-once per folder, and clients filter by keyword instead. Labels as
-mailboxes are planned (`TODO.md` section 1).
+Differences: bridge splits Proton's `Path` on every `/`, so a folder
+named `A/B` shows as `B` inside a folder `A\`; peroxide shows
+`Folders/A\u2215B`. When a folder is renamed, bridge fetches every
+label list once per subfolder (go-proton-api's `GetLabel` downloads the
+whole list); peroxide derives the new names and fetches the list once.
+gluon also sends BYE to clients whose selected mailbox is deleted.
 
 proton-bridge also has a "Show All Mail" setting (`ShowAllMail`, on
 by default); off, All Mail is left out of LIST, and SELECT still opens

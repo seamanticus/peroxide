@@ -21,9 +21,8 @@ messages, and the others are applied.
 |---|---|
 | `\Seen` | `PUT /messages/read` or `/messages/unread` |
 | `\Flagged` | label or unlabel Starred |
-| a label's flag | `PUT /messages/label` or `/messages/unlabel` with that label |
 | `\Deleted` | none: kept by peroxide for the mailbox, until EXPUNGE |
-| `\Draft`, `\Answered`, others | ignored |
+| `\Draft`, `\Answered`, keywords, others | ignored |
 
 `+FLAGS` and `-FLAGS` change what they name. `FLAGS` replaces: it adds
 every flag listed, then removes, from the messages that have them, the
@@ -46,6 +45,8 @@ One call: label the messages with the destination
   shows the EXPUNGE at the next events. This is Proton's model, not
   peroxide's choice: there is no way to have one message in two folders.
 - Into `Starred`, it stars them.
+- **Into `Labels/<name>`**, it adds the label; the messages stay in
+  their folder.
 - **Into `Trash`** (COPY or MOVE), Proton also unstars them. peroxide
   takes `\Flagged` off at once, with the answer, rather than at the next
   events.
@@ -61,6 +62,17 @@ A MOVE is two calls, as in proton-bridge: label with the destination,
 then unlabel from the source. Proton keeps a message in one folder, so
 labelling it into a folder already takes it out of the previous one,
 and the unlabel then answers "does not exist", which counts as done.
+
+**Labels**, as in proton-bridge (`shouldExpungeOldLocation`):
+
+- a MOVE **into** `Labels/<name>` from a folder or system mailbox only
+  adds the label: one call, and the message stays where it was. aerc's
+  `:modify-labels +name` is this MOVE.
+- a MOVE **out of** a label, into a folder or another label, adds the
+  destination and removes the label: two calls, as above. aerc's
+  `:modify-labels -name` moves to INBOX, so it also files the message
+  in INBOX, as with bridge.
+
 peroxide:
 
 - unlabels only the messages that were labelled (one the label call
@@ -202,6 +214,13 @@ the one response code clients must show (RFC 3501 section 7.1):
   nothing: `OK [ALERT] This message is already in Sent: it is now in
   INBOX too, not copied again`. This is what aerc's `copy-to-replied`
   asks after a reply.
+- anywhere, APPENDed into `Labels/<name>`: the label is added, moving
+  nothing: `OK [ALERT] This message is already in Archive: it is now in
+  Labels/name too, not copied again`.
+
+A message the account doesn't have is refused from `Labels/<name>`:
+`NO [ALERT] Labels/name is a label: ... Append it to a folder, then add
+the label`. Imported with the label alone it would be in All Mail only.
 
 Either way the message found is left as it is: the flags the APPEND
 gives (`\Flagged`, `\Seen`) aren't applied to it.
@@ -237,7 +256,10 @@ field.
   its comment says "removing the unlabel call resulted in a lot of
   client issues". Both forms refuse MOVE between INBOX and Sent and into
   or out of All Mail and Scheduled. Bridge allows MOVE into and out of
-  Starred; peroxide refuses it (above).
+  Starred; peroxide refuses it (above). Labels follow bridge: a MOVE
+  into a label from a folder skips the unlabel, and every MOVE out of
+  one unlabels (bridge then also expunges the message from the source
+  mailbox in Gluon).
 - **EXPUNGE**: bridge unlabels first, then deletes for good, from Trash
   and Drafts, what no other shown label holds; All Mail refuses.
   peroxide decides the same, in the other order, so that a failed
@@ -249,7 +271,9 @@ field.
   above; Drafts makes a draft. peroxide decides the same, and also
   refuses Starred, as it refuses moves into it: bridge imports there
   with the Starred label alone, leaving the message in no folder.
-  peroxide shows no Scheduled mailbox.
+  peroxide shows no Scheduled mailbox. Into a label, bridge imports a
+  new message with that label alone, in no folder; peroxide refuses it
+  and labels only a message the account already has.
 - **A message already there**: bridge's `sendrecorder` remembers sends
   for 30 minutes, by gluon's `GetMessageHash` and the recipients, and
   APPEND waits up to 90 seconds for one under way; gluon then adds the

@@ -4,130 +4,37 @@ Work left for a later session, found while fixing unread counts and
 latency in October 2026. Each item says what is wrong, where, what was
 observed, and the steps a fix needs.
 
-## 1. Folders and labels: names, and what `Labels` events leave open
+## 1. (done: folders and labels as `Folders/<path>` and `Labels/<name>` mailboxes; labels-mailboxes 3a71f0f, 6f2abc2, 2dfbdbf)
 
-**Done (labels-events: ecddff4, 058cd3a, aeddcb7, ca6d297; bc32862).**
-Folders and labels created, renamed or deleted in Proton are applied
-from `Labels` events without a restart; system-label updates are
-skipped by label ID; FLAGS lists labels in label-ID order. The items
-under "Left open" remain.
+Described in docs/imap/mailboxes.md and docs/imap/changes.md. Decided
+on 2026-11-09:
 
-`Labels` events are handled (`user.handleLabelEvent`, imap/user.go):
-folders and labels created, renamed or deleted in Proton change
-`u.mailboxes` and `u.flags` without a restart. Clients are not told:
-they see the change on their next LIST (aerc lists only after login, so
-after it reconnects). go-imap can send an unsolicited LIST
-(`backend.MailboxInfoUpdate`), but its client, which aerc uses, drops it.
-
-**Observed.**
-
-- 2026-10-14 `-debug-raw` log: entries look like
-  `{"ID": ..., "Action": 2, "Label": {...}}`. An update for "Primary",
-  "All Mail" and "Inbox" (`Type` 1, `Exclusive` 0) followed every
-  read/unread toggle, changing only `LastUnseenMessageEventID`. System
-  labels are therefore skipped, and updates act only on a changed name.
-- 2026-11-04 `-debug-raw` log (bob): `GET /labels`, with no
-  type, lists custom folders and labels alike, both `Type` 1: folder
-  `PEROXIDE_FOLDER` with `Exclusive` 1, labels `peroxide_label_1..3`
-  with `Exclusive` 0. `Path` equals `Name` for these top-level ones.
-- 2026-11-04/05 `-debug-raw` logs: a folder created (`Action` 1),
-  renamed (`Action` 2) and deleted (`Action` 0, `ID` only) arrived at the
-  next poll and were applied. The event `ID` of system-label updates
-  differs from `Label.ID`; for custom folders it was the same.
+- Naming as proton-bridge; labels are mailboxes only, no longer
+  keywords. Names come from `Name` and `ParentID`, never `Path`: Proton
+  escapes `/` in `Path` as `\/` but not `\`, so `A/B` at the top and `B`
+  inside `A\` share a `Path` (seen live). A `/` in a name is shown as
+  U+2215; `\` as is.
+- MOVE as bridge's `shouldExpungeOldLocation`; APPEND into a label
+  labels a message the account has and refuses a new one (NO [ALERT]).
+- A renamed parent renames its subfolders locally, then one
+  `GET /labels` checks them (bridge fetches the list once per child).
+- `Exclusive` changing switches the kind in place, keeping UIDs.
+- A deleted mailbox sends BYE to the connections that have it selected.
+- LIST order and name lookup are deterministic (section 11.1).
 
 **Left open.**
 
-1. Mailbox names. peroxide names a folder after `Name` alone, flat
-   (`\Noinferiors`), and a label becomes the flag
-   `labelNameToFlag(Name)`:
-   - Nested folders show flat. `Path` is one string joined with `/`
-     (go-proton-api splits it); peroxide decodes neither `Path` nor
-     `ParentID`.
-   - Two folders with the same name, at different levels or matching a
-     system mailbox ("Sent"), collide in `user.getMailbox`
-     (imap/user.go), which ranges over `u.mailboxes` and returns the
-     first match in map order: which one a SELECT opens can change from
-     one command to the next. `user.ListMailboxes` lists them in map
-     order too (LIST output order varies; harmless alone, but the
-     duplicate name appears twice). Two labels mapping to the same flag
-     ("To do" and "To_do", or since 1dfcddc "Work" and "work", as flags
-     now match without case) collide in `user.getFlag`, which since
-     1dfcddc tries labels in sorted ID order, so it is deterministic but
-     still reaches one label only. Sorting `getMailbox` the same way
-     would make SELECT stable without removing the collision; the naming
-     below removes it.
-   - A folder named "Inbox", "inbox" or any case of INBOX can't be
-     opened: go-imap rewrites that name to `INBOX` (RFC 3501 section
-     5.1, `imap.CanonicalMailboxName`) in SELECT, EXAMINE, STATUS, COPY,
-     APPEND, CREATE, DELETE and RENAME (go-imap commands/*.go) before the
-     backend sees it, so every one reaches the real INBOX. LIST still
-     shows the folder. The `Folders/` prefix below removes this too.
-   - proton-bridge names folders `Folders/<Path>` and labels
-     `Labels/<Path>`, labels being mailboxes there, not flags
-     (`GetMailboxName`, internal/services/imapservice/imap_updates.go).
-     That removes every collision, and aerc treats a server on 127.0.0.1
-     as Proton and mailboxes under `Labels/` as labels
-     (worker/imap/list.go), so it would gain label support.
-   - Cost: it renames every custom mailbox, breaking client settings
-     that name them (aerc `folders`, `archive`, `copy-to`). Local data is
-     keyed by label ID, so no resync. Labels as mailboxes also need COPY
-     to label (EXPUNGE already unlabels, 46d246c). A parent's rename
-     sends no event for its children: proton-bridge fetches each child
-     again (`onLabelUpdated`).
-2. A folder that becomes a label, or back (`Exclusive` changes in an
-   update), is logged and ignored until the next login. proton-bridge
-   never handles it either, so Proton probably never sends it. If it
-   does, handle it as a delete then a create.
-3. A folder deleted while a client has it selected gives that client
-   errors on its next command, instead of a BYE or a closed mailbox.
-   Updates still reach it: `mailboxUpdate.Mailbox` (imap/actions.go)
-   reads the deleted `*mailbox`'s name when go-imap delivers, so a
-   client with that name selected gets EXISTS or EXPUNGE for a mailbox
-   whose bucket is gone, and its next FETCH fails with "cannot find
-   mailbox bucket" (`database.Mailbox.bucket`). Fix with the BYE: on
-   delete, send the connections that have it selected an unsolicited
-   `BYE` (go-imap has no backend update for it; it needs the
-   `Extension` of imap/extension.go to keep each connection) or answer
-   their commands NO [NONEXISTENT] (RFC 5530). Test: an update made after
-   the delete reaches no client.
-4. Check live with a label (not a folder): create, rename and delete one
-   while peroxide runs with `-debug`, and check the logs
-   `Label ... created/renamed`. Folders were checked on 2026-11-04/05.
-5. What labels as mailboxes (item 1) would need from APPEND, learned on
-   branch append-import (2026-11-08/09, docs/imap/changes.md#append):
-   - Proton keeps one copy of a message: an import of one it has (same
-     `Message-Id`) files the copy it has in the mailbox, and a folder
-     takes it out of the folder it was in. So APPEND first looks the
-     message up (`existingMessages`, imap/append.go) and, when found,
-     imports nothing: OK [ALERT] if the message is in the mailbox
-     already, NO [ALERT] naming where it is otherwise
-     (`alreadyThere`). Not for Drafts: a draft is always imported.
-   - Exception today: INBOX and Sent. Proton keeps a message in both
-     (labels 0 and 7 together, seen in events), so an APPEND into one of
-     a message in the other labels it, as COPY, and answers OK [ALERT]
-     (`inboxSentPartner`). That is aerc's `copy-to-replied`.
-   - A label mailbox is the general case of that exception: adding a
-     label moves nothing. With `Labels/<name>` mailboxes, an APPEND
-     there of a message the account has should label it and answer OK
-     [ALERT] (generalise `inboxSentPartner` to "the target is a label,
-     or INBOX/Sent"). A new message bridge imports with the label alone
-     (`CreateMessage`: `wantLabelIDs` is the mailbox, plus Starred),
-     no folder, so Proton files it in All Mail only, where a client
-     hiding All Mail doesn't see it: decide whether peroxide adds INBOX
-     (Received) or Sent, or follows bridge.
-   - COPY to a label mailbox is `PUT /messages/label`, as bridge's
-     `AddMessagesToMailbox` and peroxide's CopyMessages already do for
-     any label ID; EXPUNGE from one unlabels (46d246c). Bridge's MOVE
-     out of a label mailbox labels the destination and unlabels the
-     source (`shouldExpungeOldLocation`: true when the source is a
-     label); peroxide refuses MOVE into and out of Starred, the one
-     label mailbox today (`moveAllowed`): decide whether `Labels/*`
-     follows Starred or bridge.
-   - Starred stays special: APPEND into it is refused (`appendAllowed`),
-     as it is the `\Flagged` flag. With labels as mailboxes, a label
-     that is also a flag today (`labelNameToFlag`) stops being a flag:
-     clients that set it with STORE lose that, and docs/imap/mailboxes.md
-     changes.
+1. Live checks with aerc, Evolution and the web client (section 15):
+   label rename and delete (`Label ... renamed/deleted` in `-debug`),
+   a parent folder rename with a subfolder, `:modify-labels +x` and
+   `-x` in aerc, the BYE in aerc and Evolution when a selected folder is
+   deleted, and whether Evolution shows `Folders`/`Labels` as parents.
+2. go-imap's server does not close the connection after the BYE of a
+   deleted mailbox; a client that ignores BYE keeps a connection whose
+   commands fail. Closing it needs the connection (`backend.disconnect`
+   closes every connection of a user, not those of one mailbox).
+3. CREATE, RENAME and DELETE (section 10) can now create labels as well
+   as folders, under `Labels/` and `Folders/`.
 
 ## 2. (done: STORE `\Deleted` sends FETCH, STORE FLAGS replaces, 1dfcddc)
 
@@ -312,11 +219,10 @@ renamed or deleted. Through go-proton-api (label.go):
 
 **Differences to settle for peroxide.**
 
-1. Naming. peroxide names folders by `Name`, flat, and labels are
-   keywords, not mailboxes (section 1.1). So CREATE "X" can only make
-   a top-level folder, and there is no IMAP way to create a label
-   (a keyword appears with its first STORE). Refuse names containing
-   the delimiter `/` until section 1.1 is decided.
+1. Naming (decided, section 1): only names under `Folders/` (a folder,
+   nested: its parent must exist) or `Labels/` (a label, one level) can
+   be created or renamed; anything else is refused. Each level maps back
+   from U+2215 to `/` for Proton's `Name`.
 2. Label type. bridge sends `Type` 3 (`LabelTypeFolder`) for folders,
    but `GET /labels` returned peroxide's folders as `Type` 1 with
    `Exclusive` 1 (section 1, 2026-11-04). Check with a `-debug` run
@@ -344,22 +250,17 @@ renamed or deleted. Through go-proton-api (label.go):
 8. Tests (imap): CREATE makes one POST with the name and folder type
    and lists the folder before its event; the later `Labels` create
    changes nothing; RENAME sends the color it read; DELETE of a system
-   mailbox and of INBOX makes no request; a name with `/` is refused.
+   mailbox and of INBOX makes no request; a name outside `Folders/` and
+   `Labels/` is refused; `Labels/a/b` is refused.
 
 ## 11. Determinism and protocol correctness
 
 Found in the 2026-11-06 audit; none is from branch `labels-events`.
 
-1. **Map order reaches clients.** FLAGS and PERMANENTFLAGS are in
-   label-ID order since bc32862 (`TestStatusFlagsSorted`). Still open:
-   `ListMailboxes` (imap/user.go) ranges over `u.mailboxes`, so LIST
-   orders mailboxes differently each time, and `getMailbox` picks the
-   first of two folders with the same name in map order (section 1
-   covers the collision). Fix: LIST system mailboxes first in their
-   protonmail label order (INBOX, Drafts, Sent, Starred, Archive, Spam,
-   Trash, All Mail), then folders by name; look names up in the same
-   order. Tests: LIST equal across repeated calls and two users built
-   from the same labels in different insertion orders.
+1. (done, labels-mailboxes 3a71f0f) LIST and name lookup follow a fixed
+   order: system mailboxes, then `Folders` and the folders by name, then
+   `Labels` and the labels by name (`TestListOrderAndHierarchy`, both
+   insertion orders).
 2. (done, 2e1a0f4) RFC822.SIZE is the length of the stored message
    served, no longer Proton's size.
 3. (done, 1476ca8) A Refresh marks the database for a rebuild, sends BYE
