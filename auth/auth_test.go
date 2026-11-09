@@ -100,6 +100,15 @@ func TestSaveAuthsOwnerOnly(t *testing.T) {
 			if err != nil || auths["bob"] != "sealed" {
 				t.Errorf("readCachedAuths() = %v, %v, want the saved record", auths, err)
 			}
+			// Written to a temporary file renamed over auth.json: none is
+			// left beside it.
+			entries, err := os.ReadDir(filepath.Dir(p))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || entries[0].Name() != filepath.Base(p) {
+				t.Errorf("config directory holds %v, want only %v", entries, filepath.Base(p))
+			}
 		})
 	}
 }
