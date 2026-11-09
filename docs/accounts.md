@@ -107,7 +107,7 @@ with mode 0700.
 | File | What it holds | Protection |
 |---|---|---|
 | `auth.json` | A JSON object: username -> base64 sealed record (above) | Usernames in clear; records sealed with the bridge password's key. Mode 0600, set at every write, so a file an older peroxide created 0644 is tightened the next time credentials are saved (`auth`, or any session refresh) |
-| `<username>.db` | The IMAP database: message metadata, mailbox entries, counts, the last event ID (see [imap/sync.md](imap/sync.md)) | Not encrypted. Mode 0700 |
+| `<username>.db` | The IMAP database: message metadata, mailbox entries, counts, the last event ID, the mailboxes unsubscribed from (see [imap/sync.md](imap/sync.md)) | Not encrypted. Mode 0700 |
 
 `<username>.db` holds, for every message peroxide has listed: subject,
 sender and recipient addresses and names, date, size, flags, label IDs,

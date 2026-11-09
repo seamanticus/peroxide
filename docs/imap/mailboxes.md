@@ -72,9 +72,27 @@ ignored (Proton has nowhere to keep it), and the client isn't told.
 
 LIST returns every mailbox above, always in the order of the table:
 system mailboxes, then `Folders` and the folders by name, then `Labels`
-and the labels by name. LSUB returns the same, as peroxide treats every
-mailbox as subscribed; SUBSCRIBE and UNSUBSCRIBE fail with "not yet
-implemented". Clients that LIST only subscribed mailboxes see them all.
+and the labels by name.
+
+Subscriptions are peroxide's alone: Proton has none, so they are kept
+in the local database, and other devices don't see them. Every mailbox
+starts subscribed, a new one too. UNSUBSCRIBE takes a mailbox out of
+LSUB, SUBSCRIBE puts it back; doing either twice answers OK. LSUB lists
+the subscribed mailboxes in LIST's order, and `Folders` or `Labels`
+while any mailbox inside is subscribed. A renamed mailbox keeps its
+subscription; a deleted one leaves LSUB. A rebuild of the database
+keeps them; an upgrade that changes the database's layout starts every
+mailbox subscribed again. aerc only uses LIST, so subscriptions change
+nothing there; Evolution and Thunderbird read LSUB.
+
+### How proton-bridge does it
+
+gluon keeps a subscribed flag per mailbox in its database, true for a
+new one, lost with the database on a resync. It answers NO to
+SUBSCRIBE of a subscribed mailbox and UNSUBSCRIBE of an unsubscribed
+one. A subscribed mailbox that is deleted stays in LSUB, `\Noselect`,
+until the client unsubscribes, as RFC 3501 section 6.3.9 asks; peroxide
+drops it, so that LSUB clients don't show a deleted mailbox for good.
 
 ## STATUS and SELECT counts
 

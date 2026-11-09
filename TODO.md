@@ -200,9 +200,9 @@ same requests as go-proton-api (`POST`, `PUT`, `DELETE
 `Labels` event that follows changing nothing. Decided on 2026-11-09:
 missing parent folders are created (as gluon); new labels get bridge's
 `#f66`; RENAME sends the color peroxide keeps instead of reading it
-again; system mailboxes, INBOX, `Folders` and `Labels` are refused;
-SUBSCRIBE and UNSUBSCRIBE stay "not yet implemented" (aerc never sends
-them; gluon keeps a local list).
+again; system mailboxes, INBOX, `Folders` and `Labels` are refused.
+SUBSCRIBE and UNSUBSCRIBE came after (6a65a32, 59dc0c5), kept locally
+as gluon keeps them; described in docs/imap/mailboxes.md.
 
 **Checked live** (closed 2026-11-09).
 

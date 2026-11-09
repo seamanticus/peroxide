@@ -278,8 +278,8 @@ it just created; the `Labels` event that follows changes nothing.
   just lose the label.
 - **Proton's own limits** reach the client in the NO: on a free plan,
   `[2011] Folder limit reached`.
-- **SUBSCRIBE, UNSUBSCRIBE** answer `NO not yet implemented`: every
-  mailbox counts as subscribed.
+- **SUBSCRIBE, UNSUBSCRIBE** are kept by peroxide alone
+  ([mailboxes.md](mailboxes.md#list-lsub-subscribe)).
 
 aerc: `:mkdir Folders/Work` creates and opens a folder, `:mkdir
 Labels/Todo` a label, `:rmdir` deletes the open one (`-f` if it isn't
@@ -338,8 +338,7 @@ created, and drops what `:rmdir` deleted, only after it reconnects.
   requests and `#f66`. gluon creates missing parents before bridge sees
   the name, as peroxide does. Differences: bridge reads the label again
   (`GetLabel`, the whole list) before a rename to keep its color,
-  peroxide uses the color it keeps; gluon keeps SUBSCRIBE in its own
-  database, peroxide doesn't support it; bridge picks the request by
+  peroxide uses the color it keeps; bridge picks the request by
   the new name's prefix (`updateFolder` or `updateLabel`) whatever the
   mailbox was, peroxide refuses a folder renamed into `Labels/` or a
   label into `Folders/`. bridge can't move a subfolder to the top:
