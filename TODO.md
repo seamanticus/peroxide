@@ -528,11 +528,10 @@ server, `serve` is all it needs. Described in docs/commands.md.
 - `sendmail` beside `serve` (43631a2: through `serve`'s SMTP, TLS
   certificate pinned);
 - anything else that spends the token: on 10013, the token auth.json
-  holds is tried before logging in (9f63ab5).
-
-Left: two processes saving auth.json at once can still lose one's
-change (read, modify, write); with the lock, no second process
-refreshes while `serve` runs.
+  holds is tried before logging in (9f63ab5);
+- two writers of auth.json at once, even of different accounts within
+  one `serve`, each reading, changing and rewriting it, losing the
+  other's change (`auth.lock`, held across the read and the write).
 
 ## 19. SMTP can't send a PGP/MIME message the client encrypted
 
