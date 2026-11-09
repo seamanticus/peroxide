@@ -24,11 +24,17 @@ on 2026-11-09:
 
 **Left open.**
 
-1. Live checks with aerc, Evolution and the web client (section 15):
-   label rename and delete (`Label ... renamed/deleted` in `-debug`),
-   a parent folder rename with a subfolder, `:modify-labels +x` and
-   `-x` in aerc, the BYE in aerc and Evolution when a selected folder is
-   deleted, and whether Evolution shows `Folders`/`Labels` as parents.
+1. (done, 2026-11-09 `-debug` run with aerc, Evolution and the web
+   client) Label rename and delete applied; a parent rename made one
+   `GET /labels` and its subfolder kept its UIDVALIDITY under the new
+   name; aerc `+x` made one label call and no EXPUNGE, `-x` label,
+   unlabel and EXPUNGE; a deleted selected folder got BYE on that
+   connection only, and aerc logged in again and listed. Neither client
+   drops a deleted or renamed mailbox from its tree: aerc keeps its
+   directory list until restarted and re-SELECTs the deleted one
+   (aerc_implementation.md section 1); Evolution re-LISTs after a
+   failed STATUS and still shows it. Evolution draws `Folders` and
+   `Labels` as parents; aerc's flat list shows full names.
 2. go-imap's server does not close the connection after the BYE of a
    deleted mailbox; a client that ignores BYE keeps a connection whose
    commands fail. Closing it needs the connection (`backend.disconnect`

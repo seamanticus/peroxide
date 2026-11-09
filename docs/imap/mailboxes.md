@@ -111,6 +111,15 @@ but its own client library, which aerc uses, drops it. Your client sees
 the new mailbox list the next time it sends LIST. aerc sends LIST only
 when it connects, so reconnect it (`:connect`, or restart it).
 
+Seen with aerc and Evolution: neither removes a deleted or renamed
+mailbox from its tree after listing again. aerc keeps every directory
+it has seen until it restarts, and after the BYE's reconnect tries to
+open the deleted one again ("No such mailbox"). Evolution lists again
+after a STATUS fails and still shows it. A renamed mailbox therefore
+shows under both names until the client is restarted. Evolution draws
+`Folders` and `Labels` as parents; aerc's default list shows full
+names (`Folders/Work`).
+
 ## Names that can't collide
 
 Proton keeps folder names unique among siblings, and labels unique, so
