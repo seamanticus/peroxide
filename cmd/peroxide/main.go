@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
@@ -17,6 +18,7 @@ import (
 	rtdebug "runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
 	imapserver "github.com/emersion/go-imap/server"
 	"github.com/emersion/go-smtp"
@@ -50,7 +52,26 @@ func newClient() *protonmail.Client {
 		RootURL:    apiEndpoint,
 		AppVersion: appVersion,
 		Debug:      debug,
-		HTTPClient: &http.Client{Jar: jar},
+		HTTPClient: &http.Client{Jar: jar, Transport: protonTransport()},
+	}
+}
+
+// protonTransport bounds the wait for Proton as proton-bridge does
+// (internal/dialer/dialer_basic.go): a request whose answer doesn't start
+// within 30 s fails, instead of holding the account's login and token refresh,
+// which every other request of the account waits for. Bodies have no bound:
+// attachments stream for as long as they take.
+func protonTransport() *http.Transport {
+	// http.DefaultTransport's settings, with the bounds added.
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   30 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: time.Second,
 	}
 }
 
