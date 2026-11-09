@@ -507,34 +507,21 @@ labels and Starred unlabel; All Mail refuses. aerc's `:delete` now does
 what the web client's Delete does. Described in
 docs/imap/changes.md#expunge.
 
-## 18. `peroxide smtp` and `peroxide imap` side by side lock an account out
+## 18. (done: `serve` is the only server command; the `imap` and `smtp` commands are removed; 7a0dca8)
 
-**Problem.** Run as two processes, `peroxide smtp` and `peroxide imap`
-each keep their own session for an account (auth.Manager is per
-process), from the same stored refresh token. Proton refresh tokens are
-single use: the first process to refresh (`POST /auth/refresh`) gets a
-new one, and the other's fails with `[10013] Invalid refresh token`.
-That process then logs in again (`POST /auth`), which Proton may answer
-with CAPTCHA (`[9001]`), and every request it makes fails until
-`peroxide auth <user>` is run again. Seen 2026-11-09 09:26
-(build_release/smtp.log, imap.log): SMTP refreshed at 09:26:24, IMAP's
-refresh at 09:26:33 failed, its login got 9001, its APPENDs answered NO
-and its events 401. `peroxide serve` shares one auth.Manager between
-the two servers, so it doesn't happen there.
+Run as two processes, `peroxide imap` and `peroxide smtp` each kept
+their own auth.Manager and refreshed the same account's session; Proton
+refresh tokens are single use, so the slower one got `[10013] Invalid
+refresh token`, then CAPTCHA (`9001`) on its re-login, and answered NO
+until `peroxide auth` was run again (seen 2026-11-09). `serve` runs both
+servers on one auth.Manager. Decided 2026-11-10: peroxide is a desktop
+server, `serve` is all it needs. Described in docs/commands.md.
 
-**Options:**
-
-1. **Document it**: docs/commands.md, under `smtp`, `imap` and `serve`:
-   one process per account, `serve` for both protocols.
-2. **Refuse it**: a lock file per account (as the database already is,
-   "the database is in use by another peroxide process") taken by
-   whichever process logs the account in, so the second fails at once
-   with a clear message instead of after the first token refresh.
-3. **Share the session**: after a refresh, write the new tokens back to
-   the auth file (auth/auth.go) and, on `[10013]`, read the file again
-   before logging in. Two processes then race at worst once per
-   refresh. Most work, and the file is encrypted with the bridge
-   password both processes hold.
+**Left open.** `sendmail` and `download-mailbox` also make a session of
+their own from the stored refresh token, so run beside `serve` they can
+spend the token `serve` holds in memory, with the same lockout.
+`download-mailbox` already says not to run it while a client is logged
+in; `sendmail` doesn't.
 
 ## 19. SMTP can't send a PGP/MIME message the client encrypted
 

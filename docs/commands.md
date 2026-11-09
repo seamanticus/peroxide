@@ -51,11 +51,12 @@ Runs the SMTP and the IMAP servers in one process, sharing one set of
 sessions. If either server stops with an error, the process exits. Use
 `-disable-smtp` or `-disable-imap` to run only one.
 
-### `imap`, `smtp`
-
-Run one server alone. Two processes (`peroxide imap` and
-`peroxide smtp`) each unlock your keys and hold their own Proton
-session; `serve` does it once.
+`serve` is the only command that runs a server: run one per account set.
+Proton's refresh tokens are single use, so two peroxide processes
+holding sessions for the same account would each refresh it, and the
+slower one, its token spent, is logged out until `peroxide auth` is run
+again. (Older peroxide had separate `imap` and `smtp` commands, which
+did exactly that when run side by side.)
 
 ### `status`
 
