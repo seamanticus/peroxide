@@ -11,8 +11,9 @@ enabled, see [../commands.md](../commands.md#listening-and-tls).)
 
 Not supported: UIDPLUS (no COPYUID/APPENDUID), CONDSTORE/QRESYNC,
 NOTIFY, ID, ENABLE, SPECIAL-USE as a capability (the attributes are
-sent in LIST anyway), CREATE, DELETE, RENAME (`TODO.md` section 10),
-SUBSCRIBE (every mailbox counts as subscribed).
+sent in LIST anyway), SUBSCRIBE (every mailbox counts as subscribed).
+CREATE, DELETE and RENAME work under `Folders/` and `Labels/` only
+([changes.md](changes.md#create-delete-rename)).
 
 ## Pages
 

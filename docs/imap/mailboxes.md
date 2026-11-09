@@ -104,7 +104,14 @@ it within one poll (20 to 40 seconds while a client is connected):
 - A deleted folder or label's mailbox and local entries go (its
   messages stay in the database, as other mailboxes may hold them).
   Clients that have it selected get `* BYE <name> was deleted in
-  Proton: please log in again`; aerc reconnects by itself.
+  Proton: please log in again`; aerc reconnects by itself. peroxide
+  doesn't close the connection after the BYE (go-imap's server doesn't):
+  a client that ignores it keeps a connection whose commands fail
+  (`TODO.md` section 14).
+
+Folders and labels a client creates, renames or deletes through
+peroxide ([changes.md](changes.md#create-delete-rename)) change at
+once; the event that follows changes nothing.
 
 **Other clients are not told.** go-imap could send an unsolicited LIST,
 but its own client library, which aerc uses, drops it. Your client sees

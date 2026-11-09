@@ -241,6 +241,45 @@ is visible when it does. The date an APPEND gives (its INTERNALDATE) isn't
 kept, as in bridge: Proton dates an imported message by its `Date`
 field.
 
+## CREATE, DELETE, RENAME
+
+Only folders and labels can be made, renamed and deleted, under the
+names peroxide shows them by ([mailboxes.md](mailboxes.md)):
+`Folders/<path>` for a folder, at any depth, and `Labels/<name>` for a
+label, which can't be nested. Every other name is refused with NO,
+before any request: the system mailboxes, INBOX included, the
+`Folders` and `Labels` parents, and names outside them
+(`Archive/2026`). A level written with U+2215 (as peroxide shows a `/`
+in a name) becomes `/` in Proton.
+
+Each is one request to Proton per folder, and peroxide changes the
+mailbox list at once from Proton's answer, so the client can open what
+it just created; the `Labels` event that follows changes nothing.
+
+| Command | Proton call | Notes |
+|---|---|---|
+| CREATE | `POST /core/v4/labels` | color `#f66`; missing parent folders are created first, one call each |
+| DELETE | `DELETE /core/v4/labels/{id}` | clients that have it selected get BYE, as for a delete in the web client |
+| RENAME | `PUT /core/v4/labels/{id}` | keeps the color; a folder can move into another (created if missing) |
+
+- **CREATE of a mailbox there is** answers `NO Mailbox already exists`
+  and makes no request. aerc sends it before every APPEND, and ignores
+  the answer.
+- **RENAME** keeps the mailbox's messages, UIDs and UIDVALIDITY; the
+  folders inside a renamed folder follow it. Refused: a folder to a
+  label or back, a folder into itself, and a subfolder to the top of
+  `Folders` (peroxide can't yet ask Proton for "no parent", `TODO.md`
+  section 10).
+- **What DELETE does to a folder's messages and subfolders** is
+  Proton's decision, not yet checked (`TODO.md` section 10).
+- **SUBSCRIBE, UNSUBSCRIBE** answer `NO not yet implemented`: every
+  mailbox counts as subscribed.
+
+aerc: `:mkdir Folders/Work` creates and opens a folder, `:mkdir
+Labels/Todo` a label, `:rmdir` deletes the open one (`-f` if it isn't
+empty). `:move -p` and `:copy -p` create a missing destination. aerc
+has no command to rename.
+
 ## How proton-bridge does it
 
 - **STORE, COPY, MOVE** reach Proton through Gluon, Proton's IMAP
@@ -287,3 +326,13 @@ field.
 - **Size**: bridge checks only go-proton-api's 70 MiB on the encrypted
   message, and announces no APPENDLIMIT. peroxide announces the same
   70 MiB.
+- **CREATE, DELETE, RENAME** (`Connector.CreateMailbox`,
+  `UpdateMailboxName`, `DeleteMailbox`): the same names, refusals,
+  requests and `#f66`. gluon creates missing parents before bridge sees
+  the name, as peroxide does. Differences: bridge reads the label again
+  (`GetLabel`, the whole list) before a rename to keep its color,
+  peroxide uses the color it keeps; gluon keeps SUBSCRIBE in its own
+  database, peroxide doesn't support it; bridge picks the request by
+  the new name's prefix (`updateFolder` or `updateLabel`) whatever the
+  mailbox was, peroxide refuses a folder renamed into `Labels/` or a
+  label into `Folders/`.

@@ -35,12 +35,10 @@ on 2026-11-09:
    (aerc_implementation.md section 1); Evolution re-LISTs after a
    failed STATUS and still shows it. Evolution draws `Folders` and
    `Labels` as parents; aerc's flat list shows full names.
-2. go-imap's server does not close the connection after the BYE of a
-   deleted mailbox; a client that ignores BYE keeps a connection whose
-   commands fail. Closing it needs the connection (`backend.disconnect`
-   closes every connection of a user, not those of one mailbox).
-3. CREATE, RENAME and DELETE (section 10) can now create labels as well
-   as folders, under `Labels/` and `Folders/`.
+2. (moved to section 14, item 2) go-imap's server does not close the
+   connection after the BYE of a deleted mailbox.
+3. (done, section 10) CREATE, RENAME and DELETE under `Folders/` and
+   `Labels/`.
 
 ## 2. (done: STORE `\Deleted` sends FETCH, STORE FLAGS replaces, 1dfcddc)
 
@@ -193,71 +191,36 @@ now held per page and per action, not per sync. A semaphore per mailbox
 (an event page taking those it touches, in label-ID order) would let a
 STORE in INBOX go ahead while Drafts is busy; test with synctest.
 
-## 10. CREATE, DELETE and RENAME are not implemented
+## 10. (done: CREATE, DELETE and RENAME of `Folders/` and `Labels/` mailboxes; ca51e1c, 61a8838)
 
-**Problem.** `user.CreateMailbox`, `DeleteMailbox` and `RenameMailbox`
-(imap/user.go) return `errNotYetImplemented`, and so does
-`mailbox.SetSubscribed` (SUBSCRIBE, UNSUBSCRIBE). A client can't create,
-delete or rename a folder: on 2026-11-05 aerc's `:mkdir` and `:rmdir`
-got `NO not yet implemented`:
+Described in docs/imap/changes.md. As proton-bridge (connector.go,
+`CreateMailbox`, `UpdateMailboxName`, `DeleteMailbox`), through the
+same requests as go-proton-api (`POST`, `PUT`, `DELETE
+/core/v4/labels`), each applied at once from Proton's answer, the
+`Labels` event that follows changing nothing. Decided on 2026-11-09:
+missing parent folders are created (as gluon); new labels get bridge's
+`#f66`; RENAME sends the color peroxide keeps instead of reading it
+again; system mailboxes, INBOX, `Folders` and `Labels` are refused;
+SUBSCRIBE and UNSUBSCRIBE stay "not yet implemented" (aerc never sends
+them; gluon keeps a local list).
 
-    _x4klw CREATE "FOLDER_CREATE_FROM_CLIENT"
-    _x4klw NO not yet implemented
-    Xi67Lg DELETE "FOLDER_CLIENT_SHUTDOWN"
-    Xi67Lg NO not yet implemented
+**Left open.**
 
-**How proton-bridge does it** (internal/services/imapservice/connector.go,
-`CreateMailbox`, `UpdateMailboxName`, `DeleteMailbox`, and
-`createFolder`, `createLabel`, `updateFolder`, `updateLabel`): mailbox
-names are `Folders/<path>` or `Labels/<name>`; anything else is refused
-(`ErrOperationNotAllowed`), so system mailboxes can't be created,
-renamed or deleted. Through go-proton-api (label.go):
-
-- CREATE: `POST /core/v4/labels` with `{Name, Color: "#f66", Type,
-  ParentID}`. A nested folder needs its parent to exist (looked up by
-  path); a label can't be nested.
-- RENAME: reads the label for its color (`GET /core/v4/labels?Type=`),
-  then `PUT /core/v4/labels/{id}` with `{Name, Color, ParentID}`.
-- DELETE: `DELETE /core/v4/labels/{id}`. Proton moves the folder's
-  messages out of it itself.
-- The result is stored in bridge's label map at once, before the
-  `Labels` event arrives, so the next LIST shows it.
-
-**Differences to settle for peroxide.**
-
-1. Naming (decided, section 1): only names under `Folders/` (a folder,
-   nested: its parent must exist) or `Labels/` (a label, one level) can
-   be created or renamed; anything else is refused. Each level maps back
-   from U+2215 to `/` for Proton's `Name`.
-2. Label type. bridge sends `Type` 3 (`LabelTypeFolder`) for folders,
-   but `GET /labels` returned peroxide's folders as `Type` 1 with
-   `Exclusive` 1 (section 1, 2026-11-04). Check with a `-debug` run
-   which form `POST /labels` takes (`Type: 3`, or `Type: 1` with
-   `Exclusive: 1`), and what the created label looks like in the
-   following `Labels` event.
-3. Refuse every system mailbox (INBOX, Sent, Drafts, Trash, Spam,
-   Archive, All Mail, Starred) with NO, and DELETE of INBOX in
-   particular (RFC 3501 section 6.3.4).
-4. The event that follows. peroxide's own create, rename or delete
-   comes back as a `Labels` event 20-40 s later; `createLabel` keeps the
-   existing `*mailbox` (it doesn't replace one with the same label ID),
-   `updateLabel` renames only if the name changed, `deleteLabel` copes
-   with a missing one. Apply the API's answer at once (as bridge does)
-   so the tagged OK is followed by a LIST that shows it, and let the
-   event be a no-op.
-5. RENAME INBOX moves its messages to a new folder (RFC 3501 section
-   6.3.5); Proton can't rename INBOX. Refuse it with NO.
-6. SUBSCRIBE/UNSUBSCRIBE: peroxide has no subscriptions (LSUB lists
-   every mailbox). Decide whether to accept both as no-ops, so a client
-   that subscribes a folder after creating it doesn't see the CREATE
-   half fail, or to keep subscriptions in the local database.
-7. Client: `protonmail.Client` has only `ListLabels`; add
-   `CreateLabel`, `UpdateLabel`, `DeleteLabel` (protonmail/labels.go).
-8. Tests (imap): CREATE makes one POST with the name and folder type
-   and lists the folder before its event; the later `Labels` create
-   changes nothing; RENAME sends the color it read; DELETE of a system
-   mailbox and of INBOX makes no request; a name outside `Folders/` and
-   `Labels/` is refused; `Labels/a/b` is refused.
+1. Live checks with aerc and `-debug`: `:mkdir Folders/x`, `:mkdir
+   Folders/a/b` with no `a`, `:mkdir Labels/y`, `:rmdir` of each. Note
+   what Proton answers to `POST /core/v4/labels` for a folder (`Type` 3,
+   or 1 with `Exclusive` 1; `ParentID`), and what the `Labels` event
+   after it holds: `Label.IsFolder` accepts either form until then.
+2. Delete a throw-away folder holding a message and a subfolder, from
+   aerc (`:rmdir -f`): where Proton puts the message (bridge's comment:
+   "Proton moves the folder's messages out of it"), and whether the
+   subfolder goes too or moves up. Describe it in docs/imap/changes.md.
+3. RENAME of a subfolder to the top of `Folders` is refused: an empty
+   `ParentID` is left out of the request (go-proton-api's `omitempty`),
+   so Proton would keep the folder in its parent. Find what Proton
+   takes for "no parent" (the web client's request) before allowing it.
+4. aerc has no command to rename a folder (aerc_implementation.md
+   section 10, `:rename`).
 
 ## 11. Determinism and protocol correctness
 
@@ -450,6 +413,27 @@ let peroxide fix, found as they come:
    keeps a snapshot per session (internal/state) and applies other
    sessions' changes to it only between commands. Left as is until the
    move.
+2. **BYE without closing the connection** (2026-11-09, TODO 1). When a
+   selected mailbox is deleted (`user.deleteLabel`), peroxide's BYE
+   reaches only the connections that have it selected, through go-imap's
+   `listenUpdates`, but go-imap's server doesn't close them after it.
+   aerc closes the connection itself on BYE (go-imap client,
+   `client.go`) and logs in again at once, so nothing shows; a client
+   that ignores BYE keeps a connection whose commands fail. Tracking
+   selections in `Extension` (SELECT, EXAMINE, CLOSE, UNSELECT, the
+   connection ending, which go-imap gives no hook for) would not remove
+   the data race `listenUpdates` already has reading each connection's
+   selected mailbox, and go-imap gives no signal for when the BYE is
+   written. gluon checks on each session's own goroutine, before every
+   command, that its state is still valid, and answers `* BYE IMAP
+   session state is inconsistent` then closes (internal/session,
+   `session.go`). In go-imap that needs every command handler wrapped.
+   Left as is: documented in docs/imap/mailboxes.md.
+
+Whether to move at all is not decided. Against: the store and download
+would be redone (below), gluon's go.mod needs cgo (mattn/go-sqlite3),
+and it is built for proton-bridge. For: the items above, which go-imap
+v1 gives the backend no way to fix.
 
 To plan with the move: the whole store changes (sqlite and gluon's
 encrypted store instead of bolt), so every mailbox gets a new
