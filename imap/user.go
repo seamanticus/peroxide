@@ -571,10 +571,11 @@ func (u *user) DeleteMailbox(name string) error {
 
 // RenameMailbox renames a folder or label in Proton (PUT
 // /core/v4/labels/{id} with its color), as proton-bridge does, and applies the
-// answer at once. A folder may move into another, created if missing; a
-// folder can't become a label or a label a folder, and system mailboxes,
-// INBOX too, can't be renamed (RFC 3501's RENAME of INBOX moves its messages
-// out, which Proton has no way to do).
+// answer at once. A folder may move into another, created if missing, or to
+// the top of Folders with ParentID 0, as the web client moves it, which
+// proton-bridge can't. A folder can't become a label or a label a folder,
+// and system mailboxes, INBOX too, can't be renamed (RFC 3501's RENAME of
+// INBOX moves its messages out, which Proton has no way to do).
 func (u *user) RenameMailbox(existingName, newName string) error {
 	mbox := u.getMailbox(existingName)
 	if mbox == nil {
@@ -583,7 +584,7 @@ func (u *user) RenameMailbox(existingName, newName string) error {
 		}
 		return imapbackend.ErrNoSuchMailbox
 	}
-	oldKind, color, oldParentID := u.labelOf(mbox)
+	oldKind, color, _ := u.labelOf(mbox)
 	if oldKind == kindSystem {
 		return systemMailboxError("rename", existingName)
 	}
@@ -603,22 +604,19 @@ func (u *user) RenameMailbox(existingName, newName string) error {
 		if strings.HasPrefix(newName, existingName+delimiter) {
 			return fmt.Errorf("cannot move %v into itself", existingName)
 		}
-		if len(levels) == 1 && oldParentID != "" {
-			// An empty ParentID is left out of the request, as
-			// go-proton-api leaves it, which would keep the folder where it
-			// is: what Proton takes for "no parent" is not known.
-			return fmt.Errorf("cannot move %v to the top of Folders: move it in Proton's web client", existingName)
-		}
 		if parentID, err = u.ensureFolder(levels[:len(levels)-1]); err != nil {
 			return err
 		}
 	}
-	label, err := u.c.UpdateLabel(mbox.label, mailboxToLabelName(levels[len(levels)-1]), color, parentID)
+	label, err := u.c.UpdateLabel(mbox.label, mailboxToLabelName(levels[len(levels)-1]), color, kind == kindFolder, parentID)
 	if err != nil {
 		return fmt.Errorf("cannot rename %v: %w", existingName, err)
 	}
 	if kind == kindFolder {
 		asFolder(label, parentID)
+		// Where it was asked to go, whatever the answer says: "" is the
+		// top, which the answer may show as no ParentID or the old one.
+		label.ParentID = parentID
 	}
 	u.updateLabel(label)
 	return nil

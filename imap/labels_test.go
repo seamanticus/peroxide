@@ -204,9 +204,9 @@ func TestDeleteMailbox(t *testing.T) {
 }
 
 // RENAME sends the new name, the mailbox's own color and, for a folder, its
-// new parent, created if missing, and applies Proton's answer at once, the
-// folders inside following; it refuses system mailboxes, a kind change, a
-// name taken and a folder moved into itself or to the top, before any request.
+// new parent, created if missing, or the top; it applies Proton's answer at
+// once, the folders inside following; it refuses system mailboxes, a kind
+// change, a name taken and a folder moved into itself, before any request.
 // evidence: witnesses
 func TestRenameMailbox(t *testing.T) {
 	for _, tc := range []struct {
@@ -227,7 +227,9 @@ func TestRenameMailbox(t *testing.T) {
 		{"rename label", "Labels/Todo", "Labels/Done", "",
 			[]string{"PUT /core/v4/labels/l"},
 			[]string{"Folders/Work", "Folders/Work/Old", "Labels/Done"}},
-		{"to the top", "Folders/Work/Old", "Folders/Old", "to the top", nil, nil},
+		{"to the top", "Folders/Work/Old", "Folders/Old", "",
+			[]string{"PUT /core/v4/labels/o"},
+			[]string{"Folders/Old", "Folders/Work", "Labels/Todo"}},
 		{"into itself", "Folders/Work", "Folders/Work/Old/Work", "into itself", nil, nil},
 		{"folder to label", "Folders/Work", "Labels/Work", "stays a folder", nil, nil},
 		{"taken", "Labels/Todo", "Folders/Work", imapbackend.ErrMailboxAlreadyExists.Error(), nil, nil},

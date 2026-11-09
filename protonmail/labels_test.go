@@ -9,9 +9,10 @@ import (
 )
 
 // CreateLabel, UpdateLabel and DeleteLabel send what go-proton-api sends to
-// /core/v4/labels: a ParentID only when there is one, the color given (Proton
-// keeps none of a request that leaves it out), and the label ID escaped in
-// the path. A reply without a label is an error, not a label with no ID.
+// /core/v4/labels: a ParentID only when there is one, the color given, and
+// the label ID escaped in the path; but UpdateLabel puts a folder at the top
+// with ParentID 0, as the web client does. A reply without a label is an
+// error, not a label with no ID.
 // evidence: witnesses
 func TestLabelRequests(t *testing.T) {
 	type request struct {
@@ -33,10 +34,19 @@ func TestLabelRequests(t *testing.T) {
 			_, err := c.CreateLabel("work", LabelMessage, "")
 			return err
 		}, label, request{"POST", "/core/v4/labels", map[string]any{"Name": "work", "Color": NewLabelColor, "Type": 1.0}}},
-		{"update", func(c *Client) error {
-			_, err := c.UpdateLabel("a/b==", "c", "#123", "")
+		{"update label", func(c *Client) error {
+			_, err := c.UpdateLabel("a/b==", "c", "#123", false, "")
 			return err
 		}, label, request{"PUT", "/core/v4/labels/a%2Fb==", map[string]any{"Name": "c", "Color": "#123"}}},
+		{"update folder", func(c *Client) error {
+			_, err := c.UpdateLabel("id", "c", "#123", true, "p")
+			return err
+		}, label, request{"PUT", "/core/v4/labels/id", map[string]any{"Name": "c", "Color": "#123", "ParentID": "p"}}},
+		// The web client's ROOT_FOLDER: the number 0, not "" or no field.
+		{"update folder to the top", func(c *Client) error {
+			_, err := c.UpdateLabel("id", "c", "#123", true, "")
+			return err
+		}, label, request{"PUT", "/core/v4/labels/id", map[string]any{"Name": "c", "Color": "#123", "ParentID": 0.0}}},
 		{"delete", func(c *Client) error { return c.DeleteLabel("id") },
 			`{"Code":1000}`, request{"DELETE", "/core/v4/labels/id", nil}},
 	} {

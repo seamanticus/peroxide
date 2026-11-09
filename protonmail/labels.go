@@ -98,15 +98,27 @@ func (c *Client) CreateLabel(name string, t LabelType, parentID string) (*Label,
 	return c.doLabel(req)
 }
 
-// UpdateLabel renames the folder or label id, and moves a folder into
-// parentID, keeping color, as go-proton-api's UpdateLabel does: parentID ""
-// is left out of the request, as bridge leaves it.
-func (c *Client) UpdateLabel(id, name, color, parentID string) (*Label, error) {
+// rootFolder is the ParentID Proton's web client sends to put a folder at
+// the top (WebClients, constants.ts ROOT_FOLDER, FolderTreeViewList.tsx).
+// go-proton-api can't send it: its ParentID is a string with omitempty.
+const rootFolder = 0
+
+// UpdateLabel renames the folder or label id, keeping color. A folder is put
+// in parentID, or at the top for "" (ParentID 0, as the web client sends
+// when a folder is dragged to the top); a label has no parent, and the
+// request none.
+func (c *Client) UpdateLabel(id, name, color string, folder bool, parentID string) (*Label, error) {
 	reqData := struct {
 		Name     string
 		Color    string
-		ParentID string `json:",omitempty"`
-	}{name, color, parentID}
+		ParentID any `json:",omitempty"` // nil for a label
+	}{Name: name, Color: color}
+	if folder {
+		reqData.ParentID = parentID
+		if parentID == "" {
+			reqData.ParentID = rootFolder
+		}
+	}
 	req, err := c.newJSONRequest(http.MethodPut, "/core/v4/labels/"+url.PathEscape(id), &reqData)
 	if err != nil {
 		return nil, err
