@@ -389,8 +389,19 @@ func (u *user) Username() string {
 
 // ListMailboxes lists the system mailboxes in systemMailboxes' order, then
 // Folders and the folders, then Labels and the labels, each by name: the same
-// on every LIST, whatever the order the labels came in.
+// on every LIST, whatever the order the labels came in. For LSUB (subscribed)
+// it leaves out the mailboxes unsubscribed from, and Folders or Labels when
+// nothing inside is left.
 func (u *user) ListMailboxes(subscribed bool) ([]imapbackend.Mailbox, error) {
+	unsubscribed := map[string]bool{}
+	if subscribed {
+		// Read before u's lock, which commands shouldn't wait on a read for.
+		var err error
+		if unsubscribed, err = u.db.Unsubscribed(); err != nil {
+			return nil, fmt.Errorf("cannot read the subscriptions: %w", err)
+		}
+	}
+
 	u.Lock()
 	defer u.Unlock()
 
@@ -401,18 +412,26 @@ func (u *user) ListMailboxes(subscribed bool) ([]imapbackend.Mailbox, error) {
 		if data.label == protonmail.LabelAllMail && !u.backend.showAllMail {
 			continue
 		}
-		if mbox, ok := u.mailboxes[data.label]; ok {
+		if mbox, ok := u.mailboxes[data.label]; ok && !unsubscribed[data.label] {
 			list = append(list, mbox)
 		}
 	}
 	for _, kind := range []mailboxKind{kindFolder, kindLabel} {
 		var children []imapbackend.Mailbox
+		hasKind := false
 		for _, mbox := range u.listed {
-			if mbox.kind == kind {
+			if mbox.kind != kind {
+				continue
+			}
+			hasKind = true
+			if !unsubscribed[mbox.label] {
 				children = append(children, mbox)
 			}
 		}
-		list = append(list, placeholder{kind: kind, children: len(children) > 0})
+		if subscribed && len(children) == 0 {
+			continue
+		}
+		list = append(list, placeholder{kind: kind, children: hasKind})
 		list = append(list, children...)
 	}
 	return list, nil

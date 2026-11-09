@@ -268,6 +268,66 @@ func TestRenameMailbox(t *testing.T) {
 	}
 }
 
+// LSUB lists every mailbox until a client unsubscribes; then it leaves out
+// those unsubscribed from, and Folders or Labels once nothing inside is left;
+// LIST still lists all. SUBSCRIBE and UNSUBSCRIBE twice answer OK. A rename
+// keeps the subscription (it is by label ID); a delete drops it.
+// evidence: witnesses
+func TestSubscriptions(t *testing.T) {
+	u, _, _ := newLabelsTestUser(t)
+	u.backend.showAllMail = true
+	names := func(subscribed bool) []string {
+		t.Helper()
+		list, err := u.ListMailboxes(subscribed)
+		if err != nil {
+			t.Fatalf("ListMailboxes(%v) = %v", subscribed, err)
+		}
+		var got []string
+		for _, mbox := range list {
+			got = append(got, mbox.Name())
+		}
+		return got
+	}
+	subscribe := func(name string, sub bool) {
+		t.Helper()
+		for range 2 {
+			if err := u.getMailbox(name).SetSubscribed(sub); err != nil {
+				t.Fatalf("SetSubscribed(%q, %v) = %v", name, sub, err)
+			}
+		}
+	}
+	all := []string{"INBOX", "Folders", "Folders/Work", "Folders/Work/Old", "Labels", "Labels/Todo"}
+	if got := names(true); !slices.Equal(got, all) {
+		t.Errorf("LSUB at first = %q, want %q", got, all)
+	}
+
+	subscribe("Labels/Todo", false)
+	subscribe("Folders/Work", false)
+	subscribe("INBOX", false)
+	subscribe("INBOX", true)
+	if got, want := names(true), []string{"INBOX", "Folders", "Folders/Work/Old"}; !slices.Equal(got, want) {
+		t.Errorf("LSUB = %q, want %q", got, want)
+	}
+	if got := names(false); !slices.Equal(got, all) {
+		t.Errorf("LIST = %q, want %q", got, all)
+	}
+
+	if err := u.RenameMailbox("Folders/Work", "Folders/Job"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := names(true), []string{"INBOX", "Folders", "Folders/Job/Old"}; !slices.Equal(got, want) {
+		t.Errorf("LSUB after a rename = %q, want %q", got, want)
+	}
+
+	labelID := u.getMailbox("Labels/Todo").label
+	if err := u.DeleteMailbox("Labels/Todo"); err != nil {
+		t.Fatal(err)
+	}
+	if unsub, err := u.db.Unsubscribed(); err != nil || unsub[labelID] {
+		t.Errorf("after DELETE, unsubscribed = %v, %v; want no entry for %v", unsub, err, labelID)
+	}
+}
+
 // mailboxNameSet lists u's mailbox names, sorted.
 func mailboxNameSet(u *user) []string {
 	var names []string

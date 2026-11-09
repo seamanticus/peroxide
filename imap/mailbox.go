@@ -212,8 +212,14 @@ func (mbox *mailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error
 	return status, nil
 }
 
+// SetSubscribed subscribes to mbox or unsubscribes from it, in peroxide's
+// database (Proton has no subscriptions), as gluon keeps them. Doing what is
+// done answers OK, where gluon answers NO: RFC 3501 makes neither an error.
 func (mbox *mailbox) SetSubscribed(subscribed bool) error {
-	return errNotYetImplemented // TODO
+	if err := mbox.u.db.SetSubscribed(mbox.label, subscribed); err != nil {
+		return fmt.Errorf("cannot change the subscription of %v: %w", mbox.Name(), err)
+	}
+	return nil
 }
 
 func (mbox *mailbox) Check() error {

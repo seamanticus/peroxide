@@ -1,7 +1,6 @@
 package imap
 
 import (
-	"errors"
 	"log"
 	"sync"
 	"time"
@@ -14,8 +13,6 @@ import (
 	"github.com/seamanticus/peroxide/events"
 	"github.com/seamanticus/peroxide/protonmail"
 )
-
-var errNotYetImplemented = errors.New("not yet implemented")
 
 // appendLimit is the largest message APPEND accepts, in octets: the import
 // API's limit, which it applies once the message is encrypted (Proton's 50 MB
