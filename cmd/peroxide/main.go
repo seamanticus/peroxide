@@ -179,11 +179,7 @@ Commands:
 						downloads it all again: every mailbox gets a new
 						UIDVALIDITY, so clients refetch.
 
-	serve									Run all servers
-
-	smtp									Run peroxide as an SMTP server
-
-	imap						   			Run peroxide as an IMAP server
+	serve									Run the IMAP and SMTP servers
 
 	status									View peroxide status
 
@@ -459,16 +455,10 @@ func main() {
 				fmt.Printf("- %v\n", u)
 			}
 		}
-	case "smtp":
-		addr := *smtpHost + ":" + *smtpPort
-		authManager := auth.NewManager(newClient)
-		log.Fatal(listenAndServeSMTP(addr, debug, authManager, tlsConfig))
-	case "imap":
-		addr := *imapHost + ":" + *imapPort
-		authManager := auth.NewManager(newClient)
-		eventsManager := events.NewManager()
-		log.Fatal(listenAndServeIMAP(addr, debug, authManager, eventsManager, tlsConfig, *showAllMail))
 	case "serve":
+		// One process serves both protocols with one auth.Manager: Proton's
+		// refresh tokens are single use, so two processes refreshing the
+		// same account's session lock one of them out (TODO 18).
 		smtpAddr := *smtpHost + ":" + *smtpPort
 		imapAddr := *imapHost + ":" + *imapPort
 
