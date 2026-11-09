@@ -7,12 +7,20 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
+	"net"
 	"net/mail"
 	"os"
+	"time"
 
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 )
+
+// greetTimeout bounds the dial, the TLS handshake and serve's greeting. serve
+// greets at once; one waiting longer most likely expects the other of TLS and
+// plain text, and would otherwise hold sendmail for go-smtp's five minutes.
+const greetTimeout = 10 * time.Second
 
 // sendThroughServe hands a message to the running peroxide serve's SMTP
 // server at addr, logged in as username with the bridge password, so that the
@@ -22,29 +30,48 @@ import (
 // -tls-cert, the connection is TLS and that certificate is pinned: only the
 // very certificate serve presents is trusted, whatever names it holds.
 func sendThroughServe(addr, certPath string, username, password string, rcpt []string, msg []byte) error {
+	var pinned *tls.Config
+	if certPath != "" {
+		var err error
+		if pinned, err = pinnedTLS(certPath); err != nil {
+			return err
+		}
+	}
+	conn, err := net.DialTimeout("tcp", addr, greetTimeout)
+	if err != nil {
+		return fmt.Errorf("peroxide serve is running, but its SMTP server at %v can't be reached (run with -disable-smtp?): %w", addr, err)
+	}
+	return sendOver(conn, addr, pinned, username, password, rcpt, msg)
+}
+
+// sendOver is sendThroughServe on the connection conn to addr, TLS when
+// pinned isn't nil. It closes conn.
+func sendOver(conn net.Conn, addr string, pinned *tls.Config, username, password string, rcpt []string, msg []byte) error {
 	m, err := mail.ReadMessage(bytes.NewReader(msg))
 	if err != nil {
+		conn.Close()
 		return fmt.Errorf("cannot read the message: %w", err)
 	}
 	from, err := mail.ParseAddress(m.Header.Get("From"))
 	if err != nil {
+		conn.Close()
 		return fmt.Errorf("cannot read the message's From: %w", err)
 	}
 
-	var c *smtp.Client
-	if certPath == "" {
-		c, err = smtp.Dial(addr)
-	} else {
-		var pinned *tls.Config
-		if pinned, err = pinnedTLS(certPath); err != nil {
-			return err
-		}
-		c, err = smtp.DialTLS(addr, pinned)
+	hint := "is serve using TLS (-tls-cert)? give sendmail the same -tls-cert"
+	if pinned != nil {
+		// The handshake runs on the greeting's first read, in its deadline.
+		conn = tls.Client(conn, pinned)
+		hint = "is serve not using TLS, or asking for a client certificate (-tls-client-ca)? sendmail's -tls-cert must be serve's"
 	}
-	if err != nil {
-		return fmt.Errorf("peroxide serve is running, but its SMTP server at %v can't be reached (run with -disable-smtp, or -tls-client-ca?): %w", addr, err)
-	}
+	c := smtp.NewClient(conn)
 	defer c.Close()
+	commandTimeout := c.CommandTimeout
+	c.CommandTimeout = greetTimeout
+	if err := c.Hello("localhost"); err != nil {
+		return fmt.Errorf("peroxide serve's SMTP server at %v didn't greet (%v): %w", addr, hint, err)
+	}
+	c.CommandTimeout = commandTimeout
 
 	if err := c.Auth(sasl.NewPlainClient("", username, password)); err != nil {
 		return fmt.Errorf("peroxide serve refused the login: %w", err)
@@ -68,7 +95,11 @@ func sendThroughServe(addr, certPath string, username, password string, rcpt []s
 	if err := w.Close(); err != nil {
 		return err
 	}
-	return c.Quit()
+	// The message is accepted: failing now would have it sent again.
+	if err := c.Quit(); err != nil {
+		log.Printf("warning: the message was sent, but QUIT failed: %v", err)
+	}
+	return nil
 }
 
 // pinnedTLS is a client configuration trusting only the certificate in the
@@ -80,11 +111,18 @@ func pinnedTLS(certPath string) (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot read serve's certificate: %w", err)
 	}
-	block, _ := pem.Decode(data)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("%v holds no PEM certificate", certPath)
+	// The first certificate, as tls.LoadX509KeyPair takes it: the file may
+	// hold the key too, before or after it.
+	var want []byte
+	for rest := data; want == nil; {
+		var block *pem.Block
+		if block, rest = pem.Decode(rest); block == nil {
+			return nil, fmt.Errorf("%v holds no PEM certificate", certPath)
+		}
+		if block.Type == "CERTIFICATE" {
+			want = block.Bytes
+		}
 	}
-	want := block.Bytes
 	if _, err := x509.ParseCertificate(want); err != nil {
 		return nil, fmt.Errorf("cannot read serve's certificate: %w", err)
 	}

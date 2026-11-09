@@ -11,12 +11,14 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/emersion/go-sasl"
@@ -179,4 +181,117 @@ func TestSendThroughServeNotListening(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "can't be reached") {
 		t.Errorf("sendThroughServe() = %v, want it unreachable", err)
 	}
+}
+
+// A server that never greets, as serve with TLS does to a plain client and
+// the other way round, fails sendmail after greetTimeout, not go-smtp's five
+// minutes, with a hint at the TLS setting.
+// evidence: witnesses
+func TestSendThroughServeNoGreeting(t *testing.T) {
+	pinned, err := pinnedTLS(writeCertPEM(t, selfSigned(t).Certificate[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		pinned *tls.Config
+	}{{"plain", nil}, {"tls", pinned}} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				client, server := net.Pipe()
+				defer server.Close()
+				// Reads what the client sends (a TLS ClientHello), says nothing.
+				go io.Copy(io.Discard, server)
+				start := time.Now()
+				err := sendOver(client, "serve", tc.pinned, "bob", "pw", []string{"carol@example.org"}, []byte(relayMessage))
+				if err == nil || !strings.Contains(err.Error(), "didn't greet") || !strings.Contains(err.Error(), "-tls-cert") {
+					t.Errorf("sendOver() = %v, want no greeting, with the TLS hint", err)
+				}
+				if d := time.Since(start); d != greetTimeout {
+					t.Errorf("gave up after %v, want %v", d, greetTimeout)
+				}
+			})
+		})
+	}
+}
+
+// Once DATA is accepted the message is sent: a QUIT that fails (the
+// connection dropped) is logged, and sendmail succeeds, so that git
+// send-email doesn't send it again.
+// evidence: witnesses
+func TestSendThroughServeQuitFails(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client, server := net.Pipe()
+		go func() {
+			defer server.Close()
+			tp := textproto.NewConn(server)
+			tp.PrintfLine("220 serve")
+			for {
+				line, err := tp.ReadLine()
+				if err != nil {
+					return
+				}
+				switch verb, _, _ := strings.Cut(line, " "); verb {
+				case "EHLO":
+					tp.PrintfLine("250-serve\r\n250 AUTH PLAIN")
+				case "AUTH":
+					tp.PrintfLine("235 ok")
+				case "MAIL", "RCPT":
+					tp.PrintfLine("250 ok")
+				case "DATA":
+					tp.PrintfLine("354 go on")
+					if _, err := tp.ReadDotBytes(); err != nil {
+						return
+					}
+					tp.PrintfLine("250 queued")
+				default: // QUIT: dropped unanswered
+					return
+				}
+			}
+		}()
+		if err := sendOver(client, "serve", nil, "bob", "pw", []string{"carol@example.org"}, []byte(relayMessage)); err != nil {
+			t.Errorf("sendOver() = %v, want nil: the message was accepted", err)
+		}
+	})
+}
+
+// serve's -tls-cert may hold the key too, before the certificate, as
+// tls.LoadX509KeyPair allows: the certificate is still the one pinned.
+// evidence: witnesses
+func TestPinnedTLSKeyBeforeCert(t *testing.T) {
+	cert := selfSigned(t)
+	key, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "both.pem")
+	data := append(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})...)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := pinnedTLS(p)
+	if err != nil {
+		t.Fatalf("pinnedTLS() = %v", err)
+	}
+	if err := pinned.VerifyPeerCertificate(cert.Certificate, nil); err != nil {
+		t.Errorf("serve's certificate refused: %v", err)
+	}
+
+	onlyKey := filepath.Join(t.TempDir(), "key.pem")
+	if err := os.WriteFile(onlyKey, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pinnedTLS(onlyKey); err == nil || !strings.Contains(err.Error(), "holds no PEM certificate") {
+		t.Errorf("pinnedTLS(key only) = %v, want no certificate", err)
+	}
+}
+
+func writeCertPEM(t *testing.T, der []byte) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "cert.pem")
+	if err := os.WriteFile(p, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
