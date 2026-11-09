@@ -785,7 +785,11 @@ func (mbox *mailbox) MoveMessages(uid bool, seqSet *imap.SeqSet, destName string
 	if err := moveAllowed(mbox.label, dest.label); err != nil {
 		return err
 	}
+	return mbox.move(apiIDs, dest)
+}
 
+// move is MoveMessages of the messages apiIDs, once dest is allowed.
+func (mbox *mailbox) move(apiIDs []string, dest *mailbox) error {
 	failed, err := mbox.u.c.LabelMessages(dest.label, apiIDs)
 	if err != nil {
 		return err
@@ -907,17 +911,27 @@ func (mbox *mailbox) undoMove(dest *mailbox, apiIDs []string) (allMoved bool, er
 	return len(moved) == len(apiIDs), errors.Join(errs...)
 }
 
-// Expunge removes the messages marked \Deleted from this mailbox. From Trash
-// and Drafts, those no other mailbox or label shows are deleted for good
-// (forGood), as proton-bridge does (connector.go,
-// removeMessagesFromMailboxWithUnlabelCallOnFolders); the others are
-// unlabelled, so they leave this mailbox and stay in the others and in All
-// Mail. Unlike bridge, the delete comes first and the unlabel only after, for
-// the messages not deleted: one the delete fails for is left as it was, in
-// this mailbox and marked \Deleted, so that NO is the truth and a second
-// EXPUNGE tries again. Unlabelled first, it would have left for All Mail
-// only, which clients may not show. All Mail holds every message: nothing
-// leaves it but by leaving every other mailbox, so EXPUNGE there is refused.
+// Expunge removes the messages marked \Deleted from this mailbox, in one of
+// three ways:
+//
+//   - From Trash, Drafts and Spam, the only mailboxes Proton's web client
+//     deletes for good from, those no other mailbox or label shows are
+//     deleted for good (forGood), as proton-bridge does from Trash and Drafts
+//     (connector.go, removeMessagesFromMailboxWithUnlabelCallOnFolders); the
+//     others are unlabelled, and stay in what else holds them. Unlike
+//     bridge, the delete comes first and the unlabel only after, for the
+//     messages not deleted: one the delete fails for is left as it was, in
+//     this mailbox and marked \Deleted, so that NO is the truth and a second
+//     EXPUNGE tries again.
+//   - From another folder (INBOX, Sent, Archive, Folders/...), they are
+//     moved to Trash, as the web client's Delete moves them, and the client
+//     is told so with OK [ALERT]. bridge unlabels them, which files them in
+//     no folder: in All Mail only, which clients may not show.
+//   - From a label (Labels/..., Starred), they are unlabelled: a label holds
+//     messages kept in folders, which keep them.
+//
+// All Mail holds every message: nothing leaves it but by leaving every other
+// mailbox, so EXPUNGE there is refused.
 func (mbox *mailbox) Expunge() error {
 	if mbox.label == protonmail.LabelAllMail {
 		return errors.New("cannot expunge from All Mail: move the messages to Trash, or remove them from their mailboxes")
@@ -931,9 +945,13 @@ func (mbox *mailbox) Expunge() error {
 	apiIDs := slices.Sorted(maps.Keys(mbox.deleted))
 	mbox.Unlock()
 
+	if expungeMovesToTrash(mbox.label, mbox.isLabel()) {
+		return mbox.expungeToTrash(apiIDs)
+	}
+
 	unlabel := apiIDs
 	var deleteErr error
-	if mbox.label == protonmail.LabelTrash || mbox.label == protonmail.LabelDraft {
+	if deletesForGood(mbox.label) {
 		forGood, err := mbox.forGood(apiIDs)
 		if err != nil {
 			return err
@@ -967,6 +985,57 @@ func (mbox *mailbox) Expunge() error {
 	}
 	mbox.forgetDeleted(succeeded(unlabel, failed))
 	return errors.Join(deleteErr, mbox.u.applyAction(unlabel, failed, labelUpdate(mbox.label, false)))
+}
+
+// deletesForGood reports whether EXPUNGE in labelID deletes messages for
+// good: in Trash, Drafts and Spam, as Proton's web client deletes from them
+// alone.
+func deletesForGood(labelID string) bool {
+	switch labelID {
+	case protonmail.LabelTrash, protonmail.LabelDraft, protonmail.LabelSpam:
+		return true
+	}
+	return false
+}
+
+// expungeMovesToTrash reports whether EXPUNGE in labelID moves the messages
+// to Trash: in every folder but those that delete for good, not in a label,
+// which Starred is too.
+func expungeMovesToTrash(labelID string, isLabel bool) bool {
+	return !isLabel && labelID != protonmail.LabelStarred && !deletesForGood(labelID)
+}
+
+// expungeToTrash moves the messages apiIDs to Trash, as MOVE would, and
+// answers OK [ALERT] saying where they went: the client asked for them
+// deleted. Those still here, a move failing for them, stay marked \Deleted
+// for the next EXPUNGE.
+func (mbox *mailbox) expungeToTrash(apiIDs []string) error {
+	trash := mbox.u.getMailboxByLabel(protonmail.LabelTrash)
+	if trash == nil {
+		panic("invariant: setMailboxes makes Trash")
+	}
+	log.Printf("Moving %v messages to Trash, expunged from %v", len(apiIDs), mbox.Name())
+	moveErr := mbox.move(apiIDs, trash)
+
+	var moved []string
+	for _, apiID := range apiIDs {
+		if _, _, err := mbox.db.FromApiID(apiID); errors.Is(err, database.ErrNotFound) {
+			moved = append(moved, apiID)
+		}
+	}
+	mbox.forgetDeleted(moved)
+	if moveErr != nil {
+		return fmt.Errorf("cannot move the messages to Trash, %v of %v moved: %w", len(moved), len(apiIDs), moveErr)
+	}
+	return appendAlert(imap.StatusRespOk, fmt.Sprintf(
+		"%v moved to Trash: messages are deleted for good only from Trash, Spam or Drafts", messagesNoun(len(moved))))
+}
+
+func messagesNoun(n int) string {
+	if n == 1 {
+		return "1 message"
+	}
+	return fmt.Sprintf("%v messages", n)
 }
 
 // forgetDeleted unmarks apiIDs, gone from the mailbox: the next EXPUNGE

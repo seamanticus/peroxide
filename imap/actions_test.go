@@ -1043,32 +1043,128 @@ func TestExpungeFromTrashPartialDelete(t *testing.T) {
 	}
 }
 
-// EXPUNGE deletes the messages marked deleted once: they are gone after.
+// EXPUNGE in a folder moves the messages marked deleted to Trash, label then
+// unlabel as MOVE, once: they are gone after, and in Trash, and the client is
+// told where with OK [ALERT]. A second EXPUNGE has nothing to move.
+// evidence: witnesses
 func TestExpungeForgetsDeletedMessages(t *testing.T) {
 	api := &fakeAPI{t: t}
 	mbox, sent := newActionTestMailbox(t, api, []*protonmail.Message{inboxMessage("a", 0), inboxMessage("b", 1)})
+	trash := addTestMailbox(t, mbox.u, "Trash", protonmail.LabelTrash, nil)
 
 	if err := mbox.UpdateMessagesFlags(true, uidSet(1), imap.AddFlags, []string{imap.DeletedFlag}); err != nil {
 		t.Fatalf("UpdateMessagesFlags() = %v", err)
 	}
 	// The STORE sends a FETCH of the new flags: count what EXPUNGE sends.
 	stored := len(sent())
-	if err := mbox.Expunge(); err != nil {
-		t.Fatalf("Expunge() = %v", err)
+	resp := statusResp(mbox.Expunge())
+	if resp.Type != imap.StatusRespOk || resp.Code != imap.CodeAlert || !strings.Contains(resp.Info, "1 message moved to Trash") {
+		t.Errorf("Expunge() = %+v, want OK [ALERT] saying it moved to Trash", resp)
 	}
 	checkStatus(t, mbox, 1, 1)
-	if updates := sent()[stored:]; len(updates) != 1 {
-		t.Errorf("sent %v updates, want 1 EXPUNGE", len(updates))
-	} else if up, ok := updates[0].(*imapbackend.ExpungeUpdate); !ok || up.SeqNum != 1 {
-		t.Errorf("sent %#v, want EXPUNGE 1", updates[0])
+	checkStatus(t, trash, 1, 1)
+	if got, want := api.madeRequests(), []string{"PUT /messages/label", "PUT /messages/unlabel"}; !slices.Equal(got, want) {
+		t.Errorf("made requests %q, want %q", got, want)
+	}
+	expunged := 0
+	for _, up := range sent()[stored:] {
+		if up, ok := up.(*imapbackend.ExpungeUpdate); ok && up.Mailbox() == mbox.Name() {
+			expunged++
+			if up.SeqNum != 1 {
+				t.Errorf("sent EXPUNGE %v, want 1", up.SeqNum)
+			}
+		}
+	}
+	if expunged != 1 {
+		t.Errorf("sent %v EXPUNGEs in INBOX, want 1", expunged)
 	}
 
 	if err := mbox.Expunge(); err != nil {
 		t.Fatalf("second Expunge() = %v", err)
 	}
-	if got := len(api.madeRequests()); got != 1 {
-		t.Errorf("made %v requests, want 1: the second EXPUNGE has nothing to delete", got)
+	if got := len(api.madeRequests()); got != 2 {
+		t.Errorf("made %v requests, want 2: the second EXPUNGE has nothing to move", got)
 	}
+}
+
+// Where EXPUNGE sends messages: folders move them to Trash; Trash, Drafts and
+// Spam delete for good; labels, Starred too, unlabel. All Mail refuses
+// (TestExpungeAllMailRefused).
+// proof: exhaustive (every system mailbox, a folder and a label)
+func TestExpungeRule(t *testing.T) {
+	for _, tc := range []struct {
+		labelID         string
+		isLabel         bool
+		toTrash, delete bool
+	}{
+		{protonmail.LabelInbox, false, true, false},
+		{protonmail.LabelSent, false, true, false},
+		{protonmail.LabelArchive, false, true, false},
+		{"folder", false, true, false},
+		{protonmail.LabelTrash, false, false, true},
+		{protonmail.LabelDraft, false, false, true},
+		{protonmail.LabelSpam, false, false, true},
+		{protonmail.LabelStarred, false, false, false},
+		{"label", true, false, false},
+	} {
+		if got := expungeMovesToTrash(tc.labelID, tc.isLabel); got != tc.toTrash {
+			t.Errorf("expungeMovesToTrash(%v, %v) = %v", tc.labelID, tc.isLabel, got)
+		}
+		if got := deletesForGood(tc.labelID); got != tc.delete {
+			t.Errorf("deletesForGood(%v) = %v", tc.labelID, got)
+		}
+	}
+	for _, data := range systemMailboxes {
+		if data.label == protonmail.LabelAllMail {
+			continue
+		}
+		if expungeMovesToTrash(data.label, false) == deletesForGood(data.label) && data.label != protonmail.LabelStarred {
+			t.Errorf("%v neither moves to Trash nor deletes", data.name)
+		}
+	}
+}
+
+// EXPUNGE in Spam deletes for good, as from Trash: the message is only there.
+// evidence: witnesses
+func TestExpungeFromSpam(t *testing.T) {
+	api := &fakeAPI{t: t, labelIDs: map[string][]string{"a": {protonmail.LabelSpam, protonmail.LabelAllMail}}}
+	inbox, _ := newActionTestMailbox(t, api, nil)
+	spam := addTestMailbox(t, inbox.u, "Spam", protonmail.LabelSpam,
+		[]*protonmail.Message{{ID: "a", LabelIDs: []string{protonmail.LabelSpam, protonmail.LabelAllMail}}})
+	if err := spam.UpdateMessagesFlags(true, uidSet(1), imap.AddFlags, []string{imap.DeletedFlag}); err != nil {
+		t.Fatal(err)
+	}
+	if err := spam.Expunge(); err != nil {
+		t.Fatalf("Expunge() = %v", err)
+	}
+	if got, want := api.madeRequests(), []string{"POST /mail/v4/messages", "PUT /messages/delete"}; !slices.Equal(got, want) {
+		t.Errorf("made requests %q, want %q", got, want)
+	}
+	checkStatus(t, spam, 0, 0)
+}
+
+// EXPUNGE in a label only removes the label: the message stays in its folder.
+// evidence: witnesses
+func TestExpungeFromLabel(t *testing.T) {
+	api := &fakeAPI{t: t}
+	msg := &protonmail.Message{ID: "a", LabelIDs: []string{protonmail.LabelInbox, "w", protonmail.LabelAllMail}}
+	inbox, _ := newActionTestMailbox(t, api, []*protonmail.Message{msg})
+	work := addTestMailbox(t, inbox.u, "", "w", []*protonmail.Message{msg})
+	inbox.u.Lock()
+	work.setLabel(&protonmail.Label{ID: "w", Name: "Work", Type: protonmail.LabelMessage})
+	inbox.u.nameMailboxes()
+	inbox.u.Unlock()
+	if err := work.UpdateMessagesFlags(true, uidSet(1), imap.AddFlags, []string{imap.DeletedFlag}); err != nil {
+		t.Fatal(err)
+	}
+	if err := work.Expunge(); err != nil {
+		t.Fatalf("Expunge() = %v", err)
+	}
+	if got, want := api.madeRequests(), []string{"PUT /messages/unlabel"}; !slices.Equal(got, want) {
+		t.Errorf("made requests %q, want %q", got, want)
+	}
+	checkStatus(t, work, 0, 0)
+	checkStatus(t, inbox, 1, 0)
 }
 
 // trashMessage is a read message in Trash.
