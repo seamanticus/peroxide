@@ -700,3 +700,22 @@ SendMail returns.
   (signature.asc), which may reach the recipient as a separate
   attachment, breaking the signature.
 - A test in smtp/smtp_test.go with a multipart/encrypted message.
+
+## 20. Building a large message peaks at about 14x its size
+
+**Problem.** The first FETCH of a 28.7 MB message (a 20 MiB `.log`
+attachment, imported into Archive) made peroxide download, decrypt and
+build it: gctrace showed the Go heap at 105 -> 191 -> 308 -> 370 MB
+(before.log, after.log in the append-import measurements, 2026-11-09
+14:05 and 14:21), process RSS 414-430 MiB, against 13 MiB idle. The
+download's memBudget (64 MiB, imap/limiter.go) bounds how many builds
+run at once by Proton's sizes, not what one build allocates. Not caused
+by branch append-import.
+
+**To do:** a benchmark of buildMessage (imap/build.go) for a message
+with a 20 MiB attachment, as BenchmarkImportMessage20MiB does for
+imports, then the same treatment as protonmail/encrypt_rfc822.go got
+(408c39c): stream decryption into the output, size buffers up front.
+The attachment is downloaded whole (GET /attachments/{id}), decrypted,
+base64-encoded into the literal, which is sealed into the store
+(imap/database/store.go): each step may hold a full copy.
