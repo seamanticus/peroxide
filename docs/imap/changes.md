@@ -266,10 +266,11 @@ it just created; the `Labels` event that follows changes nothing.
   and makes no request. aerc sends it before every APPEND, and ignores
   the answer.
 - **RENAME** keeps the mailbox's messages, UIDs and UIDVALIDITY; the
-  folders inside a renamed folder follow it. Refused: a folder to a
-  label or back, a folder into itself, and a subfolder to the top of
-  `Folders` (peroxide can't yet ask Proton for "no parent", `TODO.md`
-  section 10).
+  folders inside a renamed folder follow it. A subfolder can move to the
+  top of `Folders` (`RENAME Folders/x/c Folders/c`): peroxide sends
+  `ParentID` 0, as Proton's web client does when you drag a folder to
+  the top. Refused: a folder to a label or back, and a folder into
+  itself.
 - **DELETE of a folder** deletes the folders inside it too (Proton
   does; peroxide removes them at once, with a BYE each), and leaves its
   messages in no folder: they show in All Mail only (seen 2026-11-09).
@@ -341,4 +342,6 @@ created, and drops what `:rmdir` deleted, only after it reconnects.
   database, peroxide doesn't support it; bridge picks the request by
   the new name's prefix (`updateFolder` or `updateLabel`) whatever the
   mailbox was, peroxide refuses a folder renamed into `Labels/` or a
-  label into `Folders/`.
+  label into `Folders/`. bridge can't move a subfolder to the top:
+  go-proton-api leaves an empty `ParentID` out of the request, so the
+  folder stays where it was.

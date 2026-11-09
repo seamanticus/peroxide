@@ -220,13 +220,19 @@ them; gluon keeps a local list).
    to `Folders/a/b` kept only labels 5, 15 and 25 (All Mail and two
    categories), so it shows in All Mail only. bridge's comment says
    Proton moves them out of the folder, not where to.
-3. RENAME of a subfolder to the top of `Folders` is refused: an empty
-   `ParentID` is left out of the request (go-proton-api's `omitempty`),
-   so Proton would keep the folder in its parent. Find what Proton
-   takes for "no parent" (the web client's request) before allowing it.
+3. (done, e4921be) RENAME of a subfolder to the top of `Folders` sends
+   `ParentID` 0, as Proton's web client does (WebClients `ROOT_FOLDER`),
+   which go-proton-api can't send. Left: one live RENAME to the top
+   with `-debug`, to see Proton accept it and what its answer and the
+   event hold (a numeric `ParentID` in an answer would fail to decode
+   into `Label.ParentID`, a string).
 4. aerc has no command to rename a folder (aerc_implementation.md
    section 10, `:rename`), and doesn't show the parents a CREATE made
    until it lists again (section 10, item 6).
+5. Evolution, 2026-11-09: after a folder was moved in the web client it
+   kept sending STATUS of the old name (`NO No such mailbox`, 5 times)
+   and never sent LIST again, Send/Receive included; restart it.
+   peroxide can't tell it (go-imap sends no unsolicited LIST).
 
 ## 11. Determinism and protocol correctness
 

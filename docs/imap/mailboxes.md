@@ -121,8 +121,10 @@ when it connects, so reconnect it (`:connect`, or restart it).
 Seen with aerc and Evolution: neither removes a deleted or renamed
 mailbox from its tree after listing again. aerc keeps every directory
 it has seen until it restarts, and after the BYE's reconnect tries to
-open the deleted one again ("No such mailbox"). Evolution lists again
-after a STATUS fails and still shows it. A renamed mailbox therefore
+open the deleted one again ("No such mailbox"). Evolution sometimes
+lists again after a STATUS fails and still shows it; after a folder was
+moved in the web client it never listed again, Send/Receive included,
+until restarted. A renamed mailbox therefore
 shows under both names until the client is restarted. Evolution draws
 `Folders` and `Labels` as parents; aerc's default list shows full
 names (`Folders/Work`).
