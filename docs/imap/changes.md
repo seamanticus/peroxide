@@ -47,9 +47,11 @@ One call: label the messages with the destination
 - Into `Starred`, it stars them.
 - **Into `Labels/<name>`**, it adds the label; the messages stay in
   their folder.
-- **Into `Trash`** (COPY or MOVE), Proton also unstars them. peroxide
-  takes `\Flagged` off at once, with the answer, rather than at the next
-  events.
+- **Into `Trash`** (COPY or MOVE), Proton also unstars them and removes
+  their labels (seen 2026-11-10: one `PUT /messages/label` to Trash, and
+  the events remove Starred and every `Labels/` label too). peroxide
+  takes `\Flagged` off at once, with the answer; the labels leave at the
+  next events. Proton's web client does the same.
 
 No `COPYUID` is returned (no UIDPLUS).
 
@@ -113,7 +115,8 @@ mailboxes Proton's web client deletes for good from:
 - **From a folder**, the move is the same as `MOVE` to Trash: label
   Trash, then unlabel the folder (two requests). A message the move
   fails for stays in the folder, still marked `\Deleted`, for the next
-  EXPUNGE. Proton unstars messages filed in Trash. So aerc's `:delete`
+  EXPUNGE. As any move to Trash, it unstars them and removes their
+  labels (COPY above). So aerc's `:delete`
   (mark `\Deleted`, expunge in place) does what the web client's
   Delete does, and a second `:delete` in Trash removes the message for
   good.
