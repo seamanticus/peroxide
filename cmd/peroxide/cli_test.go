@@ -41,6 +41,14 @@ func TestParseArgs(t *testing.T) {
 		}},
 		{[]string{"-V"}, "", func(i *invocation) bool { return i.global.version }},
 		{[]string{"serve", "-V"}, "", func(i *invocation) bool { return i.global.version }},
+		{[]string{"-V", "serve"}, "", func(i *invocation) bool { return i.global.version && i.command == "serve" }},
+
+		// -V doesn't excuse the rest of the line.
+		{[]string{"-V", "serve", "stray"}, "takes no arguments", nil},
+		{[]string{"-V", "nope"}, `unknown command "nope"`, nil},
+		{[]string{"serve", "-V", "-nope"}, "unknown option -nope", nil},
+		{[]string{"sendmail", "bob", "--"}, "usage: peroxide sendmail", nil},
+		{[]string{"sendmail", "bob", "--", "-i"}, "usage: peroxide sendmail", nil},
 
 		// The silent drop that made `serve -disable-smtp` run SMTP.
 		{[]string{"-disable-smtp", "serve"}, "is an option of serve: write it after the command", nil},
@@ -60,6 +68,7 @@ func TestParseArgs(t *testing.T) {
 		{[]string{"help"}, "help", nil},
 		{[]string{"-h"}, "help", nil},
 		{[]string{"serve", "-h"}, "help", nil},
+		{[]string{"sendmail", "bob", "--", "-h"}, "help", nil},
 	} {
 		inv, err := parseArgs(tc.args)
 		switch {

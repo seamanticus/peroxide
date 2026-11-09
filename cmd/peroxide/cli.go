@@ -221,7 +221,7 @@ func parseArgs(args []string) (*invocation, error) {
 		}
 		return nil, err
 	}
-	if inv.global.version {
+	if inv.global.version && top.NArg() == 0 {
 		return inv, nil
 	}
 	if top.NArg() == 0 {
@@ -241,9 +241,6 @@ func parseArgs(args []string) (*invocation, error) {
 			return nil, fmt.Errorf("peroxide %v: unknown option -%v (see 'peroxide help')", inv.command, name)
 		}
 		return nil, fmt.Errorf("peroxide %v: %w", inv.command, err)
-	}
-	if inv.global.version {
-		return inv, nil
 	}
 	inv.args = fs.Args()
 
@@ -274,14 +271,24 @@ func parseArgs(args []string) (*invocation, error) {
 		rest := newFlagSet("sendmail")
 		rest.Bool("i", false, "")
 		if err := rest.Parse(inv.args[2:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil, errHelp
+			}
 			if name, ok := undefinedFlag(err); ok {
 				return nil, fmt.Errorf("peroxide sendmail: unknown sendmail(1) option -%v after -- (only -i is understood)", name)
 			}
 			return nil, fmt.Errorf("peroxide sendmail: %w", err)
 		}
+		if rest.NArg() == 0 {
+			// serve's SMTP takes the recipients from the envelope only, so
+			// none would send nothing there; the message's To isn't read.
+			return nil, wrongArgs("sendmail [options] <username> -- <recipient>...")
+		}
 		inv.sendmail.recipients = rest.Args()
 		inv.args = inv.args[:1]
 	}
+	// -V with a command: the whole line is checked as if it were run, so
+	// that nothing on it goes unread, then only the version is printed.
 	return inv, nil
 }
 
