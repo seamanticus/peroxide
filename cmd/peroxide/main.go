@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
@@ -531,6 +533,22 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		msg, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			log.Fatal(fmt.Errorf("cannot read the message: %w", err))
+		}
+
+		// While serve runs, through its SMTP server: logging in here would
+		// spend the refresh token serve holds.
+		if running, err := config.ServeRunning(); err != nil {
+			log.Fatal(err)
+		} else if running {
+			addr := *smtpHost + ":" + *smtpPort
+			if err := sendThroughServe(addr, tlsConfig, username, bridgePassword, rcpt, msg); err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
 
 		c, privateKeys, _, err := auth.NewManager(newClient).Auth(username, bridgePassword)
 		if err != nil {
@@ -547,7 +565,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		err = smtpbackend.SendMail(c, u, privateKeys, addrs, rcpt, os.Stdin)
+		err = smtpbackend.SendMail(c, u, privateKeys, addrs, rcpt, bytes.NewReader(msg))
 		if err != nil {
 			log.Fatal(err)
 		}
