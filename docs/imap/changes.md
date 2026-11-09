@@ -181,9 +181,11 @@ input may not) is imported: its saved copy is then in Sent twice.
 
 Not into **Drafts**: a client saving a draft again may keep its
 `Message-Id`, and deletes the old draft once the APPEND answers OK, so
-"already there" would lose the edit. A draft is always imported. Whether
-Proton then merges it with the draft it has, by `Message-Id`, isn't
-known yet.
+"already there" would lose the edit. A draft is always imported, and
+Proton doesn't merge drafts by `Message-Id`: tested 2026-11-09, two
+drafts APPENDed under one `Message-Id` became two messages (two
+MessageIDs, two create events), and deleting the first, as a client
+saving again does, left the second, edited one.
 
 Found, nothing changes in Proton, and APPEND answers with an `ALERT`,
 the one response code clients must show (RFC 3501 section 7.1):
