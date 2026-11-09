@@ -177,7 +177,7 @@ Commands:
 						now, as serve does in the background after a login, and
 						exit once it is complete. Run it before the first client
 						connects to a large account; interrupted, it resumes.
-						Not while a client of the account is logged in to serve.
+						Not while serve runs: it downloads by itself.
 						-discard-local-copy wipes the local copy first and
 						downloads it all again: every mailbox gets a new
 						UIDVALIDITY, so clients refetch.
