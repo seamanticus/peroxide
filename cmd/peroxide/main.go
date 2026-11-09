@@ -11,6 +11,7 @@ import (
 	"net/http/cookiejar"
 	"os"
 	"os/signal"
+	"runtime"
 	rtdebug "runtime/debug"
 	"strings"
 	"syscall"
@@ -458,7 +459,12 @@ func main() {
 	case "serve":
 		// One process serves both protocols with one auth.Manager: Proton's
 		// refresh tokens are single use, so two processes refreshing the
-		// same account's session lock one of them out (TODO 18).
+		// same account's session lock one of them out (TODO 18). The lock
+		// tells the other commands so, and keeps a second serve out.
+		serveLock, err := config.LockServe()
+		if err != nil {
+			log.Fatal(err)
+		}
 		smtpAddr := *smtpHost + ":" + *smtpPort
 		imapAddr := *imapHost + ":" + *imapPort
 
@@ -476,13 +482,23 @@ func main() {
 				done <- listenAndServeIMAP(imapAddr, debug, authManager, eventsManager, tlsConfig, *showAllMail)
 			}()
 		}
-		log.Fatal(<-done)
+		err = <-done
+		// Held until the process exits: unreachable, the lock's file would be
+		// closed by its finalizer, releasing it while serve runs.
+		runtime.KeepAlive(serveLock)
+		log.Fatal(err)
 	case "download-mailbox":
 		discard := downloadCmd.Bool("discard-local-copy", false, "wipe the local copy first and download it again from scratch")
 		downloadCmd.Parse(flag.Args()[1:])
 		username := downloadCmd.Arg(0)
 		if username == "" || downloadCmd.NArg() != 1 {
 			log.Fatal("usage: peroxide download-mailbox [-discard-local-copy] <username>")
+		}
+		// Before logging in: that spends the refresh token serve holds.
+		if running, err := config.ServeRunning(); err != nil {
+			log.Fatal(err)
+		} else if running {
+			log.Fatal("peroxide serve is running: it downloads the account itself once a client logs in; stop it to run download-mailbox")
 		}
 
 		bridgePassword, err := askBridgePass()
