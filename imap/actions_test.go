@@ -1061,8 +1061,8 @@ func TestExpungeForgetsDeletedMessages(t *testing.T) {
 	if resp.Type != imap.StatusRespOk || resp.Code != imap.CodeAlert || !strings.Contains(resp.Info, "1 message moved to Trash") {
 		t.Errorf("Expunge() = %+v, want OK [ALERT] saying it moved to Trash", resp)
 	}
-	checkStatus(t, mbox, 1, 1)
-	checkStatus(t, trash, 1, 1)
+	checkStatus(t, mbox, 1, 1)  // b, unread
+	checkStatus(t, trash, 1, 0) // a, read
 	if got, want := api.madeRequests(), []string{"PUT /messages/label", "PUT /messages/unlabel"}; !slices.Equal(got, want) {
 		t.Errorf("made requests %q, want %q", got, want)
 	}
