@@ -719,3 +719,16 @@ imports, then the same treatment as protonmail/encrypt_rfc822.go got
 The attachment is downloaded whole (GET /attachments/{id}), decrypted,
 base64-encoded into the literal, which is sealed into the store
 (imap/database/store.go): each step may hold a full copy.
+
+**Also, on the APPEND side** (protonmail/encrypt_rfc822.go): a message
+encrypted whole (a signed or encrypted part, or two text parts) first
+has a per-part attempt, whose output buffer, grown up front to the
+literal plus an eighth, is dropped when the attempt fails: about 30 MB
+wasted for a 28.7 MB message. BenchmarkImportMessage20MiBText measured
+3.55 copies at da00766 (102 MB per import), live RSS 177 MiB. A walk
+of the MIME structure before allocating (the same checks encryptEntity
+makes: multipart/encrypted or /signed, a second text part, an
+unparseable Content-Disposition) would pick the path first and save
+that buffer: about 2.4 copies. Measured series, 2026-11-09: 780cc70
+9.01 copies / 315 MiB, 408c39c 1.87 per part, 5f5ce61 5.53 whole /
+236 MiB, da00766 3.55 whole / 177 MiB.
