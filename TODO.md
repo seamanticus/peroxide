@@ -220,12 +220,11 @@ them; gluon keeps a local list).
    to `Folders/a/b` kept only labels 5, 15 and 25 (All Mail and two
    categories), so it shows in All Mail only. bridge's comment says
    Proton moves them out of the folder, not where to.
-3. (done, e4921be) RENAME of a subfolder to the top of `Folders` sends
-   `ParentID` 0, as Proton's web client does (WebClients `ROOT_FOLDER`),
-   which go-proton-api can't send. Left: one live RENAME to the top
-   with `-debug`, to see Proton accept it and what its answer and the
-   event hold (a numeric `ParentID` in an answer would fail to decode
-   into `Label.ParentID`, a string).
+3. (done, e4921be, checked live 2026-11-09) RENAME of a subfolder to the
+   top of `Folders` sends `ParentID` 0, as Proton's web client does
+   (WebClients `ROOT_FOLDER`), which go-proton-api can't send. Proton
+   accepted it: its answer has `Type` 3 and no `ParentID`, and `Folders/
+   t/r` became `Folders/r`, with and without messages, and back again.
 4. aerc has no command to rename a folder (aerc_implementation.md
    section 10, `:rename`), and doesn't show the parents a CREATE made
    until it lists again (section 10, item 6).
