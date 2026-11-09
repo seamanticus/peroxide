@@ -270,15 +270,21 @@ it just created; the `Labels` event that follows changes nothing.
   label or back, a folder into itself, and a subfolder to the top of
   `Folders` (peroxide can't yet ask Proton for "no parent", `TODO.md`
   section 10).
-- **What DELETE does to a folder's messages and subfolders** is
-  Proton's decision, not yet checked (`TODO.md` section 10).
+- **DELETE of a folder** deletes the folders inside it too (Proton
+  does; peroxide removes them at once, with a BYE each), and leaves its
+  messages in no folder: they show in All Mail only (seen 2026-11-09).
+  Move them out first if you want them elsewhere. A label's messages
+  just lose the label.
+- **Proton's own limits** reach the client in the NO: on a free plan,
+  `[2011] Folder limit reached`.
 - **SUBSCRIBE, UNSUBSCRIBE** answer `NO not yet implemented`: every
   mailbox counts as subscribed.
 
 aerc: `:mkdir Folders/Work` creates and opens a folder, `:mkdir
 Labels/Todo` a label, `:rmdir` deletes the open one (`-f` if it isn't
 empty). `:move -p` and `:copy -p` create a missing destination. aerc
-has no command to rename.
+has no command to rename, and shows the parents `:mkdir Folders/a/b`
+created, and drops what `:rmdir` deleted, only after it reconnects.
 
 ## How proton-bridge does it
 

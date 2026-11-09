@@ -206,21 +206,27 @@ them; gluon keeps a local list).
 
 **Left open.**
 
-1. Live checks with aerc and `-debug`: `:mkdir Folders/x`, `:mkdir
-   Folders/a/b` with no `a`, `:mkdir Labels/y`, `:rmdir` of each. Note
-   what Proton answers to `POST /core/v4/labels` for a folder (`Type` 3,
-   or 1 with `Exclusive` 1; `ParentID`), and what the `Labels` event
-   after it holds: `Label.IsFolder` accepts either form until then.
-2. Delete a throw-away folder holding a message and a subfolder, from
-   aerc (`:rmdir -f`): where Proton puts the message (bridge's comment:
-   "Proton moves the folder's messages out of it"), and whether the
-   subfolder goes too or moves up. Describe it in docs/imap/changes.md.
+1. (done, 2026-11-09 `-debug` run with aerc, Evolution and the web
+   client) `POST /core/v4/labels` answers a folder with `Type` 3, no
+   `Exclusive`, and a `ParentID` for a subfolder; the `Labels` event
+   after it has `Type` 1, `Exclusive` 1, and changed nothing. CREATE
+   `Folders/a/b` made `a` then `b`. On a free plan the second folder
+   is refused (`[2011] Folder limit reached`) and the NO says so.
+   Evolution renamed a folder holding subfolders with messages, which
+   followed; its RENAME of `Folders` was refused.
+2. (done, same run) DELETE of a folder deletes its subfolders too
+   (their events come seconds later; fixed in e47ab12, which removes
+   them at once), and leaves its messages in no folder: one APPENDed
+   to `Folders/a/b` kept only labels 5, 15 and 25 (All Mail and two
+   categories), so it shows in All Mail only. bridge's comment says
+   Proton moves them out of the folder, not where to.
 3. RENAME of a subfolder to the top of `Folders` is refused: an empty
    `ParentID` is left out of the request (go-proton-api's `omitempty`),
    so Proton would keep the folder in its parent. Find what Proton
    takes for "no parent" (the web client's request) before allowing it.
 4. aerc has no command to rename a folder (aerc_implementation.md
-   section 10, `:rename`).
+   section 10, `:rename`), and doesn't show the parents a CREATE made
+   until it lists again (section 10, item 6).
 
 ## 11. Determinism and protocol correctness
 
