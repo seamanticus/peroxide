@@ -336,8 +336,20 @@ func TestImportMessageTooBig(t *testing.T) {
 // (seeded random bytes, base64 in the literal, as a client APPENDs it) to a
 // server that discards the request. B/op divided by the literal's size, the
 // "copies" metric, is how many times ImportMessage allocates the message:
-// what decoding, encrypting and building the request cost per APPEND.
+// what decoding, encrypting and building the request cost per APPEND. The
+// attachment is application/octet-stream: encrypted part by part.
 func BenchmarkImportMessage20MiB(b *testing.B) {
+	benchmarkImport(b, "application/octet-stream")
+}
+
+// BenchmarkImportMessage20MiBText is BenchmarkImportMessage20MiB with a
+// text/x-log attachment: a second text part, so the message is encrypted
+// whole, armored (as a .log file mailed from Outlook was, 2026-11-09).
+func BenchmarkImportMessage20MiBText(b *testing.B) {
+	benchmarkImport(b, "text/x-log")
+}
+
+func benchmarkImport(b *testing.B, attachmentType string) {
 	key := newImportKey(b)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := io.Copy(io.Discard, r.Body); err != nil {
@@ -355,7 +367,7 @@ func BenchmarkImportMessage20MiB(b *testing.B) {
 	lit.WriteString("From: a@example.org\r\nTo: b@example.org\r\nSubject: big\r\n" +
 		"Content-Type: multipart/mixed; boundary=b1\r\n\r\n" +
 		"--b1\r\nContent-Type: text/plain\r\n\r\nsee attached\r\n" +
-		"--b1\r\nContent-Type: application/octet-stream\r\n" +
+		"--b1\r\nContent-Type: " + attachmentType + "\r\n" +
 		"Content-Disposition: attachment; filename=big.bin\r\n" +
 		"Content-Transfer-Encoding: base64\r\n\r\n")
 	enc := base64.StdEncoding.EncodeToString(att)

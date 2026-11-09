@@ -252,8 +252,9 @@ func (mbox *mailbox) CreateMessage(flags []string, date time.Time, body imap.Lit
 	if err := appendAllowed(mbox.label); err != nil {
 		return err
 	}
-	literal, err := io.ReadAll(body)
-	if err != nil {
+	// At its size: io.ReadAll would double its way up to a 70 MiB literal.
+	literal := make([]byte, body.Len())
+	if _, err := io.ReadFull(body, literal); err != nil {
 		return fmt.Errorf("cannot read the message: %w", err)
 	}
 	// go-imap v1 gives a backend no context: the requests run to their end.

@@ -55,15 +55,19 @@ import (
 // whole instead, as PGP/MIME signed by key.
 //
 // Parts are encrypted as they are read, into one buffer sized for the
-// result up front: base64 attachments stay about their size, armored texts
-// grow by a third. A message is held twice at most, as literal and result.
+// result up front: base64 attachments stay about their size. Encrypted
+// whole, the message is armored, a third larger with its line breaks: that
+// attempt gets a buffer of its own sized for it, the first one dropped, so
+// that neither grows by doubling.
 func encryptRFC822(key *openpgp.Entity, literal []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Grow(len(literal) + len(literal)/8 + 4096)
 	if err := encryptParts(&buf, key, literal); err != nil {
-		buf.Reset()
-		err = encryptFull(&buf, key, literal)
-		return buf.Bytes(), err
+		buf = bytes.Buffer{} // dropped before the second is made
+		var full bytes.Buffer
+		full.Grow(len(literal) + len(literal)*3/8 + 8192)
+		err = encryptFull(&full, key, literal)
+		return full.Bytes(), err
 	}
 	return buf.Bytes(), nil
 }
