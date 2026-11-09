@@ -70,7 +70,7 @@ depth, named (case-insensitive) one of:
     Salt KeySalt PrivateKey Password LoginPassword MailboxPassword
     TwoFactorCode Cookie RecoverySecret Key
 
-has its value replaced by `<API key removed for security>`. That covers
+has its value replaced by `<credentials removed>`. That covers
 the SRP exchange (proofs, ephemerals, salts), the session tokens, the
 TOTP code, the encrypted private keys and key salts (`/keys/salts`,
 `/users`, `/addresses`), the recovery secret, and the cleartext session

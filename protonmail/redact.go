@@ -7,7 +7,7 @@ import (
 )
 
 // RedactedValue replaces credentials in debug logs.
-const RedactedValue = "<API key removed for security>"
+const RedactedValue = "<credentials removed>"
 
 // redactedJSONFields lists the JSON object keys whose values must never end up
 // in debug logs: credentials, SRP material, session tokens, key material and
