@@ -191,7 +191,7 @@ now held per page and per action, not per sync. A semaphore per mailbox
 (an event page taking those it touches, in label-ID order) would let a
 STORE in INBOX go ahead while Drafts is busy; test with synctest.
 
-## 10. (done: CREATE, DELETE and RENAME of `Folders/` and `Labels/` mailboxes; ca51e1c, 61a8838)
+## 10. (done: CREATE, DELETE and RENAME of `Folders/` and `Labels/` mailboxes; ca51e1c, 61a8838, e47ab12, e4921be)
 
 Described in docs/imap/changes.md. As proton-bridge (connector.go,
 `CreateMailbox`, `UpdateMailboxName`, `DeleteMailbox`), through the
@@ -204,7 +204,7 @@ again; system mailboxes, INBOX, `Folders` and `Labels` are refused;
 SUBSCRIBE and UNSUBSCRIBE stay "not yet implemented" (aerc never sends
 them; gluon keeps a local list).
 
-**Left open.**
+**Checked live** (closed 2026-11-09).
 
 1. (done, 2026-11-09 `-debug` run with aerc, Evolution and the web
    client) `POST /core/v4/labels` answers a folder with `Type` 3, no
@@ -225,13 +225,10 @@ them; gluon keeps a local list).
    (WebClients `ROOT_FOLDER`), which go-proton-api can't send. Proton
    accepted it: its answer has `Type` 3 and no `ParentID`, and `Folders/
    t/r` became `Folders/r`, with and without messages, and back again.
-4. aerc has no command to rename a folder (aerc_implementation.md
-   section 10, `:rename`), and doesn't show the parents a CREATE made
-   until it lists again (section 10, item 6).
-5. Evolution, 2026-11-09: after a folder was moved in the web client it
-   kept sending STATUS of the old name (`NO No such mailbox`, 5 times)
-   and never sent LIST again, Send/Receive included; restart it.
-   peroxide can't tell it (go-imap sends no unsolicited LIST).
+4. Client side, not peroxide's: aerc's `:rename` and its refresh after
+   `:mkdir`/`:rmdir` are planned in aerc_implementation.md section 10;
+   Evolution, which isn't maintained against, doesn't list again after
+   a folder moves elsewhere.
 
 ## 11. Determinism and protocol correctness
 
