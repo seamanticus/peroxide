@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"crypto/hkdf"
 	"crypto/sha256"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -110,5 +113,41 @@ func TestSaveAuthsOwnerOnly(t *testing.T) {
 				t.Errorf("config directory holds %v, want only %v", entries, filepath.Base(p))
 			}
 		})
+	}
+}
+
+// Accounts saved at the same time each read, change and rewrite auth.json:
+// under auth.lock none loses another's record. Without the lock the loss
+// depends on scheduling, so a pass is evidence only, stronger repeated.
+// evidence: witnesses
+func TestEncryptAndSaveConcurrent(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	secretKey, _, err := GeneratePassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const accounts = 8
+	var wg sync.WaitGroup
+	errs := make([]error, accounts)
+	for i := range accounts {
+		wg.Go(func() {
+			errs[i] = EncryptAndSave(&CachedAuth{UID: fmt.Sprint("u", i)}, fmt.Sprint("user", i), secretKey)
+		})
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		t.Fatalf("EncryptAndSave() = %v", err)
+	}
+
+	auths, err := readCachedAuths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range accounts {
+		if _, ok := auths[fmt.Sprint("user", i)]; !ok {
+			t.Errorf("auth.json has no user%v: %v of %v accounts kept", i, len(auths), accounts)
+		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"golang.org/x/crypto/bcrypt"
@@ -27,6 +28,49 @@ const authFileMode = 0o600
 
 func authFilePath() (string, error) {
 	return config.Path("auth.json")
+}
+
+// authLockFile is held while auth.json is read, changed and written back.
+// It is a file of its own: saveAuths renames a new auth.json over the old
+// one, and a lock on the old file would no longer guard anything.
+const authLockFile = "auth.lock"
+
+// updateAuths applies change to the records in auth.json and saves them,
+// holding auth.lock throughout, so that two writers, in one process or two,
+// never lose each other's change. An flock belongs to the open file, so each
+// call opening the lock itself also keeps goroutines of one process apart.
+func updateAuths(change func(auths map[string]string) error) error {
+	p, err := config.Path(authLockFile)
+	if err != nil {
+		return fmt.Errorf("cannot find the auth lock: %w", err)
+	}
+	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE, authFileMode)
+	if err != nil {
+		return fmt.Errorf("cannot open the auth lock: %w", err)
+	}
+	// Closing f releases the lock.
+	defer f.Close()
+	for {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+		if !errors.Is(err, syscall.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("cannot take the auth lock: %w", err)
+	}
+
+	auths, err := readCachedAuths()
+	if err != nil {
+		return err
+	}
+	if auths == nil {
+		auths = make(map[string]string)
+	}
+	if err := change(auths); err != nil {
+		return err
+	}
+	return saveAuths(auths)
 }
 
 type CachedAuth struct {
@@ -131,17 +175,10 @@ func EncryptAndSave(auth *CachedAuth, username string, secretKey *[32]byte) erro
 		return err
 	}
 
-	auths, err := readCachedAuths()
-	if err != nil {
-		return err
-	}
-
-	if auths == nil {
-		auths = make(map[string]string)
-	}
-	auths[username] = encrypted
-
-	return saveAuths(auths)
+	return updateAuths(func(auths map[string]string) error {
+		auths[username] = encrypted
+		return nil
+	})
 }
 
 // isSpentRefreshToken reports whether err is Proton's answer to a refresh
@@ -221,18 +258,14 @@ func ListUsernames() ([]string, error) {
 }
 
 func DeleteUsername(username string) error {
-	auths, err := readCachedAuths()
+	err := updateAuths(func(auths map[string]string) error {
+		if _, ok := auths[username]; !ok {
+			return fmt.Errorf("no stored credentials for %v", username)
+		}
+		delete(auths, username)
+		return nil
+	})
 	if err != nil {
-		return err
-	}
-
-	if _, ok := auths[username]; !ok {
-		return fmt.Errorf("no stored credentials for %v", username)
-	}
-
-	delete(auths, username)
-
-	if err = saveAuths(auths); err != nil {
 		return err
 	}
 	log.Printf("Deleted credentials for %v", username)
