@@ -9,18 +9,27 @@ on:
 permissions:
   contents: read
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+# A newer push to the same branch or pull request supersedes a running one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
-      - uses: actions/setup-go@v5
+jobs:
+  # The checks AGENTS.md asks of every change, once: their results don't
+  # depend on the distribution.
+  lint:
+    runs-on: ubuntu-latest
+    env:
+      GOLANGCI_LINT_VERSION: v2.15.0
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Check formatting
+      - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
@@ -29,17 +38,74 @@ jobs:
             exit 1
           fi
 
+      - name: go vet
+        run: go vet ./...
+
+      - name: go fix -diff prints nothing
+        run: |
+          out=$(go fix -diff ./...)
+          if [ -n "$out" ]; then
+            echo "$out"
+            exit 1
+          fi
+
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" "$GOLANGCI_LINT_VERSION"
+
+      - name: golangci-lint config verify
+        run: golangci-lint config verify
+
+      - name: golangci-lint run
+        run: golangci-lint run ./...
+
+      # The configuration a release binary is built in.
+      - name: Build without cgo
+        run: CGO_ENABLED=0 go build ./...
+
+  # The tests with each distribution's own Go package, natively on each
+  # architecture. Arch Linux has no official arm64 image; Fedora covers arm64.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: arch
+            image: archlinux:latest
+            runner: ubuntu-24.04
+          - distro: fedora
+            image: fedora:45
+            runner: ubuntu-24.04
+          - distro: fedora
+            image: fedora:45
+            runner: ubuntu-24.04-arm
+    name: test (${{ matrix.distro }}, ${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    env:
+      # The distribution's Go, never one downloaded to satisfy go.mod.
+      GOTOOLCHAIN: local
+    steps:
+      # git for actions/checkout; gcc for the race detector, which needs cgo.
+      - name: Install Go, gcc and git (Arch)
+        if: matrix.distro == 'arch'
+        run: pacman -Syu --noconfirm --needed go gcc git
+
+      - name: Install Go, gcc and git (Fedora)
+        if: matrix.distro == 'fedora'
+        run: dnf install -y golang gcc git
+
+      - uses: actions/checkout@v7
+
+      - name: Go version
+        run: go version
+
       - name: Build
-        run: go build -v ./...
+        run: go build ./...
 
       - name: Test
-        run: go test -race ./...
+        run: go test ./...
 
-      # captcha/browser.go picks a different launcher per runtime.GOOS, so make
-      # sure the other platforms still compile.
-      - name: Cross-compile
-        run: |
-          for target in darwin/amd64 darwin/arm64 windows/amd64; do
-            echo "==> $target"
-            GOOS=${target%/*} GOARCH=${target#*/} go build ./...
-          done
+      - name: Test with the race detector
+        run: go test -race ./...
