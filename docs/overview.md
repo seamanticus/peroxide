@@ -24,7 +24,7 @@ IMAP and SMTP parts: no CardDAV, CalDAV or contacts.
 |---|---|
 | `cmd/peroxide` | Command line, server start-up, debug logging (`debuglog.go`) |
 | `auth` | The stored credentials (`auth.json`) and the in-memory sessions |
-| `captcha` | The local helper page for Proton's human verification |
+| `captcha` | Proton's human verification: sends you to Proton's page, waits for Enter |
 | `protonmail` | The Proton API client: requests, crypto helpers, log redaction |
 | `events` | Polls Proton's event stream and hands pages to each account |
 | `imap` | The IMAP backend: mailboxes, FETCH, STORE, COPY, MOVE, EXPUNGE |

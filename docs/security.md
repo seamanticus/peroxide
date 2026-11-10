@@ -92,9 +92,9 @@ look, not in a cache directory.
   read loopback traffic.
 - `-imap-host`/`-smtp-host` other than loopback: still TLS (never
   plain text), ideally with `-tls-client-ca`.
-- The CAPTCHA helper listens on `127.0.0.1:8765` only while
-  `peroxide auth` waits for a challenge, behind a random single-use
-  URL, and warns if you make it listen elsewhere.
+- Human verification opens no port: `peroxide auth` sends you to
+  Proton's verification page, whose URL carries the single-use
+  challenge token of that login attempt.
 
 ## Crypto peroxide does and doesn't do
 

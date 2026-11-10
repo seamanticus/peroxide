@@ -27,8 +27,9 @@ Logs in to Proton interactively and stores the credentials. See
 [accounts.md](accounts.md) for every step. It asks for:
 
 1. Your Proton password (no echo).
-2. Proton's human verification, if Proton asks for it (the CAPTCHA
-   helper, see [accounts.md](accounts.md#human-verification-captcha)).
+2. Proton's human verification, if Proton asks for it: solve the
+   CAPTCHA on Proton's page, then press Enter (see
+   [accounts.md](accounts.md#human-verification-captcha)).
 3. A TOTP code, if two-factor authentication is on. Only TOTP is
    supported; a security key (FIDO2/U2F) alone fails with "Only TOTP is
    supported as a 2FA method". The code is echoed by the terminal and
@@ -46,11 +47,8 @@ replacing them. `auth` options:
 | Option | Default | Meaning |
 |---|---|---|
 | `-remove` | | Delete the stored credentials for the username and exit |
-| `-captcha-mode` | `browser` | `browser` starts the helper and opens a browser on it; `manual` only prints its URL; `disabled` reports Proton's error instead |
-| `-captcha-listen` | `127.0.0.1:8765` | Address of the helper server. Keep it on loopback |
-| `-captcha-timeout` | `10m` | How long to wait for the challenge |
-| `-no-open-browser` | | Print the URL without launching a browser |
-| `-captcha-endpoint` | `https://mail-api.proton.me` | API host serving the challenge |
+| `-captcha-mode` | `browser` | `browser` prints Proton's verification URL and opens a browser on it; `manual` only prints it; `disabled` reports Proton's error instead |
+| `-captcha-timeout` | `10m` | How long to wait for Enter |
 
 ### `serve`
 

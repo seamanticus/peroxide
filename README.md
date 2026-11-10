@@ -38,7 +38,7 @@ su -c 'cp peroxide /usr/bin/'
 
 ## Authentication
 
-Peroxide can only retrieve emails from ProtonMail once the credentials have been authenticated and stored in the system (encrypted, btw). Read the following steps ATTENTIVELY, as it is nuanced. It is a twelve-step program, but nobody here is quitting anything. Once you get the hang of it, it's quite quick. The process begins with:
+Peroxide can only retrieve emails from ProtonMail once the credentials have been authenticated and stored in the system (encrypted, btw). It used to be a twelve-step program; it is five now, and nobody here is quitting anything. The process begins with:
 
 ```shell
 peroxide auth <username>@protonmail.com
@@ -46,28 +46,13 @@ peroxide auth <username>@protonmail.com
 
 1. Upon dispatch, you will be prompted for a `password`, this is your *PROTONMAIL PASSWORD*. The real one. Don't panic, it is being asked for a good reason.
 
-2. peroxide does not solve the Captcha, it must be done by a human, and tonight the human is you. If your system has the global `$BROWSER` set, it should spawn automatically and you will see the helper page on `127.0.0.1:8765`, otherwise copy/paste the url displayer in your browser of preference, whichever one you keep around out of love or habit.
+2. If Proton asks for a Captcha, peroxide prints a `https://verify.proton.me/...` URL and opens it in your browser (through `xdg-open`, in a graphical session). peroxide does not solve the Captcha, it must be done by a human, and tonight the human is you. No browser popped up? Copy the URL into the browser of your preference, whichever one you keep around out of love or habit, on this machine or any other, phone included.
 
-3. In the helper page, Section 1, copy the snippet presented to you to the clipboard by clicking the button `Copy`.
+3. Solve the Captcha... prove to the machine that you are not a machine. The machine, notably, is never asked to prove anything. Proton's page tells Proton you passed; nothing needs copying back. Then press ENTER in the terminal.
 
-4. Then click the button in Section 2 to open the Proton Captcha page but DO NOT solve it yet. patience. the good part is coming.
+4. If you have enabled 2FA (which you should!!!) it will prompt you for it. Press ENTER after having input the 6 numbers.
 
-5. Go to the new opened page, if not already there, and press F12, to open your browser's console. Yes, the console. Tonight you are
-the kind of person.
-
-6. For Firefox and Chromium-based browsers, type `allow pasting` and press ENTER. It should return `unexpected token: identifier` and that is correct.
-
-7. Paste the snippet copied from Section 1 into the console and press ENTER. It should return `undefined`, which is ever so reassuring.
-
-8. Now solve the Captcha... prove to the machine that you are not a machine. The machine, notably, is never asked to prove anything.
-
-9. A long string will then appear at the very top of the page. If you have a mouse, just hover over it, right click and copy the long string. Ugly, long, beautiful string. It is yours.
-
-10. Return to the helper page, paste it into Section 4 and press the button. It will send that token back to `peroxide auth` session.
-
-11. If you have enabled 2FA (which you should!!!) it will prompt you for it. Press ENTER after having input the 6 numbers.
-
-12. A 32-byte string `bridge password` ending in `=` will appear and this is the *BRIDGE PASSWORD* for your ProtonMail account, so you must save it carefully to later use it in your mail client of choice. Guard it the way you guard the last cigarette in the pack. Peroxide does NOT store this password anywhere, NOR does it copy it into your clipboard. It is yours and only yours. Everyone should have something like that.
+5. A 32-byte string `bridge password` ending in `=` will appear and this is the *BRIDGE PASSWORD* for your ProtonMail account, so you must save it carefully to later use it in your mail client of choice. Guard it the way you guard the last cigarette in the pack. Peroxide does NOT store this password anywhere, NOR does it copy it into your clipboard. It is yours and only yours. Everyone should have something like that.
 
 *Note*: your ProtonMail credentials are encrypted and stored on disk and the *bridge password* is the key to decrypt it. So discretion is advised in its use and storage. If you are a neck-beard terminal monkey (or just tech savy), you already know the move: save the *bridge password* to a `.gpg` so you can later invoke into mutt, neomutt or aerc.
 
@@ -77,15 +62,10 @@ These flags only apply to `peroxide auth`:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `-captcha-mode` | `browser` | `browser` opens the helper page, `manual` only prints its URL, `disabled` reports the API error instead |
-| `-captcha-listen` | `127.0.0.1:8765` | Address of the helper server. Keep it on loopback |
-| `-captcha-timeout` | `10m` | How long to wait for you to finish |
-| `-no-open-browser` | | Print the URL without trying to launch a browser |
-| `-captcha-endpoint` | `https://mail-api.proton.me` | API host serving the challenge |
+| `-captcha-mode` | `browser` | `browser` prints the verification URL and opens it, `manual` only prints it, `disabled` reports the API error instead |
+| `-captcha-timeout` | `10m` | How long to wait for your ENTER |
 
-`-captcha-endpoint` is worth knowing about: the host must serve both `/core/v4/captcha` and the widget's assets under `/captcha/v1/assets/`. Several Proton hosts serve the first but not the second, and the challenge then loads as an empty box. peroxide performs checks prior to sending you to the helper page and will inform you of errors otherwise.
-
-*Note*: Verification can only be completed interactively. A long-running `peroxide serve` process that hits a challenge while refreshing its session can NOT resolve it on its own; it was never taught to solve puzzles, only to carry mail. It will tell you to reauthenticate using `peroxide auth` again, and you will go through the twelve steps once more, older and wiser.
+*Note*: Verification can only be completed interactively. A long-running `peroxide serve` process that hits a challenge while refreshing its session can NOT resolve it on its own; it was never taught to solve puzzles, only to carry mail. It will tell you to reauthenticate using `peroxide auth` again, and you will go through the five steps once more, older and wiser.
 
 ## Usage
 

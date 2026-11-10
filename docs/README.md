@@ -21,7 +21,7 @@ code as it is at the commit you are reading it from.
   request travels through them.
 - [commands.md](commands.md): every command and flag.
 - [accounts.md](accounts.md): logging in, the bridge password, what is
-  stored on disk, keys, sessions and the CAPTCHA helper.
+  stored on disk, keys, sessions and human verification (CAPTCHA).
 - [imap/](imap/README.md): the IMAP server.
   - [imap/mailboxes.md](imap/mailboxes.md): folders, labels, system
     mailboxes, LIST and STATUS.

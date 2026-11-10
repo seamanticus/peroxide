@@ -17,7 +17,7 @@ case; protonmail/auth.go):
    request as a new, suspicious client.
 3. **Human verification.** If Proton answers code 9001, it wants a
    CAPTCHA solved first (see below). peroxide replays the login once
-   with the solved token; a second challenge is an error.
+   with the challenge token; a second challenge is an error.
 4. **Two-factor.** With TOTP on, peroxide reads a 6-digit code and sends
    it to `/auth/2fa`. Security keys are not supported.
 5. **Mailbox password.** Proton accounts have one password, or (older
@@ -169,35 +169,36 @@ convenience peroxide inherited from hydroxide.
 
 Proton sometimes refuses a login until a human solves a challenge (API
 code 9001, with a challenge token). peroxide does not solve it; you do,
-in your browser, on Proton's own page. The `captcha` package:
+in your browser, on Proton's own page:
 
-1. Checks that the challenge host (`-captcha-endpoint`, default
-   `https://mail-api.proton.me`) serves the challenge for this token,
-   and warns if it doesn't.
-2. Starts a one-time HTTP server on `-captcha-listen` (default
-   `127.0.0.1:8765`), with a random 32-byte state in its URL. It warns
-   if that address isn't loopback.
-3. Opens your browser on it, or only prints the URL
-   (`-captcha-mode manual`, `-no-open-browser`). It runs `xdg-open`,
-   and only inside a graphical session (`DISPLAY` or
-   `WAYLAND_DISPLAY` set). The browser only ever gets
-   the local `http://127.0.0.1` URL, never a token.
-4. Proton lets only its own web apps embed the challenge, so it runs in
-   its own tab, and its result has to be carried back. The helper page
-   gives you one line of JavaScript to paste into the developer console
-   of Proton's challenge tab, before solving it. Once solved, that line
-   shows the result (the token Proton's page posts to its embedder) in
-   a text box at the top of the tab; you paste it into the helper page.
-   The challenge itself is served, rendered and scored by Proton; no
-   password, session token or cookie goes to the helper page. The
-   README walks through it click by click.
-5. The state is compared in constant time, is single use, and expires
-   with `-captcha-timeout` (default 10 minutes). The server then shuts
-   down.
+1. peroxide prints
+   `https://verify.proton.me/?methods=captcha&token=<challenge token>`
+   and, with `-captcha-mode browser` (the default), opens it with
+   `xdg-open` inside a graphical session (`DISPLAY` or
+   `WAYLAND_DISPLAY` set). Only the CAPTCHA is offered.
+2. You solve the CAPTCHA there. Proton's page itself hands the result
+   to Proton (`POST /core/v4/verification/captcha/<challenge token>`),
+   which marks the challenge token as solved. Nothing has to be copied
+   back.
+3. You press Enter in the terminal. peroxide reads it from `/dev/tty`,
+   waiting up to `-captcha-timeout` (default 10 minutes); Ctrl+C or a
+   closed terminal cancels without retrying.
+4. peroxide replays the login once, with the challenge token in the
+   `x-pm-human-verification-token` header and `captcha` as its type.
+   If Proton still refuses (the page wasn't solved, or the token has
+   expired or was already used), `auth` reports it; run it again for a
+   new challenge.
 
-On a headless machine use `-captcha-mode manual` and forward the port:
-`ssh -L 8765:127.0.0.1:8765 host`. With `-captcha-mode disabled`
-peroxide reports Proton's error instead.
+peroxide can't tell when the page is solved, so it waits for Enter:
+every replay is a full login, and the token is single use.
+
+The URL carries the challenge token, so it shows up in the browser's
+history. The token belongs to this one login attempt and is good for
+nothing else.
+
+On a headless machine use `-captcha-mode manual` and open the URL in a
+browser on any device: the page talks to Proton directly. With
+`-captcha-mode disabled` peroxide reports Proton's error instead.
 
 peroxide can't answer a challenge when it refreshes a session in the
 background (no one to solve it): the login fails, and the log tells you
@@ -223,3 +224,10 @@ to run `peroxide auth` again.
   stored login password. Storing a derived key passphrase instead of
   the mailbox password, and dropping the stored login password, would
   bring peroxide to proton-bridge's exposure; neither is done yet.
+- **Human verification.** The same flow: its CLI prints
+  `https://verify.proton.me/?methods=<every offered method>&token=...`
+  and waits for Enter (internal/frontend/cli, `promptHvURL`); its GUI
+  shows the link. It then replays the login with the original token,
+  with every offered method as the token type. peroxide offers only the
+  CAPTCHA, the one method whose proof the page sends to Proton by
+  itself.

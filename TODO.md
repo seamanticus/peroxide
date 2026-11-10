@@ -57,9 +57,13 @@ bodies. Test: a `GetPublicKeys` request logs `Email=<removed>`.
 
 ## 5. (done: import-messages and export-messages removed; clients use APPEND and FETCH; 1a0d637, b170307, 9546a78)
 
-## 6. Captcha solution
+## 6. (done: Proton's verify page, then Enter; no local helper; 53fc113)
 
-Attempt a more elegant workaround or optimise the Captcha implementation.
+Since WebClients c5d23c0 (2026-08-11) verify.proton.me, opened outside a
+Proton app, sends the solved CAPTCHA to Proton itself
+(`POST /core/v4/verification/captcha/<token>`), so the login is replayed
+with the original token, as proton-bridge's CLI does. Not yet tested
+against a live 9001: how long the proof stays redeemable is unknown.
 
 ## 7. Unlock keys added by `Addresses` events
 
