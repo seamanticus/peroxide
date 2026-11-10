@@ -251,7 +251,8 @@ func TestDebugDoesNotLogSecrets(t *testing.T) {
 			"Code": 1000,
 			"AccessToken": "` + accessToken + `",
 			"RefreshToken": "` + refreshToken + `",
-			"Details": {"HumanVerificationToken": "` + testHVToken + `"},
+			"Details": {"HumanVerificationToken": "` + testHVToken + `",
+				"WebUrl": "https://verify.proton.me/?methods=captcha&token=` + testHVToken + `"},
 			"UID": "some-uid"
 		}`))
 	}))

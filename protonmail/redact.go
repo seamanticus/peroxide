@@ -32,6 +32,9 @@ var redactedJSONFields = map[string]bool{
 	// The user's device recovery secret, which decrypts the recovery file a
 	// browser keeps. Peroxide doesn't decode it, but raw responses carry it.
 	"recoverysecret": true,
+	// The verify page URL in a 9001 response, which embeds the challenge
+	// token.
+	"weburl": true,
 	// Cleartext session keys, sent when mailing recipients outside Proton.
 	"key": true,
 }
