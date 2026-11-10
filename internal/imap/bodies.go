@@ -138,7 +138,7 @@ func prioritized(missing []database.MissingBody, labelID string) []database.Miss
 func (u *user) downloadBody(ctx context.Context, limiter *downloadLimiter, m database.MissingBody) bool {
 	for {
 		_, _, err := u.storedMessage(ctx, m.ID)
-		throttled := err != nil && retryable(err) && ctx.Err() == nil
+		throttled := err != nil && protonmail.Retryable(err) && ctx.Err() == nil
 		var after time.Duration
 		if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok {
 			after = apiErr.RetryAfter

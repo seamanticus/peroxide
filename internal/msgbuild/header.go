@@ -1,4 +1,4 @@
-package imap
+package msgbuild
 
 import (
 	"bufio"
@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
-	"github.com/emersion/go-imap"
 	"github.com/emersion/go-message"
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-message/textproto"
@@ -25,27 +24,6 @@ func messageID(msg *protonmail.Message) string {
 	} else {
 		return msg.ID + "@protonmail.com"
 	}
-}
-
-func imapAddress(addr *protonmail.MessageAddress) *imap.Address {
-	parts := strings.SplitN(addr.Address, "@", 2)
-	if len(parts) < 2 {
-		parts = append(parts, "")
-	}
-
-	return &imap.Address{
-		PersonalName: addr.Name,
-		MailboxName:  parts[0],
-		HostName:     parts[1],
-	}
-}
-
-func imapAddressList(addresses []*protonmail.MessageAddress) []*imap.Address {
-	l := make([]*imap.Address, len(addresses))
-	for i, addr := range addresses {
-		l[i] = imapAddress(addr)
-	}
-	return l
 }
 
 func msgBoundary(msg *protonmail.Message) string {
@@ -129,13 +107,13 @@ func mailAddressList(addresses []*protonmail.MessageAddress) []*mail.Address {
 	return l
 }
 
-// messageHeader returns msg's header, with peroxide's multipart/mixed
+// MessageHeader returns msg's header, with peroxide's multipart/mixed
 // Content-Type. A full message (GetMessage) carries the header Proton
 // received: it is kept, as proton-bridge does, so threading fields
 // (In-Reply-To, References) and the sent Date survive, with the address and
 // subject fields set from the metadata. Message metadata carries no header:
 // it is built from the metadata alone.
-func messageHeader(msg *protonmail.Message) message.Header {
+func MessageHeader(msg *protonmail.Message) message.Header {
 	typeParams := map[string]string{"boundary": msgBoundary(msg)}
 
 	var h mail.Header

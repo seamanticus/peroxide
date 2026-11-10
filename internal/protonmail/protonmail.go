@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,6 +85,23 @@ func retryAfter(h http.Header, now time.Time) time.Duration {
 		return d
 	}
 	return 0
+}
+
+// Retryable reports whether err, from a Proton request, may not happen
+// again: a network error, a rate limit (429) or a server error (5xx), which
+// proton-bridge retries rather than treating as final
+// (userevents.Service.handleEventError).
+func Retryable(err error) bool {
+	if apiErr, ok := errors.AsType[*APIError](err); ok {
+		return apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= http.StatusInternalServerError
+	}
+	if _, ok := errors.AsType[*url.Error](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[net.Error](err); ok {
+		return true
+	}
+	return errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 type Timestamp int64

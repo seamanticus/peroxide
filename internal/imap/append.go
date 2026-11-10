@@ -22,6 +22,7 @@ import (
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-message/textproto"
 
+	"github.com/seamanticus/peroxide/internal/msgbuild"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
@@ -160,7 +161,7 @@ func addressKey(addr *protonmail.Address, unlocked openpgp.EntityList) (*openpgp
 // is text itself. Otherwise a multipart/mixed message gets the part last,
 // and any other is wrapped in one, its content fields moved to its part.
 func withTextPart(literal []byte) ([]byte, error) {
-	h, body := splitEntity(literal)
+	h, body := msgbuild.SplitEntity(literal)
 	mh := message.Header{Header: h}
 	mediaType, params, err := mh.ContentType()
 	if err != nil {

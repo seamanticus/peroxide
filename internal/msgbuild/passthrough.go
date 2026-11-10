@@ -1,11 +1,10 @@
-package imap
+package msgbuild
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
 	"log"
-	"slices"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	pgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
@@ -40,15 +39,15 @@ import (
 // the encrypted data (go-crypto openpgp.ReadMessage). A body encrypted to an
 // account key that isn't unlocked isn't passed through: the user's own
 // client couldn't open it either.
-func (u *user) passThrough(msg *protonmail.Message) bool {
+func (mb *Builder) passThrough(msg *protonmail.Message) bool {
 	if len(msg.Attachments) > 0 {
 		return false
 	}
-	_, err := msg.Read(u.privateKeys, nil)
+	_, err := msg.Read(mb.Keys, nil)
 	if !errors.Is(err, pgperrors.ErrKeyIncorrect) {
 		return false
 	}
-	toAccount, err := u.encryptedToAccount(msg)
+	toAccount, err := mb.encryptedToAccount(msg)
 	if err != nil {
 		log.Printf("cannot read the keys message %v is encrypted to: %v", msg.ID, err)
 		return false
@@ -58,12 +57,12 @@ func (u *user) passThrough(msg *protonmail.Message) bool {
 
 // encryptedToAccount reports whether the body of msg is encrypted to a key of
 // the account, unlocked or not. A hidden recipient (key ID 0) names no key.
-func (u *user) encryptedToAccount(msg *protonmail.Message) (bool, error) {
+func (mb *Builder) encryptedToAccount(msg *protonmail.Message) (bool, error) {
 	keyIDs, err := msg.EncryptedTo()
 	if err != nil {
 		return false, err
 	}
-	account := u.accountKeys()
+	account := mb.AccountKeys()
 	for _, id := range keyIDs {
 		if id != 0 && len(account.KeysById(id)) > 0 {
 			return true, nil
@@ -72,14 +71,11 @@ func (u *user) encryptedToAccount(msg *protonmail.Message) (bool, error) {
 	return false, nil
 }
 
-// accountKeys returns every active key of the account and its addresses,
-// unlocked or not, as the API lists them: to tell mail encrypted to a key the
-// account has from mail encrypted to a key it doesn't.
-func (u *user) accountKeys() openpgp.EntityList {
-	keys := slices.Clone(u.u.Keys)
-	for _, addr := range u.addresses() {
-		keys = append(keys, addr.Keys...)
-	}
+// AccountKeys returns every active key of the account and its addresses,
+// unlocked or not, as the API lists them, to tell mail encrypted to a key the
+// account has from mail encrypted to a key it doesn't. Keys that can't be
+// read are logged and left out.
+func AccountKeys(keys []*protonmail.PrivateKey) openpgp.EntityList {
 	var entities openpgp.EntityList
 	for _, key := range keys {
 		if key.Active != 1 {
@@ -103,7 +99,7 @@ func passThroughBoundary(msg *protonmail.Message) string {
 
 // passThroughMessage writes msg as PGP/MIME: its header, then the two parts.
 func passThroughMessage(msg *protonmail.Message) ([]byte, error) {
-	h := messageHeader(msg)
+	h := MessageHeader(msg)
 	h.SetContentType("multipart/encrypted", map[string]string{
 		"boundary": passThroughBoundary(msg),
 		"protocol": "application/pgp-encrypted",

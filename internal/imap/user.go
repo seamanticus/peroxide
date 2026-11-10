@@ -5,12 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"maps"
-	"net"
-	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -23,6 +19,7 @@ import (
 	"github.com/seamanticus/peroxide/internal/auth"
 	"github.com/seamanticus/peroxide/internal/events"
 	"github.com/seamanticus/peroxide/internal/imap/database"
+	"github.com/seamanticus/peroxide/internal/msgbuild"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
@@ -71,9 +68,9 @@ type user struct {
 
 	db             *database.User
 	eventsReceiver eventsReceiver
-	builds         builds     // messages being built and stored
-	mem            memBudget  // memory the builds take
-	senders        senderKeys // public keys of the senders of signed mail
+	builds         builds              // messages being built and stored
+	mem            memBudget           // memory the builds take
+	senders        msgbuild.SenderKeys // public keys of the senders of signed mail
 	pacerOnce      sync.Once
 	pacerLimiter   *downloadLimiter // requests' pace; use pacer()
 
@@ -863,7 +860,7 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 				}
 				switch {
 				case err == nil:
-				case retryable(err):
+				case protonmail.Retryable(err):
 					log.Printf("cannot handle event for message %s now: %v (retrying at the next poll)", eventMessage.ID, err)
 					retry++
 				default:
@@ -915,23 +912,6 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			rebuilding = true
 		}
 	}
-}
-
-// retryable reports whether err, from applying an event, may not happen
-// again: a network error, a rate limit (429) or a server error (5xx), which
-// proton-bridge retries rather than treating the event as bad
-// (userevents.Service.handleEventError).
-func retryable(err error) bool {
-	if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok {
-		return apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= http.StatusInternalServerError
-	}
-	if _, ok := errors.AsType[*url.Error](err); ok {
-		return true
-	}
-	if _, ok := errors.AsType[net.Error](err); ok {
-		return true
-	}
-	return errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // applyMessageEvent applies one message event to the database, and returns

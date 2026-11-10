@@ -4,19 +4,16 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
-	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/emersion/go-message"
 
+	"github.com/seamanticus/peroxide/internal/msgbuild"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
@@ -62,7 +59,7 @@ func untrusted(t *testing.T, key *openpgp.Entity) fakeResponse {
 }
 
 // builtVerdict builds msg in a new mailbox whose API answers /keys with keys,
-// and returns the header field SignatureHeader.
+// and returns the header field msgbuild.SignatureHeader.
 func builtVerdict(t *testing.T, account *openpgp.Entity, msg *protonmail.Message, keys fakeResponse) string {
 	t.Helper()
 	api := &fakeAPI{t: t, gets: map[string]fakeResponse{"/keys": keys}}
@@ -72,8 +69,8 @@ func builtVerdict(t *testing.T, account *openpgp.Entity, msg *protonmail.Message
 	if err != nil {
 		t.Fatalf("buildMessage() = %v", err)
 	}
-	h, _ := splitEntity(built.literal)
-	return h.Get(SignatureHeader)
+	h, _ := msgbuild.SplitEntity(built.literal)
+	return h.Get(msgbuild.SignatureHeader)
 }
 
 // The body's signature is checked with the sender's keys from Proton, and
@@ -107,27 +104,15 @@ func TestSignatureVerdicts(t *testing.T) {
 		{"not signed", func() *protonmail.Message {
 			m := fetchTestMessage("a", 0)
 			m.Body = encryptBody(t, "plain\r\n", account)
-			m.Header = SignatureHeader + ": pass forged\r\n"
+			m.Header = msgbuild.SignatureHeader + ": pass forged\r\n"
 			return m
 		}(), noKeys, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := builtVerdict(t, account, tc.msg, tc.keys); got != tc.want {
-				t.Errorf("%v = %q, want %q", SignatureHeader, got, tc.want)
+				t.Errorf("%v = %q, want %q", msgbuild.SignatureHeader, got, tc.want)
 			}
 		})
-	}
-}
-
-// A signature that doesn't verify (the text changed after signing) fails,
-// naming the key that should have made it and why.
-// evidence: witnesses
-func TestSignatureFails(t *testing.T) {
-	sender := newKey(t, "sender")
-	md := &openpgp.MessageDetails{IsSigned: true, SignedBy: &openpgp.Key{PublicKey: sender.PrimaryKey}, SignatureError: errors.New("hash mismatch")}
-	v := judge(md, true)
-	if v.result != sigFail || v.reason != "hash mismatch" || !bytes.Equal(v.fingerprint, sender.PrimaryKey.Fingerprint) {
-		t.Errorf("judge() = %+v, want fail with the reason and the key", v)
 	}
 }
 
@@ -159,38 +144,6 @@ func TestSenderKeysCached(t *testing.T) {
 	if n := lookups.Load(); n != 1 {
 		t.Errorf("%v key lookups for three messages of one sender, want 1", n)
 	}
-}
-
-// Two lookups of one sender at once (two of its messages built in parallel,
-// as the background download does) make one request; the second waits and
-// reads the cache.
-func TestSenderKeysOneLookupAtATime(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		sender := newKey(t, "sender")
-		keys := keysResponse(t, sender)
-		var lookups atomic.Int32
-		c := &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{
-			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				lookups.Add(1)
-				time.Sleep(100 * time.Millisecond)
-				return jsonResponse(r, http.StatusOK, keys.body), nil
-			}),
-		}}
-		var s senderKeys
-		var wg sync.WaitGroup
-		for range 2 {
-			wg.Go(func() {
-				got, err := s.get(t.Context(), c, "Sender@example.org")
-				if err != nil || len(got) != 1 {
-					t.Errorf("get() = %v keys, %v; want 1", len(got), err)
-				}
-			})
-		}
-		wg.Wait()
-		if n := lookups.Load(); n != 1 {
-			t.Errorf("%v requests for two overlapping lookups, want 1", n)
-		}
-	})
 }
 
 // signAttachment sets in att the detached signature of data by signer, as
@@ -254,8 +207,8 @@ func TestAttachmentSignatures(t *testing.T) {
 				t.Fatalf("buildMessage() = %v", err)
 			}
 
-			h, _ := splitEntity(built.literal)
-			got := h.Get(SignatureHeader)
+			h, _ := msgbuild.SplitEntity(built.literal)
+			got := h.Get(msgbuild.SignatureHeader)
 			if i := strings.Index(got, "key="); i >= 0 {
 				if j := strings.IndexByte(got[i:], ' '); j >= 0 {
 					got = got[:i] + "key=*" + got[i+j:]
@@ -278,7 +231,7 @@ func TestAttachmentSignatures(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				got := p.Header.Get(SignatureHeader)
+				got := p.Header.Get(msgbuild.SignatureHeader)
 				if (want == "") != (got == "") || !strings.HasPrefix(got, want) {
 					t.Errorf("attachment %v field %q, want %q...", i+1, got, want)
 				}

@@ -61,7 +61,7 @@ func (u *user) refreshMessage(apiID string, deliver func([]imapbackend.Update)) 
 	built, err := u.downloadAndBuild(ctx, apiID)
 	if errors.Is(err, errMessageGone) {
 		return nil // its delete event follows
-	} else if retryable(err) {
+	} else if protonmail.Retryable(err) {
 		return err
 	} else if err != nil {
 		log.Printf("Message %v changed and can't be built again: dropped until a FETCH tries again: %v", apiID, err)
@@ -205,7 +205,7 @@ func (u *user) refreshFallbacks(ctx context.Context, deliver func([]imapbackend.
 		if ctx.Err() != nil {
 			return
 		}
-		if err := u.refreshMessage(id, deliver); retryable(err) {
+		if err := u.refreshMessage(id, deliver); protonmail.Retryable(err) {
 			// Left as stored; tried again at the next login.
 			log.Printf("cannot build message %v again: %v", id, err)
 			return

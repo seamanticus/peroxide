@@ -3,9 +3,13 @@ package imap
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
+	"log"
+	"slices"
 	"strings"
 
+	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/backend/backendutil"
 	"github.com/emersion/go-message"
@@ -13,11 +17,57 @@ import (
 	"github.com/emersion/go-message/textproto"
 
 	"github.com/seamanticus/peroxide/internal/imap/database"
+	"github.com/seamanticus/peroxide/internal/msgbuild"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
 // What IMAP derives from a built message: its BODYSTRUCTURE and ENVELOPE,
 // computed once and stored, and the sections FETCH serves from its bytes.
+
+// builtMessage is a message as served, and what FETCH derives from it.
+type builtMessage struct {
+	literal []byte
+	info    database.BodyInfo
+}
+
+// buildMessage builds full with msgbuild, downloading its attachments, and
+// describes it. Bytes go-imap can't parse are served as an attachment of a
+// note instead (msgbuild.SafeMessage).
+func (u *user) buildMessage(ctx context.Context, full *protonmail.Message) (builtMessage, error) {
+	mb := &msgbuild.Builder{
+		Client:      u.c,
+		Keys:        u.privateKeys,
+		AccountKeys: u.accountKeys,
+		Senders:     &u.senders,
+	}
+	literal, fallback, err := mb.Build(ctx, full)
+	if err != nil {
+		return builtMessage{}, err
+	}
+	info, err := describe(literal)
+	if err != nil {
+		log.Printf("Message %v can't be served as built (%v): served as an attachment of a note", full.ID, err)
+		literal, err = msgbuild.SafeMessage(full, literal, err)
+		if err != nil {
+			return builtMessage{}, fmt.Errorf("cannot build message %v: %w", full.ID, err)
+		}
+		if info, err = describe(literal); err != nil {
+			return builtMessage{}, fmt.Errorf("cannot build message %v, even as a note: %w", full.ID, err)
+		}
+	}
+	info.Fallback = fallback
+	return builtMessage{literal: literal, info: info}, nil
+}
+
+// accountKeys returns every active key of the account and its addresses,
+// unlocked or not (msgbuild.AccountKeys).
+func (u *user) accountKeys() openpgp.EntityList {
+	keys := slices.Clone(u.u.Keys)
+	for _, addr := range u.addresses() {
+		keys = append(keys, addr.Keys...)
+	}
+	return msgbuild.AccountKeys(keys)
+}
 
 // describe computes what FETCH derives from a built message: its extended
 // BODYSTRUCTURE, by go-imap's parser, and its ENVELOPE. An error means the
@@ -123,4 +173,25 @@ func withoutExtension(bs *imap.BodyStructure) *imap.BodyStructure {
 		c.BodyStructure = withoutExtension(bs.BodyStructure)
 	}
 	return &c
+}
+
+func imapAddress(addr *protonmail.MessageAddress) *imap.Address {
+	parts := strings.SplitN(addr.Address, "@", 2)
+	if len(parts) < 2 {
+		parts = append(parts, "")
+	}
+
+	return &imap.Address{
+		PersonalName: addr.Name,
+		MailboxName:  parts[0],
+		HostName:     parts[1],
+	}
+}
+
+func imapAddressList(addresses []*protonmail.MessageAddress) []*imap.Address {
+	l := make([]*imap.Address, len(addresses))
+	for i, addr := range addresses {
+		l[i] = imapAddress(addr)
+	}
+	return l
 }

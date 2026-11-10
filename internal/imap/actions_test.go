@@ -24,10 +24,10 @@ import (
 	"github.com/emersion/go-imap/backend/backendutil"
 	"github.com/emersion/go-imap/responses"
 	imapserver "github.com/emersion/go-imap/server"
-	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-message/textproto"
 
 	"github.com/seamanticus/peroxide/internal/imap/database"
+	"github.com/seamanticus/peroxide/internal/msgbuild"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
@@ -1373,7 +1373,7 @@ func TestNoSender(t *testing.T) {
 	if env := builtEnvelope(t, msg); env.From != nil {
 		t.Errorf("ENVELOPE From = %v, want nil", env.From)
 	}
-	if h := messageHeader(msg); h.Has("From") {
+	if h := msgbuild.MessageHeader(msg); h.Has("From") {
 		t.Errorf("messageHeader() has From %q, want none", h.Get("From"))
 	}
 }
@@ -1416,7 +1416,7 @@ func TestEnvelopeDefaults(t *testing.T) {
 		if len(env.ReplyTo) != 1 || env.ReplyTo[0].Address() != tt.wantReplyTo {
 			t.Errorf("%v: ReplyTo = %v, want %v", tt.name, env.ReplyTo, tt.wantReplyTo)
 		}
-		if h := messageHeader(msg); env.MessageId != h.Get("Message-Id") || env.MessageId != "<abc@example.org>" {
+		if h := msgbuild.MessageHeader(msg); env.MessageId != h.Get("Message-Id") || env.MessageId != "<abc@example.org>" {
 			t.Errorf("%v: envelope Message-Id %q, header %q, want <abc@example.org>", tt.name, env.MessageId, h.Get("Message-Id"))
 		}
 	}
@@ -1438,58 +1438,6 @@ func TestEnvelopeDefaults(t *testing.T) {
 	}
 	if want := time.Date(2026, 11, 1, 21, 0, 0, 0, time.UTC); !env.Date.Equal(want) {
 		t.Errorf("Date = %v, want the header's %v", env.Date, want)
-	}
-}
-
-// A full message's header is Proton's original one, with threading fields
-// and the sent Date kept, the metadata's addresses and subject over it, and
-// peroxide's own Content-Type. One that can't be parsed is ignored.
-// evidence: witnesses
-func TestMessageHeaderFromOriginal(t *testing.T) {
-	const original = "Return-Path: <bob@example.org>\r\n" +
-		"Date: Mon, 02 Nov 2026 10:00:00 +1300\r\n" +
-		"From: Old Name <bob@example.org>\r\n" +
-		"To: bob@protonmail.com\r\n" +
-		"Subject: original subject\r\n" +
-		"Message-Id: <orig@example.org>\r\n" +
-		"In-Reply-To: <parent@example.org>\r\n" +
-		"References: <root@example.org> <parent@example.org>\r\n" +
-		"Mime-Version: 1.0\r\n" +
-		"Content-Type: text/plain; charset=utf-8\r\n" +
-		"Content-Transfer-Encoding: quoted-printable\r\n"
-
-	msg := fetchTestMessage("a", 0)
-	msg.Sender = &protonmail.MessageAddress{Name: "Bob", Address: "bob@example.org"}
-	msg.Subject = "decrypted subject"
-	msg.Header = original
-	h := messageHeader(msg)
-	for k, want := range map[string]string{
-		"Return-Path": "<bob@example.org>",
-		"Date":        "Mon, 02 Nov 2026 10:00:00 +1300",
-		"Message-Id":  "<orig@example.org>",
-		"In-Reply-To": "<parent@example.org>",
-		"References":  "<root@example.org> <parent@example.org>",
-		"Subject":     "decrypted subject",
-		"To":          "bob@protonmail.com",
-	} {
-		if got := h.Get(k); got != want {
-			t.Errorf("%v = %q, want %q", k, got, want)
-		}
-	}
-	if from, err := (&mail.Header{Header: h}).AddressList("From"); err != nil || len(from) != 1 ||
-		from[0].Name != "Bob" || from[0].Address != "bob@example.org" {
-		t.Errorf("From = %v, %v, want the metadata's Bob <bob@example.org>", from, err)
-	}
-	if mt, _, err := h.ContentType(); err != nil || mt != "multipart/mixed" {
-		t.Errorf("Content-Type = %q, %v, want multipart/mixed", mt, err)
-	}
-	if h.Has("Content-Transfer-Encoding") {
-		t.Errorf("Content-Transfer-Encoding = %q, want none", h.Get("Content-Transfer-Encoding"))
-	}
-
-	msg.Header = " starts with a space\r\n"
-	if h := messageHeader(msg); h.Get("Message-Id") != "<"+messageID(msg)+">" || h.Get("Subject") != "decrypted subject" {
-		t.Errorf("with a malformed header: Message-Id %q, Subject %q, want the metadata's", h.Get("Message-Id"), h.Get("Subject"))
 	}
 }
 

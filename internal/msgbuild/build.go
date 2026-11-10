@@ -1,4 +1,4 @@
-package imap
+package msgbuild
 
 import (
 	"bufio"
@@ -10,6 +10,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	pgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
@@ -17,70 +18,57 @@ import (
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-message/textproto"
 
-	"github.com/seamanticus/peroxide/internal/imap/database"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
 // A message is built once, as proton-bridge builds it (pkg/message/build.go,
-// BuildRFC822Into), stored, and every FETCH item that depends on its contents
-// is served from the stored bytes: they never change under a UID. The build
-// never fails on what the message holds: what can't be decrypted is served
-// still encrypted, as bridge does, and bytes go-imap can't parse are wrapped
-// in a note (safeMessage). It fails only when Proton can't be asked.
+// BuildRFC822Into), and stored; the IMAP server serves every FETCH item that
+// depends on its contents from the stored bytes, so they never change under a
+// UID. The build never fails on what the message holds: what can't be
+// decrypted is served still encrypted, as bridge does, and bytes the server
+// can't parse are wrapped in a note (SafeMessage). It fails only when Proton
+// can't be asked.
 
-// builtMessage is a message as served, and what FETCH derives from it.
-type builtMessage struct {
-	literal []byte
-	info    database.BodyInfo
+// Builder builds the messages of one account. Its fields are read, never
+// written: give each build the values current when it starts.
+type Builder struct {
+	// Client downloads attachments and senders' public keys.
+	Client *protonmail.Client
+	// Keys are the account's unlocked private keys.
+	Keys openpgp.EntityList
+	// AccountKeys returns every active key of the account and its
+	// addresses, unlocked or not: see the function AccountKeys.
+	AccountKeys func() openpgp.EntityList
+	// Senders caches the public keys of the senders of signed mail.
+	Senders *SenderKeys
 }
 
-// buildMessage builds full, downloading its attachments.
-func (u *user) buildMessage(ctx context.Context, full *protonmail.Message) (builtMessage, error) {
-	literal, fallback, err := u.buildLiteral(ctx, full)
-	if err != nil {
-		return builtMessage{}, err
-	}
-	info, err := describe(literal)
-	if err != nil {
-		log.Printf("Message %v can't be served as built (%v): served as an attachment of a note", full.ID, err)
-		literal, err = safeMessage(full, literal, err)
-		if err != nil {
-			return builtMessage{}, fmt.Errorf("cannot build message %v: %w", full.ID, err)
-		}
-		if info, err = describe(literal); err != nil {
-			return builtMessage{}, fmt.Errorf("cannot build message %v, even as a note: %w", full.ID, err)
-		}
-	}
-	info.Fallback = fallback
-	return builtMessage{literal: literal, info: info}, nil
-}
-
-// buildLiteral returns the RFC 822 bytes of full, and whether part of it is
-// served still encrypted. As bridge (BuildRFC822Into): a message with
-// attachments is a multipart/mixed of its body and attachments; a body that
-// is a MIME message itself (received as PGP/MIME, MIMEType multipart/mixed)
-// is that message; a body encrypted to no key of the account is passed
-// through as PGP/MIME. Other bodies are a multipart/mixed of one part, as
-// peroxide always served them.
-func (u *user) buildLiteral(ctx context.Context, full *protonmail.Message) ([]byte, bool, error) {
+// Build returns the RFC 822 bytes of full, downloading its attachments, and
+// whether part of it is served still encrypted. As bridge (BuildRFC822Into): a
+// message with attachments is a multipart/mixed of its body and attachments;
+// a body that is a MIME message itself (received as PGP/MIME, MIMEType
+// multipart/mixed) is that message; a body encrypted to no key of the
+// account is passed through as PGP/MIME. Other bodies are a multipart/mixed
+// of one part, as peroxide always served them.
+func (mb *Builder) Build(ctx context.Context, full *protonmail.Message) ([]byte, bool, error) {
 	switch {
 	case len(full.Attachments) > 0:
-		return u.buildMultipart(ctx, full)
+		return mb.buildMultipart(ctx, full)
 	case full.MIMEType == "multipart/mixed":
-		return u.buildPGPMIME(ctx, full)
-	case u.passThrough(full):
+		return mb.buildPGPMIME(ctx, full)
+	case mb.passThrough(full):
 		log.Printf("Message %v is encrypted to a key Proton doesn't have: passed through as PGP/MIME", full.ID)
 		literal, err := passThroughMessage(full)
 		return literal, true, err
 	default:
-		return u.buildMultipart(ctx, full)
+		return mb.buildMultipart(ctx, full)
 	}
 }
 
-func (u *user) buildMultipart(ctx context.Context, full *protonmail.Message) ([]byte, bool, error) {
+func (mb *Builder) buildMultipart(ctx context.Context, full *protonmail.Message) ([]byte, bool, error) {
 	// The body and the attachments first: their signatures' verdicts go in
 	// the message's header, which is written first.
-	ih, body, verdict, fallback, err := u.inlinePart(ctx, full)
+	ih, body, verdict, fallback, err := mb.inlinePart(ctx, full)
 	if err != nil {
 		return nil, false, err
 	}
@@ -91,7 +79,7 @@ func (u *user) buildMultipart(ctx context.Context, full *protonmail.Message) ([]
 	parts := make([]part, 0, len(full.Attachments))
 	verdicts := make([]sigVerdict, 0, len(full.Attachments))
 	for _, att := range full.Attachments {
-		h, body, v, attFallback, err := u.attachmentPart(ctx, att, senderAddress(full))
+		h, body, v, attFallback, err := mb.attachmentPart(ctx, att, senderAddress(full))
 		if err != nil {
 			return nil, false, err
 		}
@@ -100,7 +88,7 @@ func (u *user) buildMultipart(ctx context.Context, full *protonmail.Message) ([]
 		verdicts = append(verdicts, v)
 	}
 
-	h := messageHeader(full)
+	h := MessageHeader(full)
 	setVerdict(&h, full, verdict, attachmentsSummary(verdicts))
 	var b bytes.Buffer
 	w, err := message.CreateWriter(&b, h)
@@ -128,15 +116,15 @@ func (u *user) buildMultipart(ctx context.Context, full *protonmail.Message) ([]
 // armored, with a comment saying why (writeCustomTextPart), and fallback is
 // set. The error is a failure to fetch the sender's keys that may pass: the
 // message isn't built now.
-func (u *user) inlinePart(ctx context.Context, msg *protonmail.Message) (h message.Header, body []byte, verdict sigVerdict, fallback bool, err error) {
-	body, verdict, _, decryptErr, lookupErr := u.decryptAndVerify(ctx, msg)
+func (mb *Builder) inlinePart(ctx context.Context, msg *protonmail.Message) (h message.Header, body []byte, verdict sigVerdict, fallback bool, err error) {
+	body, verdict, _, decryptErr, lookupErr := mb.decryptAndVerify(ctx, msg)
 	if lookupErr != nil {
 		return h, nil, sigVerdict{}, false, lookupErr
 	}
 	if decryptErr == nil {
 		return inlineHeader(msg), body, verdict, false, nil
 	}
-	err = u.explainDecryptError(msg, decryptErr)
+	err = mb.explainDecryptError(msg, decryptErr)
 	log.Printf("Message %v served encrypted: %v", msg.ID, err)
 
 	// Armor is text whatever the body was: a multipart type would make
@@ -158,11 +146,11 @@ func (u *user) inlinePart(ctx context.Context, msg *protonmail.Message) (h messa
 }
 
 // explainDecryptError says why a body encrypted to no unlocked key is so.
-func (u *user) explainDecryptError(msg *protonmail.Message, err error) error {
+func (mb *Builder) explainDecryptError(msg *protonmail.Message, err error) error {
 	if !errors.Is(err, pgperrors.ErrKeyIncorrect) {
 		return err
 	}
-	if toAccount, _ := u.encryptedToAccount(msg); toAccount {
+	if toAccount, _ := mb.encryptedToAccount(msg); toAccount {
 		return fmt.Errorf("encrypted to a key of the account that peroxide hasn't unlocked (one added since it started?): %w", err)
 	}
 	return fmt.Errorf("encrypted end to end to a key Proton doesn't have: %w", err)
@@ -204,8 +192,8 @@ func senderAddress(full *protonmail.Message) string {
 // own header as SignatureHeader, and returned for the message's summary.
 // The errors are a failed download, and a failure to fetch the sender's
 // keys that may pass.
-func (u *user) attachmentPart(ctx context.Context, att *protonmail.Attachment, sender string) (h message.Header, body []byte, v sigVerdict, fallback bool, err error) {
-	rc, err := u.c.GetAttachment(ctx, att.ID)
+func (mb *Builder) attachmentPart(ctx context.Context, att *protonmail.Attachment, sender string) (h message.Header, body []byte, v sigVerdict, fallback bool, err error) {
+	rc, err := mb.Client.GetAttachment(ctx, att.ID)
 	if err != nil {
 		return h, nil, sigVerdict{}, false, err
 	}
@@ -218,13 +206,13 @@ func (u *user) attachmentPart(ctx context.Context, att *protonmail.Attachment, s
 	}
 
 	why := "no key peroxide has unlocked opens it"
-	if att.Decryptable(u.privateKeys) {
-		md, err := att.Read(bytes.NewReader(ciphertext), u.privateKeys, nil)
+	if att.Decryptable(mb.Keys) {
+		md, err := att.Read(bytes.NewReader(ciphertext), mb.Keys, nil)
 		if err == nil {
 			body, err = io.ReadAll(md.UnverifiedBody)
 		}
 		if err == nil {
-			v, lookupErr := u.verifyAttachment(ctx, att, body, sender)
+			v, lookupErr := mb.verifyAttachment(ctx, att, body, sender)
 			if lookupErr != nil {
 				return h, nil, sigVerdict{}, false, lookupErr
 			}
@@ -260,18 +248,18 @@ func (u *user) attachmentPart(ctx context.Context, att *protonmail.Attachment, s
 // body that can't be decrypted is passed through as PGP/MIME, as bridge does
 // (buildPGPMIMEFallbackRFC822). peroxide's verdict on the signature goes in
 // the header too, for clients that don't verify themselves.
-func (u *user) buildPGPMIME(ctx context.Context, full *protonmail.Message) ([]byte, bool, error) {
-	plain, verdict, sigs, decryptErr, lookupErr := u.decryptAndVerify(ctx, full)
+func (mb *Builder) buildPGPMIME(ctx context.Context, full *protonmail.Message) ([]byte, bool, error) {
+	plain, verdict, sigs, decryptErr, lookupErr := mb.decryptAndVerify(ctx, full)
 	if lookupErr != nil {
 		return nil, false, lookupErr
 	}
 	if decryptErr != nil {
-		log.Printf("Message %v passed through as PGP/MIME: %v", full.ID, u.explainDecryptError(full, decryptErr))
+		log.Printf("Message %v passed through as PGP/MIME: %v", full.ID, mb.explainDecryptError(full, decryptErr))
 		literal, err := passThroughMessage(full)
 		return literal, true, err
 	}
 
-	h := messageHeader(full)
+	h := MessageHeader(full)
 	setVerdict(&h, full, verdict, "")
 	// Written by hand below, not by message.CreateWriter, which adds it.
 	h.Set("MIME-Version", "1.0")
@@ -280,7 +268,7 @@ func (u *user) buildPGPMIME(ctx context.Context, full *protonmail.Message) ([]by
 		return literal, false, err
 	}
 
-	bodyHeader, bodyData := splitEntity(plain)
+	bodyHeader, bodyData := SplitEntity(plain)
 	h.Del("Content-Type")
 	for f := bodyHeader.Fields(); f.Next(); {
 		if !h.Has(f.Key()) && !strings.EqualFold(f.Key(), SignatureHeader) {
@@ -295,9 +283,9 @@ func (u *user) buildPGPMIME(ctx context.Context, full *protonmail.Message) ([]by
 	return b.Bytes(), false, nil
 }
 
-// splitEntity splits a MIME entity into its header and body. One whose start
+// SplitEntity splits a MIME entity into its header and body. One whose start
 // isn't a header is all body, as bridge reads it (readHeaderBody).
-func splitEntity(entity []byte) (textproto.Header, []byte) {
+func SplitEntity(entity []byte) (textproto.Header, []byte) {
 	r := bytes.NewReader(entity)
 	br := bufio.NewReader(r)
 	h, err := textproto.ReadHeader(br)
@@ -360,10 +348,10 @@ func micalg(sig *packet.Signature) string {
 	return "pgp-" + name
 }
 
-// safeMessage wraps literal, which go-imap can't parse, in a message it can:
+// SafeMessage wraps literal, which go-imap can't parse, in a message it can:
 // a note saying why, and literal as an attachment, so nothing is lost.
-func safeMessage(full *protonmail.Message, literal []byte, cause error) ([]byte, error) {
-	h := messageHeader(full)
+func SafeMessage(full *protonmail.Message, literal []byte, cause error) ([]byte, error) {
+	h := MessageHeader(full)
 	h.SetContentType("multipart/mixed", map[string]string{"boundary": "safe-" + msgBoundary(full)})
 	var b bytes.Buffer
 	w, err := message.CreateWriter(&b, h)

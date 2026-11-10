@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/seamanticus/peroxide/internal/imap/database"
+	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
 // errMessageGone is the error of storedMessage for a message Proton no longer
@@ -129,7 +130,7 @@ func (u *user) buildAndStore(ctx context.Context, apiID string, bd *build) (*dat
 // recordFailure puts apiID in the failed set if err, its download or build's,
 // isn't retryable, and returns err.
 func (u *user) recordFailure(apiID string, err error) error {
-	if retryable(err) {
+	if protonmail.Retryable(err) {
 		return err
 	}
 	log.Printf("Message %v failed to download or build, and is left for a FETCH to try again: %v", apiID, err)

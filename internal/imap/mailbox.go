@@ -512,7 +512,7 @@ func (u *user) prefetch(entries []mailboxEntry) {
 			if apiErr, ok := errors.AsType[*protonmail.APIError](err); ok {
 				after = apiErr.RetryAfter
 			}
-			limiter.release(err != nil && retryable(err), after)
+			limiter.release(err != nil && protonmail.Retryable(err), after)
 		})
 	}
 	wg.Wait()

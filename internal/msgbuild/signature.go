@@ -1,4 +1,4 @@
-package imap
+package msgbuild
 
 import (
 	"bytes"
@@ -49,12 +49,12 @@ const (
 // keys rarely change, and a rotated key is seen within this.
 const senderKeysTTL = 24 * time.Hour
 
-// senderKeys caches the public keys Proton publishes for each address, per
+// SenderKeys caches the public keys Proton publishes for each address, per
 // account: one request per sender of signed mail, then none for a day. Safe
 // for concurrent use; the zero value is ready. Lookups of one address that
 // overlap (two messages of a sender built at once) make one request: the
 // later ones wait for it and read the cache.
-type senderKeys struct {
+type SenderKeys struct {
 	mu      sync.Mutex
 	entries map[string]senderKeysEntry
 	pending map[string]chan struct{} // closed when the lookup ends
@@ -68,7 +68,7 @@ type senderKeysEntry struct {
 // get returns the public keys of address, asking Proton if they aren't
 // cached or are older than senderKeysTTL. An address Proton publishes no key
 // for (outside Proton, no WKD) has none, cached as well.
-func (s *senderKeys) get(ctx context.Context, c *protonmail.Client, address string) (openpgp.EntityList, error) {
+func (s *SenderKeys) get(ctx context.Context, c *protonmail.Client, address string) (openpgp.EntityList, error) {
 	key := strings.ToLower(address)
 	for {
 		s.mu.Lock()
@@ -169,18 +169,18 @@ func (v sigVerdict) headerValue(signer, attachments string) string {
 // A bad signature is a verdict, not an error. The errors are a failure to
 // decrypt (decryptErr) and a failure to fetch the sender's keys that may
 // pass (lookupErr, retryable): the message is then not built now.
-func (u *user) decryptAndVerify(ctx context.Context, msg *protonmail.Message) (body []byte, verdict sigVerdict, sigs []*packet.Signature, decryptErr, lookupErr error) {
+func (mb *Builder) decryptAndVerify(ctx context.Context, msg *protonmail.Message) (body []byte, verdict sigVerdict, sigs []*packet.Signature, decryptErr, lookupErr error) {
 	// Proton signs one-pass: whether the body is signed, and by which of
 	// the keys given, is known before the text is read.
-	md, err := msg.Read(u.privateKeys, nil)
+	md, err := msg.Read(mb.Keys, nil)
 	if err != nil {
 		return nil, sigVerdict{}, nil, err, nil
 	}
 	senderKnown := md.SignedBy != nil // by the account: mail it sent
 	if md.IsSigned && md.SignedBy == nil && msg.Sender != nil && msg.Sender.Address != "" {
-		keys, err := u.senders.get(ctx, u.c, msg.Sender.Address)
+		keys, err := mb.Senders.get(ctx, mb.Client, msg.Sender.Address)
 		switch {
-		case err != nil && (retryable(err) || ctx.Err() != nil):
+		case err != nil && (protonmail.Retryable(err) || ctx.Err() != nil):
 			return nil, sigVerdict{}, nil, nil, err
 		case err != nil:
 			log.Printf("Message %v: cannot check its signature: %v", msg.ID, err)
@@ -189,7 +189,7 @@ func (u *user) decryptAndVerify(ctx context.Context, msg *protonmail.Message) (b
 			// Decrypted again, the sender's keys added, to verify as it
 			// reads.
 			senderKnown = true
-			keyring := append(slices.Clone(u.privateKeys), keys...)
+			keyring := append(slices.Clone(mb.Keys), keys...)
 			if md, err = msg.Read(keyring, nil); err != nil {
 				return nil, sigVerdict{}, nil, err, nil
 			}
@@ -202,7 +202,7 @@ func (u *user) decryptAndVerify(ctx context.Context, msg *protonmail.Message) (b
 	if err != nil {
 		return nil, sigVerdict{}, nil, err, nil
 	}
-	if md.IsSigned && md.Signature != nil && !signedByAccount(md, u.privateKeys) {
+	if md.IsSigned && md.Signature != nil && !signedByAccount(md, mb.Keys) {
 		sigs = append(sigs, md.Signature)
 	}
 	sigs = append(sigs, md.UnverifiedSignatures...)
@@ -247,7 +247,7 @@ const sigNone = "none"
 // account's keys and those Proton publishes for sender. The verdict's result
 // is "" if att carries no signature. lookupErr is a failure to fetch the
 // sender's keys that may pass: the message is then not built now.
-func (u *user) verifyAttachment(ctx context.Context, att *protonmail.Attachment, data []byte, sender string) (v sigVerdict, lookupErr error) {
+func (mb *Builder) verifyAttachment(ctx context.Context, att *protonmail.Attachment, data []byte, sender string) (v sigVerdict, lookupErr error) {
 	sig, err := att.SignaturePacket()
 	if err != nil {
 		return sigVerdict{result: sigPermErr, reason: "its signature can't be read: " + err.Error()}, nil
@@ -256,12 +256,12 @@ func (u *user) verifyAttachment(ctx context.Context, att *protonmail.Attachment,
 		return sigVerdict{}, nil
 	}
 
-	keyring := slices.Clone(u.privateKeys)
+	keyring := slices.Clone(mb.Keys)
 	senderKnown := false
 	if sender != "" {
-		keys, err := u.senders.get(ctx, u.c, sender)
+		keys, err := mb.Senders.get(ctx, mb.Client, sender)
 		switch {
-		case err != nil && (retryable(err) || ctx.Err() != nil):
+		case err != nil && (protonmail.Retryable(err) || ctx.Err() != nil):
 			return sigVerdict{}, err
 		case err != nil:
 			log.Printf("Attachment %v: cannot check its signature: %v", att.ID, err)

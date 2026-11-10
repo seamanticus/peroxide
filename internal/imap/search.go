@@ -15,6 +15,7 @@ import (
 	"github.com/emersion/go-message/textproto"
 
 	"github.com/seamanticus/peroxide/internal/imap/database"
+	"github.com/seamanticus/peroxide/internal/msgbuild"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
@@ -83,7 +84,7 @@ func (u *user) loadSearched(msg *protonmail.Message, needs searchNeeds) (*search
 		s.size = rec.Size
 	}
 	if !s.stored {
-		s.header = messageHeader(msg).Header
+		s.header = msgbuild.MessageHeader(msg).Header
 	}
 	return s, nil
 }
