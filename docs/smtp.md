@@ -93,17 +93,30 @@ web app and send it from there.
 ## `peroxide sendmail`
 
 `peroxide sendmail <username> -- <recipients...>` reads one message on
-stdin and sends it through the same steps, logging in for this one
-message (it asks for the bridge password, or reads
-`PEROXIDE_BRIDGE_PASS`). For `git send-email`:
+stdin and sends it through the same steps. It asks for the bridge
+password, or reads `PEROXIDE_BRIDGE_PASS`. For `git send-email`:
 
     [sendemail]
         sendmailcmd = peroxide sendmail you@proton.me --
 
 It reads stdin to the end: `-i` (which git send-email always passes) is
-accepted and changes nothing, and no
-other sendmail flag is understood. Each run logs in and unlocks your
-keys afresh, as no session outlives the command.
+accepted and changes nothing, and no other sendmail flag is understood.
+At least one recipient is required: they are the SMTP envelope's
+recipients, and the message's To and Cc aren't read for them.
+
+While `peroxide serve` runs, `sendmail` doesn't log in itself: that
+would spend the refresh token `serve` holds. It hands the message to
+`serve`'s SMTP server, logged in with the username and bridge
+password; give it the same `-smtp-host`, `-smtp-port` and `-tls-cert`
+as `serve` ([commands.md](commands.md#sendmail-username----recipients)).
+If `serve` doesn't greet within 10 seconds, `sendmail` gives up and
+asks whether `serve` and it agree about TLS: a plain client and a TLS
+server, or the reverse, would otherwise each wait for the other. Once
+`serve` has accepted the message, a failed `QUIT` is only a warning and
+`sendmail` succeeds, so that `git send-email` doesn't send it again.
+
+With no `serve` running, each run logs in and unlocks your keys
+afresh, and the session ends with the command.
 
 ## How proton-bridge does it
 

@@ -533,6 +533,22 @@ server, `serve` is all it needs. Described in docs/commands.md.
   one `serve`, each reading, changing and rewriting it, losing the
   other's change (`auth.lock`, held across the read and the write).
 
+**Audit** (2026-11-10) of 7a0dca8..2a50b0a, fixed:
+
+- a running `serve` wrote back an account removed or logged in anew
+  meanwhile: a renewed session is saved only over its own record,
+  else logged (d761f70);
+- two serve-lock checks at once seeing each other as `serve`: shared
+  lock for checks (1bd07eb);
+- `-V` ignoring the rest of the line, `sendmail` with no recipients,
+  `-h` after `--` (e2a4c4c);
+- `sendmail` waiting five minutes on a TLS mismatch, failing after a
+  delivered message's QUIT, refusing a key-then-cert file (ad4f643);
+- no timeout on Proton requests (3c4362f);
+- a request renewing without end, and one with the new token failing
+  during a refresh; `Client.Logout` removed (4b76cd3, 9120026);
+- half-given TLS options served plain text (4a5cbde).
+
 ## 19. SMTP can't send a PGP/MIME message the client encrypted
 
 **Problem.** A message the client encrypted itself (aerc's encrypt on

@@ -60,8 +60,9 @@ password. peroxide (auth/auth.go, `Manager.Auth`):
    key (a wrong key fails the Poly1305 check: "Invalid username or
    password"), refreshes the Proton session with the stored refresh
    token, unlocks the keys with the stored mailbox password, writes the
-   record back with the new refresh token, and keeps the session, the
-   keys and a bcrypt hash of the key in memory.
+   record back with the new refresh token (only if it is still there
+   and still opens with this key; otherwise the login fails), and keeps
+   the session, the keys and a bcrypt hash of the key in memory.
 
 So the first client login of a process costs a few requests and a
 bcrypt derivation per key salt; later ones cost one bcrypt comparison.
@@ -74,13 +75,31 @@ Proton knows: `name` or `name@proton.me`, as you typed it.
 
 Proton's access token expires. When a request answers HTTP 401,
 peroxide runs `ReAuth` (protonmail/protonmail.go, `do`): it refreshes
-with the refresh token and retries the request once. If Proton refuses
+with the refresh token and retries the request once; a 401 to the
+retry is the request's answer. One refresh of an account runs at a
+time, and requests meeting the expired token meanwhile wait for it,
+then are sent again. If Proton refuses
 the refresh token (code 10013, after a password change or a remote
-logout), peroxide logs in again from scratch with the stored login
+logout), peroxide first tries the token `auth.json` holds now, in case
+another peroxide process spent this one, then logs in again from
+scratch with the stored login
 password, and unlocks the keys again. That fails if 2FA is on, as no
 code can be typed: run `peroxide auth` again.
 
-Each refresh rewrites the `auth.json` record, sealed with the same key.
+Each refresh rewrites the `auth.json` record, sealed with the same key,
+but only over the record the session came from. After `peroxide auth
+-remove` or a new `peroxide auth` of the account while `serve` runs,
+`serve` stops saving its session (logged as `Not saving the renewed
+session of <user>: the stored credentials were removed or replaced`),
+so the change sticks; `serve` keeps using the session it has until it
+exits. If the record can't be written at all (disk full), the log says
+so: the stored refresh token is then spent, and the next start logs in
+with the password, which Proton may answer with a CAPTCHA.
+
+Every Proton request has 30 seconds to connect, 30 for the TLS
+handshake and 30 for its answer to start, as in proton-bridge; a
+request over them fails rather than hold the account's logins and
+refreshes. Downloads aren't cut off once their answer has started.
 
 ## Keys that change while peroxide runs
 
@@ -108,7 +127,7 @@ with mode 0700.
 |---|---|---|
 | `auth.json` | A JSON object: username -> base64 sealed record (above) | Usernames in clear; records sealed with the bridge password's key. Mode 0600. Every write goes to a temporary file renamed over it, so it is never half written, and a file an older peroxide created 0644 is replaced 0600 the next time credentials are saved (`auth`, or any session refresh). Each change reads, edits and rewrites the file holding `auth.lock`, so two at once, in one process or two, never lose each other's account |
 | `auth.lock` | Nothing: held while `auth.json` is changed | Released by the kernel when the change is saved or the process ends |
-| `serve.lock` | Nothing: `peroxide serve` holds a lock on it while it runs | Released by the kernel when `serve` ends |
+| `serve.lock` | Nothing: `peroxide serve` holds a lock on it while it runs; `sendmail` and `download-mailbox` check it with a shared lock, so checks never mistake each other for `serve` | Released by the kernel when `serve` ends |
 | `<username>.db` | The IMAP database: message metadata, mailbox entries, counts, the last event ID, the mailboxes unsubscribed from (see [imap/sync.md](imap/sync.md)) | Not encrypted. Mode 0700 |
 
 `<username>.db` holds, for every message peroxide has listed: subject,

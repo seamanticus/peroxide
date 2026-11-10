@@ -115,7 +115,9 @@ password or reads `PEROXIDE_BRIDGE_PASS`.
 `-i` is accepted, because `git send-email` always passes it, and
 changes nothing: peroxide reads stdin to its end whatever it contains,
 so a line holding only `.` never ends
-the message. No other sendmail option is understood.
+the message. No other sendmail option is understood. At least one
+recipient is required, alone or through `serve`. `-h` after `--`
+prints the help, as anywhere else.
 
 While `serve` runs, `sendmail` hands the message to `serve`'s SMTP
 server (`-smtp-host`, `-smtp-port`), logged in with the username and
@@ -125,9 +127,12 @@ holds; the envelope sender is the message's From. Give it the same
 command (`peroxide sendmail -tls-cert cert.pem <username> -- ...`):
 with TLS it trusts only the certificate that file holds, byte for byte,
 so a self-signed one
-works. If `serve` runs with `-disable-smtp` or `-tls-client-ca`,
-`sendmail` fails rather than log in itself. With no `serve` running,
-it sends on its own, as `serve` would.
+works; the file may hold the key too, as `serve` accepts. If `serve`
+runs with `-disable-smtp` or `-tls-client-ca`, `sendmail` fails rather
+than log in itself. If `serve` doesn't greet within 10 seconds (TLS on
+one side only), it fails with that hint. A `QUIT` that fails after
+`serve` accepted the message is a warning, not a failure. With no
+`serve` running, it sends on its own, as `serve` would.
 
 ## Options
 
@@ -164,6 +169,11 @@ the tree had uncommitted changes when it was built, which the commit
 doesn't hold, and says so in a warning. A binary built outside a
 checkout (`go install ...@version`) shows its module version instead.
 
+`-V` with a command (`peroxide serve -V`) checks the whole line as if
+it ran, then prints only the version: a line that would be refused
+(`peroxide -V serve stray`) is refused, with status 2, and prints no
+version.
+
 ### Listening and TLS
 
 By default both servers listen on `127.0.0.1` without TLS, and accept
@@ -182,8 +192,13 @@ connections are then refused, and the servers advertise each protocol
 by ALPN (`imap`, `smtp`, RFC 8314).
 
 `-tls-client-ca` makes every client present a certificate signed by
-that CA (`tls.RequireAndVerifyClientCert`). It needs `-tls-cert` and
-`-tls-key`.
+that CA (`tls.RequireAndVerifyClientCert`).
+
+Any of the three options asks for TLS, and `serve` never falls back to
+plain text: it stops with the reason when `-tls-cert` comes without
+`-tls-key` or the reverse, `-tls-client-ca` comes without both, the
+pair doesn't load, or the CA file can't be read, holds no certificate,
+or holds anything other than certificates.
 
 Listening on another address (`-imap-host 0.0.0.0`) exposes the
 servers to the network. Do it only with TLS, and preferably with a
