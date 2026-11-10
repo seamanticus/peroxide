@@ -36,7 +36,13 @@ func TestTLSListenerHandshake(t *testing.T) {
 			io.WriteString(c, "a1 LOGIN bob pw\r\n")
 		}, "sent plain text to a TLS port", 0},
 		{"tls", func(t *testing.T, c net.Conn) {
-			tc := tls.Client(c, &tls.Config{RootCAs: pool, ServerName: "localhost"})
+			tc := tls.Client(c, &tls.Config{
+				RootCAs:    pool,
+				ServerName: "localhost",
+				// synctest's clock starts in 2000, before the certificate,
+				// made outside the bubble: verify within its validity.
+				Time: func() time.Time { return cert.Leaf.NotBefore.Add(time.Minute) },
+			})
 			if err := tc.Handshake(); err != nil {
 				t.Errorf("client handshake = %v", err)
 			}
