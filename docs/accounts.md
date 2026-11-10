@@ -4,13 +4,13 @@
 
 `peroxide auth <username>` is the only time peroxide sees your Proton
 password interactively. Step by step (cmd/peroxide/main.go, `auth`
-case; protonmail/auth.go):
+case; internal/protonmail/auth.go):
 
 1. **Password.** Read from the terminal without echo. If stdin is a
    pipe, peroxide opens `/dev/tty` instead.
 2. **SRP login.** Proton never receives the password. peroxide asks
    `/auth/info` for the SRP parameters and salt, computes an SRP proof
-   from the password (protonmail/srp.go) and sends it to `/auth`. Proton
+   from the password (internal/protonmail/srp.go) and sends it to `/auth`. Proton
    answers with a session: a UID, an access token, a refresh token, the
    granted scope and whether 2FA is on. A cookie jar keeps the session
    cookie Proton sets on `/auth/info`; without it Proton treats every
@@ -49,7 +49,7 @@ start a session for you until a client gives it.
 
 Your mail client logs in to peroxide's IMAP (`LOGIN`, or `AUTHENTICATE
 PLAIN`) or SMTP (`AUTH PLAIN`) with your Proton username and the bridge
-password. peroxide (auth/auth.go, `Manager.Auth`):
+password. peroxide (internal/auth/auth.go, `Manager.Auth`):
 
 1. Base64-decodes the password. Anything that isn't exactly 32 bytes is
    refused with "Invalid username or password".
@@ -74,7 +74,7 @@ Proton knows: `name` or `name@proton.me`, as you typed it.
 ## Session refresh
 
 Proton's access token expires. When a request answers HTTP 401,
-peroxide runs `ReAuth` (protonmail/protonmail.go, `do`): it refreshes
+peroxide runs `ReAuth` (internal/protonmail/protonmail.go, `do`): it refreshes
 with the refresh token and retries the request once; a 401 to the
 retry is the request's answer. One refresh of an account runs at a
 time, and requests meeting the expired token meanwhile wait for it,

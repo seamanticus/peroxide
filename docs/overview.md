@@ -20,17 +20,20 @@ IMAP and SMTP parts: no CardDAV, CalDAV or contacts.
 
 ## The parts
 
+The binary is `cmd/peroxide`; every other package is under `internal/`,
+which the go command lets no other module import.
+
 | Package | Role |
 |---|---|
 | `cmd/peroxide` | Command line, server start-up, debug logging (`debuglog.go`) |
-| `auth` | The stored credentials (`auth.json`) and the in-memory sessions |
-| `captcha` | Proton's human verification: sends you to Proton's page, waits for Enter |
-| `protonmail` | The Proton API client: requests, crypto helpers, log redaction |
-| `events` | Polls Proton's event stream and hands pages to each account |
-| `imap` | The IMAP backend: mailboxes, FETCH, STORE, COPY, MOVE, EXPUNGE |
-| `imap/database` | The local bolt database of message metadata, per account |
-| `smtp` | The SMTP backend: turns a submitted message into a Proton send |
-| `config` | File locations and the TLS configuration |
+| `internal/auth` | The stored credentials (`auth.json`) and the in-memory sessions |
+| `internal/captcha` | Proton's human verification: sends you to Proton's page, waits for Enter |
+| `internal/protonmail` | The Proton API client: requests, crypto helpers, log redaction |
+| `internal/events` | Polls Proton's event stream and hands pages to each account |
+| `internal/imap` | The IMAP backend: mailboxes, FETCH, STORE, COPY, MOVE, EXPUNGE |
+| `internal/imap/database` | The local bolt database of message metadata, per account |
+| `internal/smtp` | The SMTP backend: turns a submitted message into a Proton send |
+| `internal/config` | File locations and the TLS configuration |
 
 The IMAP and SMTP protocol work (parsing commands, writing responses) is
 done by Simon Ser's libraries, `github.com/emersion/go-imap` (v1) and

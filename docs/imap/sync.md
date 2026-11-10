@@ -3,7 +3,7 @@
 ## The local database
 
 Each account has a bolt database, `~/.config/peroxide/<username>.db`
-(package `imap/database`). It holds:
+(package `internal/imap/database`). It holds:
 
 | Bucket | Content |
 |---|---|

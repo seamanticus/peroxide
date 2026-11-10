@@ -124,7 +124,7 @@ Treat a `-debug` log as a copy of your mailbox.
 - **What the deny list misses.** Redaction is by key name. A field
   Proton adds tomorrow under a new name (a new kind of token) is logged
   until its name is added to `redactedJSONFields`
-  (protonmail/redact.go). The tests check the known ones.
+  (internal/protonmail/redact.go). The tests check the known ones.
 
 ## How to treat a log
 
@@ -139,7 +139,7 @@ Treat a `-debug` log as a copy of your mailbox.
   encryption at rest. Under systemd, stdout goes to the journal: a
   `-debug` service puts your mail in the journal.
 - A log taken with an old peroxide may hide less: check
-  `git log -- protonmail/redact.go cmd/peroxide/debuglog.go`.
+  `git log -- internal/protonmail/redact.go cmd/peroxide/debuglog.go`.
 
 ## How proton-bridge does it
 

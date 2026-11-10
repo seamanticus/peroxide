@@ -31,7 +31,7 @@ by peroxide ([mailboxes.md](mailboxes.md#list-lsub-subscribe)).
 ## One account, many clients
 
 Every connection logged in as the same user shares one account object
-(`imap/user.go`): one database, one event receiver, one set of
+(`internal/imap/user.go`): one database, one event receiver, one set of
 mailboxes. A change one client makes is sent to the others that have
 the mailbox selected (EXISTS, EXPUNGE, FETCH FLAGS). The account closes
 when its last connection logs out.
