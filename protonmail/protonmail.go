@@ -306,5 +306,16 @@ func (c *Client) doJSON(req *http.Request, respData any) error {
 			return err
 		}
 	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		// JSON without an error message, as a 401 can be: the status is still
+		// the answer, and decoded data from it would be empty.
+		err := &APIError{
+			Status:     resp.StatusCode,
+			Message:    fmt.Sprintf("%v, with no error message", resp.Status),
+			RetryAfter: retryAfter(resp.Header, time.Now()),
+		}
+		log.Printf("request failed: %v %v: %v", req.Method, req.URL.String(), err)
+		return err
+	}
 	return nil
 }
