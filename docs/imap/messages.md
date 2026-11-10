@@ -66,7 +66,10 @@ messages), the message stays unread, and the failure is logged.
 
 ## How a message is built
 
-As proton-bridge builds it (pkg/message/build.go, `BuildRFC822Into`):
+In package `internal/msgbuild` (`Builder.Build`), which the IMAP server
+calls; the server then derives BODYSTRUCTURE and ENVELOPE from the bytes
+(`internal/imap/structure.go`). As proton-bridge builds it
+(pkg/message/build.go, `BuildRFC822Into`):
 
 - **With attachments**:
 

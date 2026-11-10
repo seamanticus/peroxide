@@ -31,6 +31,7 @@ which the go command lets no other module import.
 | `internal/protonmail` | The Proton API client: requests, crypto helpers, log redaction |
 | `internal/events` | Polls Proton's event stream and hands pages to each account |
 | `internal/imap` | The IMAP backend: mailboxes, FETCH, STORE, COPY, MOVE, EXPUNGE |
+| `internal/msgbuild` | Builds the MIME message FETCH serves: decryption, signatures, PGP/MIME |
 | `internal/imap/database` | The local bolt database of message metadata, per account |
 | `internal/smtp` | The SMTP backend: turns a submitted message into a Proton send |
 | `internal/paths` | File locations (XDG), the serve lock, the Linux-only build guard |
