@@ -24,13 +24,13 @@ import (
 	"github.com/emersion/go-smtp"
 	"golang.org/x/term"
 
-	"github.com/seamanticus/peroxide/auth"
-	"github.com/seamanticus/peroxide/captcha"
-	"github.com/seamanticus/peroxide/config"
-	"github.com/seamanticus/peroxide/events"
-	imapbackend "github.com/seamanticus/peroxide/imap"
-	"github.com/seamanticus/peroxide/protonmail"
-	smtpbackend "github.com/seamanticus/peroxide/smtp"
+	"github.com/seamanticus/peroxide/internal/auth"
+	"github.com/seamanticus/peroxide/internal/captcha"
+	"github.com/seamanticus/peroxide/internal/config"
+	"github.com/seamanticus/peroxide/internal/events"
+	imapbackend "github.com/seamanticus/peroxide/internal/imap"
+	"github.com/seamanticus/peroxide/internal/protonmail"
+	smtpbackend "github.com/seamanticus/peroxide/internal/smtp"
 )
 
 var (

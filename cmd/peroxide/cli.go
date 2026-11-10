@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/seamanticus/peroxide/captcha"
+	"github.com/seamanticus/peroxide/internal/captcha"
 )
 
 // usage is the whole help: `peroxide help`, `peroxide -h`, `peroxide

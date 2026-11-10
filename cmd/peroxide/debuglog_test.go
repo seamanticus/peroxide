@@ -19,7 +19,7 @@ import (
 	imapserver "github.com/emersion/go-imap/server"
 	"github.com/emersion/go-smtp"
 
-	"github.com/seamanticus/peroxide/protonmail"
+	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
 const (
