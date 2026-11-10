@@ -3,8 +3,8 @@
 ## Logging in: `peroxide auth`
 
 `peroxide auth <username>` is the only time peroxide sees your Proton
-password interactively. Step by step (cmd/peroxide/main.go, `auth`
-case; internal/protonmail/auth.go):
+password interactively. Step by step (internal/login/login.go, `Run`;
+internal/protonmail/auth.go):
 
 1. **Password.** Read from the terminal without echo. If stdin is a
    pipe, peroxide opens `/dev/tty` instead.
@@ -33,15 +33,15 @@ case; internal/protonmail/auth.go):
    fails.
 7. **The bridge password.** peroxide draws 32 random bytes
    (`crypto/rand`). Base64 of them, 44 characters, is the bridge
-   password it prints. The same 32 bytes are the secret key that
-   encrypts your credentials.
+   password it shows, boxed, on the terminal (`/dev/tty`) only. The
+   same 32 bytes are the secret key that encrypts your credentials.
 8. **Storing.** It writes to `auth.json`, under your username, the
    credentials sealed with NaCl `secretbox` (XSalsa20-Poly1305, random
    24-byte nonce) under that key. The sealed record holds: the Proton
    session (UID, access and refresh tokens, scope), **your login
    password**, **your mailbox password**, and the key salts.
 
-The bridge password is printed and forgotten. It is the only key to the
+The bridge password is shown and forgotten. It is the only key to the
 record: peroxide can't decrypt `auth.json` without it, so it can't
 start a session for you until a client gives it.
 

@@ -27,7 +27,7 @@ which the go command lets no other module import.
 |---|---|
 | `cmd/peroxide` | Command line, server start-up, debug logging (`debuglog.go`) |
 | `internal/auth` | The stored credentials (`auth.json`) and the in-memory sessions |
-| `internal/captcha` | Proton's human verification: sends you to Proton's page, waits for Enter |
+| `internal/login` | The `auth` dialogue: password, CAPTCHA on Proton's page, 2FA, bridge password |
 | `internal/protonmail` | The Proton API client: requests, crypto helpers, log redaction |
 | `internal/events` | Polls Proton's event stream and hands pages to each account |
 | `internal/imap` | The IMAP backend: mailboxes, FETCH, STORE, COPY, MOVE, EXPUNGE |

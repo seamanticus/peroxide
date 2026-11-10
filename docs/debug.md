@@ -22,7 +22,9 @@ messages.
 With `-debug`, everything goes to **stdout**, interleaved in order:
 `peroxide -debug serve > file` captures the whole session, as `2>&1`
 would. The runtime's crash output (written to file descriptor 2) is
-copied there too (`runtime/debug.SetCrashOutput`).
+copied there too (`runtime/debug.SetCrashOutput`). The one exception is
+`auth`'s bridge password, which goes to the terminal only, never to
+the log.
 
 Each IMAP or SMTP connection's lines are written whole: two clients'
 lines never mix within a line, and an API request logged while a

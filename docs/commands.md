@@ -31,15 +31,23 @@ Logs in to Proton interactively and stores the credentials. See
    CAPTCHA on Proton's page, then press Enter (see
    [accounts.md](accounts.md#human-verification-captcha)).
 3. A TOTP code, if two-factor authentication is on. Only TOTP is
-   supported; a security key (FIDO2/U2F) alone fails with "Only TOTP is
+   supported; a security key (FIDO2/U2F) alone fails with "only TOTP is
    supported as a 2FA method". The code is echoed by the terminal and
    never logged.
 4. Your mailbox password, if the account uses Proton's two-password
    mode.
 
-It then prints `Bridge password: <44 characters>`. Write it down or put
-it in your password manager: peroxide doesn't keep it, and without it
-the stored credentials can't be decrypted. Lost, run `auth` again.
+It then shows the bridge password (44 characters) in a box. Write it
+down or put it in your password manager: peroxide doesn't keep it, and
+without it the stored credentials can't be decrypted. Lost, run `auth`
+again. The box is written to the terminal (`/dev/tty`), not to stdout
+or stderr, so a redirected or `tee`'d `-debug` log never holds it.
+`auth` needs a terminal: it reads the passwords and the Enter key from
+it too.
+
+Sections are separated by blank lines. The CAPTCHA heading and the two
+boxed values are coloured on a terminal, unless `NO_COLOR` is set or
+`TERM` is `dumb`; redirected output is plain text.
 
 If credentials for that username already exist, it asks before
 replacing them. `auth` options:
