@@ -199,9 +199,11 @@ than turn checking off.
 Without `-tls-cert` and `-tls-key`, the first `serve` makes a
 certificate and logs
 
-    Made peroxide's TLS certificate ~/.config/peroxide/tls/cert.pem, SHA-256 fingerprint 8A:57:...: have your clients trust it (docs/commands.md)
+    Made peroxide's TLS certificate /home/you/.config/peroxide/tls/cert.pem, SHA-256 fingerprint 8A:57:...: have your clients trust it (docs/commands.md)
 
-`peroxide status` prints the path and fingerprint again. It is:
+(the path in full, under `$XDG_CONFIG_HOME` if set). `peroxide status`
+prints the path and fingerprint again, as "peroxide's TLS certificate
+(serve's unless given -tls-cert)". It is:
 
 - self-signed, ECDSA P-256, for `localhost`, `127.0.0.1` and `::1`;
 - **not a CA** (`CA:FALSE`, key usage digital signature, extended key
@@ -265,7 +267,15 @@ The other failures logged are
   refusing the certificate (`remote error: tls: bad certificate`).
 
 A connection whose handshake fails never reaches the IMAP or SMTP
-server.
+server. At most 64 handshakes run at once; further connections wait in
+the kernel's queue until one ends, so a flood of silent connections
+can't use up serve's file descriptors. If they run out anyway, serve
+logs `accept: ... too many open files; retrying in ...` and keeps
+listening.
+
+Once connected, an IMAP client silent for 30 minutes is logged out (the
+RFC 3501 minimum; clients restart IDLE every 29 minutes or sooner,
+aerc every 25), and an SMTP client silent for 10 minutes is closed.
 
 #### `-tls-cert`, `-tls-key`, `-tls-client-ca`
 
