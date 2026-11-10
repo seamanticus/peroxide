@@ -22,7 +22,7 @@ peroxide is a server that stands between you and ProtonMail and translates. Stan
 
 ## Building from source
 
-peroxide is purely written in GO, no cheap tricks, so you will need at least version 1.24 in your system to compile the binary. What comes out is one fully static binary, no linked dependencies, no strings attached:
+peroxide runs on Linux only (amd64 and arm64 are tested), and building it for any other system stops at once with `undefined: peroxide_builds_for_linux_only`. It is purely written in GO, no cheap tricks, so you will need at least version 1.27 in your system to compile the binary. What comes out is one fully static binary, no linked dependencies, no strings attached:
 
 ```shell
 git clone https://github.com/seamanticus/peroxide.git
