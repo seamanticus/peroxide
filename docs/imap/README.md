@@ -6,8 +6,8 @@ IMAP4rev1 (RFC 3501) and announces:
 
     IMAP4rev1 LITERAL+ SASL-IR CHILDREN UNSELECT MOVE IDLE APPENDLIMIT=73400320 AUTH=PLAIN
 
-(`AUTH=PLAIN` before login; `STARTTLS` never, as TLS is implicit when
-enabled, see [../commands.md](../commands.md#listening-and-tls).)
+(`AUTH=PLAIN` before login; `STARTTLS` never, as TLS is implicit, by
+default, see [../commands.md](../commands.md#listening-and-tls).)
 
 Not supported: UIDPLUS (no COPYUID/APPENDUID), CONDSTORE/QRESYNC,
 NOTIFY, ID, ENABLE, SPECIAL-USE as a capability (the attributes are

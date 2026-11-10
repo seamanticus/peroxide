@@ -146,7 +146,7 @@ For IMAP:
 
 * Hostname: `localhost`
 * Port: `1143`
-* Security: none (with `-tls-cert`/`-tls-key`: SSL/TLS, *not* STARTTLS)
+* Security: SSL/TLS, *not* STARTTLS (with `serve -plaintext`: none)
 * Username: `your ProtonMail username`
 * Password: `bridge password` (*NOT YOUR PROTONMAIL PASSWORD*)
 
@@ -154,16 +154,18 @@ For SMTP:
 
 * Hostname: `localhost`
 * Port: `1025`
-* Security: none (with `-tls-cert`/`-tls-key`: SSL/TLS, *not* STARTTLS)
+* Security: SSL/TLS, *not* STARTTLS (with `serve -plaintext`: none)
 * Authentication: `PLAIN` (peroxide doesn't offer `LOGIN`)
 * Username: `your ProtonMail username`
 * Password: `bridge password` (*NOT YOUR PROTONMAIL PASSWORD*)
 
-*Note*: by default peroxide listens on `127.0.0.1` without TLS. The password never leaves your machine, and no one is watching... until they are.
+*Note*: peroxide speaks TLS from the first byte (implicit TLS, the way ports 993 and 465 do) on ports 1143 and 1025, even on `127.0.0.1`. Why bother on your own machine? because any other user on it can sit on port 1143 while peroxide is down, and your client would cheerfully hand them the bridge password. The certificate is what tells the real peroxide from the impostor, so your client has to trust it, not skip checking it. The first `serve` makes one (no CA, it can vouch for nothing but peroxide) and logs its fingerprint; `peroxide status` shows it again. How to trust it, client by client: `docs/commands.md`, "Listening and TLS".
 
-*Notes on TLS*: if you handle peroxide `-tls-cert` and `-tls-key`, the whole thing changes. both servers speak TLS from the first byte (implicit TLS, the way ports 993 and 465 do) on the same ports 1143 and 1025. Plain connections get refused. in your client, pick "SSL/TLS" but never "STARTTLS", peroxide doesn't have that in the menu, don't ask. A self-signed certificate must be trusted by the client. See `docs/commands.md`.
+*Notes on STARTTLS*: peroxide doesn't have it in the menu, don't ask. A client set up for plain text or STARTTLS gets the connection closed after 10 seconds, and `serve` logs why.
 
-*More notes on aerc*: use `imap+insecure://` and `smtp+insecure://` for plain connection. For TLS use `imaps://` and `smtps://`.
+*Notes on plain text*: `serve -plaintext` turns TLS off, on loopback addresses only. You're on your own then.
+
+*More notes on aerc*: use `imaps://` and `smtps://` (in aerc, `imap://` and `smtp://` mean STARTTLS), and start aerc with peroxide's certificate directory added to the system's: `SSL_CERT_DIR=/etc/ssl/certs:$HOME/.config/peroxide/tls aerc`. Don't use `+insecure` with TLS: it turns certificate checking off, which is the whole point. `imap+insecure://` and `smtp+insecure://` are for `serve -plaintext` only.
 
 *Even more notes*: some clients store your *bridge password* in plain text, which is an aberration!!! Like leaving your house key under the mat with a sign pointing at it. An elegant solution is presented below: encrypted and on demand.
 
@@ -174,14 +176,16 @@ If using using aerc email client and gpg (for encrypted *bridge password*) for t
 ```
 [ username ]
 from                = <username> <username@protonmail.com>
-source              = imap+insecure://username%40protonmail.com@127.0.0.1:1143
+source              = imaps://username%40protonmail.com@127.0.0.1:1143
 source-cred-cmd     = gpg --quiet --for-your-eyes-only --decrypt ~/.password-store/peroxide_username.gpg | sed -n 1p
-outgoing            = smtp+insecure://username%40protonmail.com@127.0.0.1:1025
+outgoing            = smtps://username%40protonmail.com@127.0.0.1:1025
 outgoing-cred-cmd   = gpg --quiet --for-your-eyes-only --decrypt ~/.password-store/peroxide-username.gpg | sed -n 1p
 ```
 
 *Note*: you must have first stored your *bridge password* in the appropriate gpg files. Easy bullet-proof solution in any Unix systems is using `pass`. But you can also create it manually, though that is another rabbit hole, and the rabbit hole has no pub at the bottom. In this case, the bridge password is
 stored in `peroxide-username.gpg`
+
+*Note on the certificate*: start aerc as `SSL_CERT_DIR=/etc/ssl/certs:$HOME/.config/peroxide/tls aerc` (an alias does it), so it trusts peroxide's certificate and still every one it trusted before. Don't reach for `SSL_CERT_FILE`, it throws the system's roots away and your other accounts with them.
 
 ## Why the name peroxide?
 

@@ -549,6 +549,14 @@ server, `serve` is all it needs. Described in docs/commands.md.
   during a refresh; `Client.Logout` removed (4b76cd3, 9120026);
 - half-given TLS options served plain text (4a5cbde).
 
+**TLS by default** (2026-11-10): `serve` speaks implicit TLS with its
+own certificate (no CA, 20 years, never replaced unasked; 103778c,
+a739fc3); `-plaintext` on loopback IPs only; `sendmail` pins serve's
+certificate per connection (VerifyConnection); handshakes bounded to
+10 s, logged once and never handed to the servers (576218a, 3f7e8e1).
+aerc can trust it only process-wide (`SSL_CERT_DIR`); a per-account
+`tls-cert` is aerc_implementation.md section 11.
+
 ## 19. SMTP can't send a PGP/MIME message the client encrypted
 
 **Problem.** A message the client encrypted itself (aerc's encrypt on

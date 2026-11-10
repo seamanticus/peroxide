@@ -81,12 +81,17 @@ look, not in a cache directory.
 
 ## Network exposure
 
-- Default: IMAP and SMTP on `127.0.0.1`, plain text, passwords
-  accepted over it. Safe from the network, not from other local users
-  or processes (who still need the bridge password).
-- `-imap-host`/`-smtp-host` other than loopback: use `-tls-cert`
-  and `-tls-key`, ideally `-tls-client-ca`. Without TLS, the bridge
-  password and every message cross the network in clear.
+- Default: IMAP and SMTP on `127.0.0.1`, implicit TLS with peroxide's
+  own certificate, which is no CA (see
+  [commands.md](commands.md#listening-and-tls)). A client that checks
+  it can't be fooled by another local user listening on 1143 or 1025
+  while `serve` is down; one with checking off (aerc's `+insecure`)
+  can, and gives that impostor the bridge password.
+- `serve -plaintext`: no TLS, loopback IP addresses only, passwords
+  accepted in clear: open to that impostor, and to anything that can
+  read loopback traffic.
+- `-imap-host`/`-smtp-host` other than loopback: still TLS (never
+  plain text), ideally with `-tls-client-ca`.
 - The CAPTCHA helper listens on `127.0.0.1:8765` only while
   `peroxide auth` waits for a challenge, behind a random single-use
   URL, and warns if you make it listen elsewhere.

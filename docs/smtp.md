@@ -5,10 +5,11 @@
 The SMTP server (go-smtp, package `smtp`) listens on `127.0.0.1:1025`
 by default, as `localhost`. It offers `AUTH PLAIN` only: the username is
 your Proton username, the password the bridge password. A client that
-knows only `AUTH LOGIN` can't log in. Without `-tls-cert`, it accepts
-the password over the plain connection, as it never leaves the machine;
-with it, the whole connection is TLS (implicit, port 465 style, not
-STARTTLS). See [commands.md](commands.md#listening-and-tls).
+knows only `AUTH LOGIN` can't log in. The connection is TLS from its
+first byte (implicit, port 465 style, not STARTTLS), with peroxide's
+own certificate unless `serve` is given one; with `serve -plaintext`,
+loopback only, the password is accepted over plain text. See
+[commands.md](commands.md#listening-and-tls).
 
 MAIL FROM is ignored: the sender is the message's `From:` header. Each
 RCPT TO is a recipient. peroxide sets no message size limit of its own;
@@ -107,7 +108,8 @@ recipients, and the message's To and Cc aren't read for them.
 While `peroxide serve` runs, `sendmail` doesn't log in itself: that
 would spend the refresh token `serve` holds. It hands the message to
 `serve`'s SMTP server, logged in with the username and bridge
-password; give it the same `-smtp-host`, `-smtp-port` and `-tls-cert`
+password; give it the same `-smtp-host`, `-smtp-port`, and `-tls-cert`
+or `-plaintext`,
 as `serve` ([commands.md](commands.md#sendmail-username----recipients)).
 If `serve` doesn't greet within 10 seconds, `sendmail` gives up and
 asks whether `serve` and it agree about TLS: a plain client and a TLS

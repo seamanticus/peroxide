@@ -123,11 +123,12 @@ While `serve` runs, `sendmail` hands the message to `serve`'s SMTP
 server (`-smtp-host`, `-smtp-port`), logged in with the username and
 bridge password, so that the account keeps the one session `serve`
 holds; the envelope sender is the message's From. Give it the same
-`-smtp-host`, `-smtp-port` and `-tls-cert` as `serve`, after the
-command (`peroxide sendmail -tls-cert cert.pem <username> -- ...`):
-with TLS it trusts only the certificate that file holds, byte for byte,
-so a self-signed one
-works; the file may hold the key too, as `serve` accepts. If `serve`
+`-smtp-host` and `-smtp-port` as `serve`, after the command. Over TLS
+it trusts only serve's certificate, byte for byte, so a self-signed one
+works: peroxide's own by default, or with `-tls-cert` the file `serve`
+was given (`peroxide sendmail -tls-cert cert.pem <username> -- ...`;
+the file may hold the key too). If `serve` runs with `-plaintext`, give
+`sendmail` `-plaintext` too. If `serve`
 runs with `-disable-smtp` or `-tls-client-ca`, `sendmail` fails rather
 than log in itself. If `serve` doesn't greet within 10 seconds (TLS on
 one side only), it fails with that hint. A `QUIT` that fails after
@@ -144,8 +145,9 @@ one side only), it fails with that hint. A `QUIT` that fails after
 | `-smtp-host`, `-smtp-port` | `serve`, `sendmail` | `127.0.0.1`, `1025` | Where the SMTP server listens; for `sendmail`, where `serve`'s is |
 | `-disable-imap`, `-disable-smtp` | `serve` | off | Don't start that server |
 | `-show-all-mail` | `serve` | on | `=false` leaves All Mail out of IMAP LIST, as proton-bridge's "Show All Mail" off; see [imap/mailboxes.md](imap/mailboxes.md) |
-| `-tls-cert`, `-tls-key` | `serve` (`sendmail`: `-tls-cert`) | none | Serve IMAP and SMTP over TLS with this certificate; `sendmail` trusts only that certificate |
-| `-tls-client-ca` | `serve` | none | With TLS: require a client certificate signed by this CA |
+| `-tls-cert`, `-tls-key` | `serve` (`sendmail`: `-tls-cert`) | peroxide's own | Serve IMAP and SMTP with this certificate instead; `sendmail` trusts only that certificate |
+| `-tls-client-ca` | `serve` | none | Require a client certificate signed by this CA |
+| `-plaintext` | `serve`, `sendmail` | off | No TLS; refused unless every enabled server listens on a loopback IP, and with any `-tls-*` option |
 | `-api-endpoint` | all | `https://mail.proton.me/api` | Proton's API base URL, for testing |
 | `-app-version` | all | `Other` | The `x-pm-appversion` peroxide reports to Proton, for testing |
 
@@ -176,34 +178,120 @@ version.
 
 ### Listening and TLS
 
-By default both servers listen on `127.0.0.1` without TLS, and accept
-passwords in clear text (`AllowInsecureAuth`): the connection never
-leaves your machine. Any other process on the machine can connect,
-but it needs the bridge password to log in.
-
-With `-tls-cert` and `-tls-key`, both servers use **implicit TLS**: the
+Both servers listen on `127.0.0.1` and speak **implicit TLS**: the
 connection is TLS from its first byte (as on ports 993 and 465), not
-STARTTLS, on the same ports as without it. Configure the client for
-"SSL/TLS", not "STARTTLS": in aerc, `imaps://` and `smtps://` rather
-than `imap://` and `smtp://` (which mean STARTTLS there) or the
-`+insecure` forms; in Thunderbird, "SSL/TLS". A self-signed certificate
-must be trusted by the client. Plain
-connections are then refused, and the servers advertise each protocol
-by ALPN (`imap`, `smtp`, RFC 8314).
+STARTTLS, on ports 1143 and 1025. Configure the client for "SSL/TLS",
+not "STARTTLS": in aerc, `imaps://` and `smtps://`, not `imap://` and
+`smtp://` (which mean STARTTLS there) nor the `+insecure` forms; in
+Thunderbird, "SSL/TLS". The servers advertise each protocol by ALPN
+(`imap`, `smtp`, RFC 8314) and refuse a client asking for another one,
+so one certificate can't be used to send an IMAP client to SMTP
+(ALPACA). TLS 1.2 is the minimum.
 
+TLS matters even on loopback: any user of the machine can listen on
+1143 or 1025 while `serve` isn't running, and a client that connects
+to that impostor hands it the bridge password. TLS stops this only if
+the client checks the certificate, so trust the certificate rather
+than turn checking off.
+
+#### peroxide's certificate
+
+Without `-tls-cert` and `-tls-key`, the first `serve` makes a
+certificate and logs
+
+    Made peroxide's TLS certificate ~/.config/peroxide/tls/cert.pem, SHA-256 fingerprint 8A:57:...: have your clients trust it (docs/commands.md)
+
+`peroxide status` prints the path and fingerprint again. It is:
+
+- self-signed, ECDSA P-256, for `localhost`, `127.0.0.1` and `::1`;
+- **not a CA** (`CA:FALSE`, key usage digital signature, extended key
+  usage server auth only). Trusted as its own anchor, it vouches for
+  nothing but peroxide's names: its key can't sign a certificate for
+  any other site;
+- valid for 20 years and never renewed, as a new one would have to be
+  trusted again in every client;
+- `$XDG_CONFIG_HOME/peroxide/tls/cert.pem`, alone in its directory,
+  and its key `$XDG_CONFIG_HOME/peroxide/tls-key.pem`, both 0600.
+
+It is never replaced unasked. If the key is missing, doesn't match, or
+the certificate has expired, `serve` stops and says so; remove
+`tls/cert.pem` and `tls-key.pem` to have a new pair made, then trust
+the new one in your clients.
+
+To check what a client is shown, compare the fingerprint `status`
+prints with
+
+    openssl s_client -connect 127.0.0.1:1143 -alpn imap </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256
+
+#### Trusting it
+
+- **aerc** (and other Go programs) check certificates against the
+  system's roots, with no per-account certificate option. Add
+  peroxide's directory to them for aerc only, keeping the system's:
+
+      SSL_CERT_DIR=/etc/ssl/certs:$HOME/.config/peroxide/tls aerc
+
+  Go reads every file of each directory listed (the reason the
+  certificate lives alone in its own), and still reads the system's
+  bundle file (`/etc/ssl/certs/ca-certificates.crt` and the like):
+  `SSL_CERT_DIR` replaces only the directories, so list the system's
+  (`/etc/ssl/certs` on Debian and Arch, `/etc/pki/tls/certs` on
+  Fedora) to keep any root kept only there. Don't set `SSL_CERT_FILE`
+  instead: it replaces the bundle, and aerc's other accounts would
+  fail.
+- **Thunderbird** shows the certificate on the first connection: check
+  the fingerprint against `peroxide status`, and confirm the security
+  exception permanently.
+- **mbsync**, **msmtp** and other OpenSSL clients: point their CA file
+  option (`CertificateFile`, `tls_trust_file`) at `tls/cert.pem`.
+
+#### A client still set up for plain text
+
+A client set up for plain text (aerc's `imap+insecure://`) waits for a
+greeting that never comes. `serve` gives each connection 10 seconds
+to start TLS, then closes it and logs, once per connection:
+
+    IMAP client 127.0.0.1:35182 sent no TLS handshake within 10s: set up for plain text? use imaps:// (SSL/TLS, not STARTTLS), or run serve with -plaintext
+
+The client sees only the connection closing: aerc reports `EOF`.
+The other failures logged are
+
+- `sent plain text to a TLS port`: a client that sent plain text at
+  once; closed at once;
+- `closed the connection during the TLS handshake`: the client hung up,
+  for instance aerc quitting while it connects;
+- `TLS handshake with <addr> failed: ... (does the client trust
+  peroxide's certificate? ...)`: anything else, most often a client
+  refusing the certificate (`remote error: tls: bad certificate`).
+
+A connection whose handshake fails never reaches the IMAP or SMTP
+server.
+
+#### `-tls-cert`, `-tls-key`, `-tls-client-ca`
+
+`-tls-cert` and `-tls-key` serve a certificate of your own instead.
 `-tls-client-ca` makes every client present a certificate signed by
-that CA (`tls.RequireAndVerifyClientCert`).
+that CA (`tls.RequireAndVerifyClientCert`), with either certificate.
 
-Any of the three options asks for TLS, and `serve` never falls back to
-plain text: it stops with the reason when `-tls-cert` comes without
-`-tls-key` or the reverse, `-tls-client-ca` comes without both, the
-pair doesn't load, or the CA file can't be read, holds no certificate,
-or holds anything other than certificates.
+`serve` never falls back to plain text: it stops with the reason when
+`-tls-cert` comes without `-tls-key` or the reverse, the pair doesn't
+load, or the CA file can't be read, holds no certificate, or holds
+anything other than certificates.
+
+#### `-plaintext`
+
+`serve -plaintext` turns TLS off and logs a warning; passwords are then
+accepted in clear (`AllowInsecureAuth`). It is refused with any
+`-tls-*` option, and unless every enabled server's `-imap-host` and
+`-smtp-host` is a loopback IP address (`127.0.0.1`, `::1`): a host
+name such as `localhost` may resolve to anything. It leaves you open
+to the impostor above. `sendmail` takes `-plaintext` under the same
+rule, for a `serve` running with it.
 
 Listening on another address (`-imap-host 0.0.0.0`) exposes the
-servers to the network. Do it only with TLS, and preferably with a
-client CA: the bridge password is then the only thing between the
-network and your mail.
+servers to the network; preferably add a client CA: the bridge
+password is otherwise the only thing between the network and your
+mail.
 
 ### `-app-version`
 
@@ -228,8 +316,15 @@ proton-bridge has a GUI and an interactive CLI (`--cli`) in which you
 log in, list accounts and read the bridge password at any time, because
 it keeps the bridge password in its vault. peroxide prints it once and
 forgets it. proton-bridge generates its own self-signed certificate
-(internal/certs) and offers, per server, STARTTLS or implicit TLS
-(`IMAPSSL`, `SMTPSSL` in its vault settings); peroxide uses TLS only
-with a certificate you give it, implicit only. proton-bridge takes the
+(internal/certs/tls.go), but makes it a CA (`IsCA`, `KeyUsageCertSign`,
+RSA 2048, 20 years) and on macOS installs it in the system keychain:
+whoever holds its key can then make a certificate the system trusts
+for any site. peroxide's can sign nothing (above). proton-bridge
+defaults to STARTTLS (`IMAPSSL`, `SMTPSSL` false in its vault
+settings), which the NO STARTTLS study (USENIX Security 2021) found
+flawed in over 40 ways across clients and servers; peroxide speaks
+implicit TLS only, and plain text only when asked. A custom
+certificate proton-bridge can't load is silently replaced by its own;
+peroxide stops. proton-bridge takes the
 first free ports from 1143 (IMAP) and 1025 (SMTP); peroxide uses those
 numbers as fixed defaults and fails to start if they are taken.
