@@ -119,9 +119,8 @@ the new key and get new UIDs
 ## Files on disk
 
 peroxide keeps its files in `peroxide/` under Go's
-`os.UserConfigDir()`: `$XDG_CONFIG_HOME`, else `~/.config` on Linux and
-BSD; `~/Library/Application Support` on macOS. The directory is created
-with mode 0700.
+`os.UserConfigDir()`: `$XDG_CONFIG_HOME`, else `~/.config`. The
+directory is created with mode 0700.
 
 | File | What it holds | Protection |
 |---|---|---|
@@ -179,9 +178,9 @@ in your browser, on Proton's own page. The `captcha` package:
    `127.0.0.1:8765`), with a random 32-byte state in its URL. It warns
    if that address isn't loopback.
 3. Opens your browser on it, or only prints the URL
-   (`-captcha-mode manual`, `-no-open-browser`). On Linux and BSD it
-   runs `xdg-open`, and only inside a graphical session (`DISPLAY` or
-   `WAYLAND_DISPLAY` set); on macOS `open`. The browser only ever gets
+   (`-captcha-mode manual`, `-no-open-browser`). It runs `xdg-open`,
+   and only inside a graphical session (`DISPLAY` or
+   `WAYLAND_DISPLAY` set). The browser only ever gets
    the local `http://127.0.0.1` URL, never a token.
 4. Proton lets only its own web apps embed the challenge, so it runs in
    its own tab, and its result has to be carried back. The helper page

@@ -317,7 +317,7 @@ proton-bridge sends.
   the same user (`/proc/<pid>/environ`); prefer piping it from a
   password manager into the command's environment only.
 - `XDG_CONFIG_HOME`: where `peroxide/` is created (default
-  `~/.config`; on macOS `~/Library/Application Support`). See
+  `~/.config`). See
   [accounts.md](accounts.md#files-on-disk).
 
 ## How proton-bridge does it
