@@ -285,9 +285,16 @@ func TestSolve_Errors(t *testing.T) {
 		t.Errorf("Solve() = %v, want ErrUnsupportedMethod", err)
 	}
 
-	opts.ListenAddr = "127.0.0.1:1"
+	// An address already in use: refused whoever runs the test. A privileged
+	// port isn't, to root (as in CI's containers).
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	opts.ListenAddr = taken.Addr().String()
 	if _, err := Solve(context.Background(), testChallenge(), opts); !errors.Is(err, ErrListen) {
-		t.Errorf("Solve() on a privileged port = %v, want ErrListen", err)
+		t.Errorf("Solve() on an address in use = %v, want ErrListen", err)
 	}
 
 	opts.ListenAddr = "definitely not an address"
