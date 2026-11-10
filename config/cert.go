@@ -33,9 +33,14 @@ const (
 	certLifetime = 20 * 365 * 24 * time.Hour
 )
 
-// CertPath returns the path of serve's own certificate.
+// CertPath returns the path of serve's own certificate, creating nothing:
+// `peroxide status` asks for it too.
 func CertPath() (string, error) {
-	return Path(filepath.Join(certDir, certFile))
+	configHome, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configHome, "peroxide", certDir, certFile), nil
 }
 
 func certKeyPath() (string, error) {
@@ -122,6 +127,9 @@ func createCertificate(certPath, keyPath string) (tls.Certificate, error) {
 	if err := writeFileAtomic(keyPath, keyPEM, 0o600); err != nil {
 		return tls.Certificate{}, fmt.Errorf("cannot write the TLS key: %w", err)
 	}
+	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
+		return tls.Certificate{}, fmt.Errorf("cannot make the TLS certificate's directory: %w", err)
+	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	// Readable by its owner only, as everything in the configuration
 	// directory: a client trusting it runs as the same user.
@@ -132,7 +140,9 @@ func createCertificate(certPath, keyPath string) (tls.Certificate, error) {
 }
 
 // writeFileAtomic writes data to p through a temporary file in its directory
-// renamed over it, so that p is never seen half written.
+// renamed over it, so that p is never seen half written, then syncs the
+// directory, so that the new name outlives a crash: the certificate's must
+// never survive without the key's, written just before.
 func writeFileAtomic(p string, data []byte, mode os.FileMode) error {
 	f, err := os.CreateTemp(filepath.Dir(p), "."+filepath.Base(p)+"-*")
 	if err != nil {
@@ -155,7 +165,15 @@ func writeFileAtomic(p string, data []byte, mode os.FileMode) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	if err := os.Rename(tmp, p); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(p))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 // Fingerprint is der's SHA-256 in the form `openssl x509 -fingerprint

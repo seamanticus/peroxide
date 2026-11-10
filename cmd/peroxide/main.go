@@ -131,6 +131,10 @@ func tlsConfigFor(tlsConfig *tls.Config, proto string) *tls.Config {
 	return c
 }
 
+// smtpIdleTimeout bounds the wait for an SMTP client's next line, and for it
+// to take an answer.
+const smtpIdleTimeout = 10 * time.Minute
+
 func listenAndServeSMTP(addr string, debug bool, authManager *auth.Manager, tlsConfig *tls.Config) error {
 	be := smtpbackend.New(authManager)
 	s := smtp.NewServer(be)
@@ -140,6 +144,11 @@ func listenAndServeSMTP(addr string, debug bool, authManager *auth.Manager, tlsC
 	s.ErrorLog = log.New(log.Writer(), "smtp/server ", log.LstdFlags)
 	s.AllowInsecureAuth = tlsConfig == nil
 	s.TLSConfig = tlsConfigFor(tlsConfig, "smtp")
+	// A client silent this long, between commands, is closed: an open
+	// connection holds a file descriptor and a goroutine of serve's. RFC 5321
+	// section 4.5.3.2.7 asks a server to wait at least 5 minutes.
+	s.ReadTimeout = smtpIdleTimeout
+	s.WriteTimeout = smtpIdleTimeout
 	if debug {
 		return serveSMTPDebug(s, log.Writer())
 	}
@@ -169,6 +178,12 @@ func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, even
 	s.ErrorLog = log.New(log.Writer(), "imap/server: ", log.LstdFlags)
 	s.AllowInsecureAuth = tlsConfig == nil
 	s.TLSConfig = tlsConfigFor(tlsConfig, "imap")
+	// A client silent this long is logged out: an open connection holds a
+	// file descriptor and a goroutine of serve's. go-imap moves the deadline
+	// on each command and each response, and IDLE sends none while nothing
+	// changes: RFC 2177 has clients restart IDLE at least every 29 minutes
+	// (go-imap's client, aerc's, every 25), so the RFC 3501 minimum holds.
+	s.AutoLogout = imapserver.MinAutoLogout
 	if debug {
 		// Traces go where API traffic is logged, so one stream holds the whole
 		// session in order.
@@ -370,11 +385,11 @@ func main() {
 		}
 		switch fp, err := config.CertFileFingerprint(certPath); {
 		case errors.Is(err, os.ErrNotExist):
-			fmt.Printf("TLS certificate: none yet, serve makes %v\n", certPath)
+			fmt.Printf("peroxide's TLS certificate: none yet, the first serve without -tls-cert makes %v\n", certPath)
 		case err != nil:
 			log.Fatal(err)
 		default:
-			fmt.Printf("TLS certificate: %v\n  SHA-256 %v\n", certPath, fp)
+			fmt.Printf("peroxide's TLS certificate (serve's unless given -tls-cert): %v\n  SHA-256 %v\n", certPath, fp)
 		}
 	case "serve":
 		// One process serves both protocols with one auth.Manager: Proton's

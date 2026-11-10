@@ -4,14 +4,112 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
 )
+
+// At most maxHandshakes handshakes run at once: with that many silent clients
+// connected, the next one isn't accepted until they time out, and then it is.
+// evidence: witnesses
+func TestTLSListenerBoundsHandshakes(t *testing.T) {
+	config := &tls.Config{Certificates: []tls.Certificate{selfSigned(t)}, MinVersion: tls.VersionTLS12}
+	synctest.Test(t, func(t *testing.T) {
+		var logged lockedBuffer
+		pl := &pipeListener{conns: make(chan net.Conn), done: make(chan struct{})}
+		l := newTLSListener(pl, config, "IMAP", log.New(&logged, "", 0))
+
+		var taken atomic.Int32
+		var clients []net.Conn
+		for range maxHandshakes + 1 {
+			client, server := net.Pipe()
+			clients = append(clients, client)
+			go func() {
+				select {
+				case pl.conns <- server:
+					taken.Add(1)
+				case <-pl.done:
+				}
+			}()
+		}
+		synctest.Wait()
+		if n := taken.Load(); n != maxHandshakes {
+			t.Errorf("accepted %v connections at once, want %v", n, maxHandshakes)
+		}
+
+		time.Sleep(handshakeTimeout)
+		synctest.Wait()
+		if n := taken.Load(); n != maxHandshakes+1 {
+			t.Errorf("accepted %v connections after the first timed out, want %v", n, maxHandshakes+1)
+		}
+		if n := strings.Count(logged.String(), "sent no TLS handshake"); n != maxHandshakes {
+			t.Errorf("logged %v timeouts, want %v", n, maxHandshakes)
+		}
+
+		l.Close()
+		for _, c := range clients {
+			c.Close()
+		}
+	})
+}
+
+// errListener's Accept returns its errors in turn, then waits for Close.
+type errListener struct {
+	errs  []error
+	calls atomic.Int32
+	done  chan struct{}
+}
+
+func (l *errListener) Accept() (net.Conn, error) {
+	if i := int(l.calls.Add(1)) - 1; i < len(l.errs) {
+		return nil, l.errs[i]
+	}
+	<-l.done
+	return nil, net.ErrClosed
+}
+
+func (l *errListener) Close() error   { close(l.done); return nil }
+func (l *errListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+// Running out of file descriptors (or a connection aborted before it was
+// accepted) is retried with a growing wait and logged, never handed to the
+// server, which would stop (go-imap does); any other error is handed on.
+// evidence: witnesses
+func TestTLSListenerRetriesTransient(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var logged lockedBuffer
+		other := errors.New("something else")
+		el := &errListener{
+			errs: []error{
+				fmt.Errorf("accept: %w", syscall.EMFILE),
+				fmt.Errorf("accept: %w", syscall.ENFILE),
+				fmt.Errorf("accept: %w", syscall.ECONNABORTED),
+				other,
+			},
+			done: make(chan struct{}),
+		}
+		l := newTLSListener(el, &tls.Config{}, "IMAP", log.New(&logged, "", 0))
+		start := time.Now()
+		if _, err := l.Accept(); !errors.Is(err, other) {
+			t.Errorf("Accept() = %v, want the lasting error", err)
+		}
+		// 5 + 10 + 20 ms.
+		if d := time.Since(start); d != 35*time.Millisecond {
+			t.Errorf("retried for %v, want 35ms", d)
+		}
+		if n := strings.Count(logged.String(), "retrying in"); n != 3 {
+			t.Errorf("logged %q, want 3 retries", logged.String())
+		}
+		l.Close()
+	})
+}
 
 // A client that never starts the handshake (set up for plain text, waiting
 // for a greeting) is cut off after handshakeTimeout; one that sends plain

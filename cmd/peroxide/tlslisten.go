@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -15,6 +16,17 @@ import (
 // text never sends one: it waits for the greeting while the server waits for
 // its ClientHello, and without a bound both would wait for ever.
 const handshakeTimeout = 10 * time.Second
+
+// maxHandshakes bounds the handshakes in progress. With all of them taken the
+// listener stops accepting, and the kernel queues new connections until one
+// ends: a flood of silent connections then waits in the queue, holding no
+// file descriptor of serve's, instead of using them all up.
+const maxHandshakes = 64
+
+// acceptRetryMax is the longest wait before accepting again after an error
+// a busy system clears by itself (out of file descriptors or memory), as
+// net/http waits.
+const acceptRetryMax = time.Second
 
 // tlsListener is tls.NewListener that hands a connection on only once its
 // handshake is done. Each handshake runs in its own goroutine, bounded by
@@ -30,7 +42,8 @@ type tlsListener struct {
 	log    *log.Logger
 
 	conns chan net.Conn // handshakes done
-	errs  chan error    // the underlying Accept's errors
+	errs  chan error    // the underlying Accept's lasting errors
+	slots chan struct{} // one per handshake in progress, maxHandshakes
 	// ctx ends with Close, ending the accept loop and the handshakes; wg
 	// counts them, for Close to wait.
 	ctx    context.Context
@@ -43,21 +56,41 @@ func newTLSListener(l net.Listener, config *tls.Config, proto string, logger *lo
 	tl := &tlsListener{
 		Listener: l, config: config, proto: proto, log: logger,
 		conns: make(chan net.Conn), errs: make(chan error),
-		ctx: ctx, cancel: cancel,
+		slots: make(chan struct{}, maxHandshakes),
+		ctx:   ctx, cancel: cancel,
 	}
 	tl.wg.Go(tl.acceptLoop)
 	return tl
 }
 
-// acceptLoop accepts connections and starts their handshakes, until Close.
-// An error goes to Accept's caller, which decides whether to call again
-// (go-smtp retries temporary ones; go-imap stops): the loop waits for it to.
+// acceptLoop accepts connections and starts their handshakes, until Close,
+// taking a slot for each before accepting it. An error a busy system clears
+// by itself is retried here, backing off up to acceptRetryMax, as go-imap
+// would stop serving on it; any other goes to Accept's caller, which decides
+// whether to call again: the loop waits for it to.
 func (l *tlsListener) acceptLoop() {
+	var delay time.Duration
 	for {
+		select {
+		case l.slots <- struct{}{}:
+		case <-l.ctx.Done():
+			return
+		}
 		c, err := l.Listener.Accept()
 		if err != nil {
+			<-l.slots
 			if l.ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
+			}
+			if transientAcceptError(err) {
+				delay = min(max(2*delay, 5*time.Millisecond), acceptRetryMax)
+				l.log.Printf("%v accept: %v; retrying in %v", l.proto, err, delay)
+				select {
+				case <-time.After(delay):
+					continue
+				case <-l.ctx.Done():
+					return
+				}
 			}
 			select {
 			case l.errs <- err:
@@ -66,9 +99,24 @@ func (l *tlsListener) acceptLoop() {
 				return
 			}
 		}
+		delay = 0
 		tc := tls.Server(c, l.config)
-		l.wg.Go(func() { l.handshake(tc) })
+		l.wg.Go(func() {
+			defer func() { <-l.slots }()
+			l.handshake(tc)
+		})
 	}
+}
+
+// transientAcceptError reports an Accept error that passes once connections
+// or memory are freed, or that concerns one connection only.
+func transientAcceptError(err error) bool {
+	for _, e := range []syscall.Errno{syscall.EMFILE, syscall.ENFILE, syscall.ENOBUFS, syscall.ENOMEM, syscall.ECONNABORTED} {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *tlsListener) handshake(tc *tls.Conn) {
@@ -96,7 +144,7 @@ func (l *tlsListener) logFailure(from net.Addr, err error) {
 	case plain:
 		l.log.Printf("%v client %v sent plain text to a TLS port: use %v, or run serve with -plaintext",
 			l.proto, from, secureScheme(l.proto))
-	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, syscall.ECONNRESET):
 		// Gone without a TLS alert: the client quit, or gave up. One
 		// refusing the certificate sends an alert instead.
 		l.log.Printf("%v client %v closed the connection during the TLS handshake", l.proto, from)
