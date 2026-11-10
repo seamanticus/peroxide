@@ -49,7 +49,7 @@ start a session for you until a client gives it.
 
 Your mail client logs in to peroxide's IMAP (`LOGIN`, or `AUTHENTICATE
 PLAIN`) or SMTP (`AUTH PLAIN`) with your Proton username and the bridge
-password. peroxide (internal/auth/auth.go, `Manager.Auth`):
+password. peroxide (internal/auth/manager.go, `Manager.Auth`):
 
 1. Base64-decodes the password. Anything that isn't exactly 32 bytes is
    refused with "Invalid username or password".
