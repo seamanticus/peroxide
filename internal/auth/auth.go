@@ -19,7 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/nacl/secretbox"
 
-	"github.com/seamanticus/peroxide/internal/config"
+	"github.com/seamanticus/peroxide/internal/paths"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
@@ -27,7 +27,7 @@ import (
 const authFileMode = 0o600
 
 func authFilePath() (string, error) {
-	return config.Path("auth.json")
+	return paths.Path("auth.json")
 }
 
 // authLockFile is held while auth.json is read, changed and written back.
@@ -40,7 +40,7 @@ const authLockFile = "auth.lock"
 // never lose each other's change. An flock belongs to the open file, so each
 // call opening the lock itself also keeps goroutines of one process apart.
 func updateAuths(change func(auths map[string]string) error) error {
-	p, err := config.Path(authLockFile)
+	p, err := paths.Path(authLockFile)
 	if err != nil {
 		return fmt.Errorf("cannot find the auth lock: %w", err)
 	}

@@ -12,7 +12,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 	boltErrors "go.etcd.io/bbolt/errors"
 
-	"github.com/seamanticus/peroxide/internal/config"
+	"github.com/seamanticus/peroxide/internal/paths"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
@@ -629,11 +629,11 @@ const openTimeout = time.Second
 // another key (a new or lost bridge password), which keyChanged reports: the
 // store is rebuilt by downloading it again, as after a Refresh.
 func Open(name string, key [32]byte) (u *User, keyChanged bool, err error) {
-	p, err := config.Path(name + ".db")
+	p, err := paths.Path(name + ".db")
 	if err != nil {
 		return nil, false, err
 	}
-	dir, err := config.DataPath(name)
+	dir, err := paths.DataPath(name)
 	if err != nil {
 		return nil, false, err
 	}

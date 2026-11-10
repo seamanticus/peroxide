@@ -22,12 +22,13 @@ import (
 	"github.com/emersion/go-smtp"
 
 	"github.com/seamanticus/peroxide/internal/auth"
-	"github.com/seamanticus/peroxide/internal/config"
 	"github.com/seamanticus/peroxide/internal/events"
 	imapbackend "github.com/seamanticus/peroxide/internal/imap"
 	"github.com/seamanticus/peroxide/internal/login"
+	"github.com/seamanticus/peroxide/internal/paths"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 	smtpbackend "github.com/seamanticus/peroxide/internal/smtp"
+	"github.com/seamanticus/peroxide/internal/tlscert"
 )
 
 var (
@@ -244,11 +245,11 @@ func main() {
 			}
 		}
 
-		certPath, err := config.CertPath()
+		certPath, err := tlscert.CertPath()
 		if err != nil {
 			log.Fatal(err)
 		}
-		switch fp, err := config.CertFileFingerprint(certPath); {
+		switch fp, err := tlscert.CertFileFingerprint(certPath); {
 		case errors.Is(err, os.ErrNotExist):
 			fmt.Printf("peroxide's TLS certificate: none yet, the first serve without -tls-cert makes %v\n", certPath)
 		case err != nil:
@@ -261,7 +262,7 @@ func main() {
 		// refresh tokens are single use, so two processes refreshing the
 		// same account's session lock one of them out (TODO 18). The lock
 		// tells the other commands so, and keeps a second serve out.
-		serveLock, err := config.LockServe()
+		serveLock, err := paths.LockServe()
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -271,16 +272,16 @@ func main() {
 			log.Println("warning: -plaintext: IMAP and SMTP without TLS, the bridge password in clear on loopback")
 		} else {
 			var created bool
-			if tlsConfig, created, err = config.TLS(so.tlsCert, so.tlsKey, so.tlsClientCA); err != nil {
+			if tlsConfig, created, err = tlscert.TLS(so.tlsCert, so.tlsKey, so.tlsClientCA); err != nil {
 				log.Fatal(err)
 			}
 			if created {
-				certPath, err := config.CertPath()
+				certPath, err := tlscert.CertPath()
 				if err != nil {
 					log.Fatal(err)
 				}
 				log.Printf("Made peroxide's TLS certificate %v, SHA-256 fingerprint %v: have your clients trust it (docs/commands.md)",
-					certPath, config.Fingerprint(tlsConfig.Certificates[0].Certificate[0]))
+					certPath, tlscert.Fingerprint(tlsConfig.Certificates[0].Certificate[0]))
 			}
 		}
 		smtpAddr := so.smtpHost + ":" + so.smtpPort
@@ -308,7 +309,7 @@ func main() {
 	case "download-mailbox":
 		username := inv.args[0]
 		// Before logging in: that spends the refresh token serve holds.
-		if running, err := config.ServeRunning(); err != nil {
+		if running, err := paths.ServeRunning(); err != nil {
 			log.Fatal(err)
 		} else if running {
 			log.Fatal("peroxide serve is running: it downloads the account itself once a client logs in; stop it to run download-mailbox")
@@ -342,13 +343,13 @@ func main() {
 
 		// While serve runs, through its SMTP server: logging in here would
 		// spend the refresh token serve holds.
-		if running, err := config.ServeRunning(); err != nil {
+		if running, err := paths.ServeRunning(); err != nil {
 			log.Fatal(err)
 		} else if running {
 			addr := inv.sendmail.smtpHost + ":" + inv.sendmail.smtpPort
 			certPath := inv.sendmail.tlsCert
 			if certPath == "" && !inv.sendmail.plaintext {
-				if certPath, err = config.CertPath(); err != nil {
+				if certPath, err = tlscert.CertPath(); err != nil {
 					log.Fatal(err)
 				}
 			}

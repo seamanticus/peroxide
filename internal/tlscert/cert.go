@@ -1,4 +1,4 @@
-package config
+package tlscert
 
 import (
 	"crypto/ecdsa"
@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/seamanticus/peroxide/internal/paths"
 )
 
 // serve's own certificate, used when no -tls-cert is given. The certificate
@@ -44,7 +46,7 @@ func CertPath() (string, error) {
 }
 
 func certKeyPath() (string, error) {
-	return Path(certKeyFile)
+	return paths.Path(certKeyFile)
 }
 
 // ServeCertificate returns serve's own certificate and key, creating them

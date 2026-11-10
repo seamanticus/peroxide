@@ -10,7 +10,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/seamanticus/peroxide/internal/config"
+	"github.com/seamanticus/peroxide/internal/paths"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
@@ -214,7 +214,7 @@ func TestPutMessageIdempotent(t *testing.T) {
 // another handle fails with ErrInUse rather than waiting.
 func TestOpenWipesOldSchemaAndRefusesSecondOpener(t *testing.T) {
 	setTestDirs(t, t.TempDir())
-	p, err := config.Path("old.db")
+	p, err := paths.Path("old.db")
 	if err != nil {
 		t.Fatal(err)
 	}

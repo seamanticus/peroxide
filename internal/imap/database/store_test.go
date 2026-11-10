@@ -11,13 +11,13 @@ import (
 
 	"github.com/emersion/go-imap"
 
-	"github.com/seamanticus/peroxide/internal/config"
+	"github.com/seamanticus/peroxide/internal/paths"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
 func storedFiles(t *testing.T) []string {
 	t.Helper()
-	dir, err := config.DataPath("test")
+	dir, err := paths.DataPath("test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestBodyRoundTrip(t *testing.T) {
 	if len(files) != 1 || !strings.HasPrefix(files[0], "2e2e2f612f62.") {
 		t.Fatalf("stored files %v, want one named by the hex of the ID", files)
 	}
-	dir, _ := config.DataPath("test")
+	dir, _ := paths.DataPath("test")
 	raw, err := os.ReadFile(filepath.Join(dir, files[0]))
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func TestBodyFileSwapFails(t *testing.T) {
 	for _, id := range []string{"a", "b"} {
 		putTestBody(t, db, id, []byte("message "+id), BodyInfo{})
 	}
-	dir, _ := config.DataPath("test")
+	dir, _ := paths.DataPath("test")
 	fileOf := func(prefix string) string {
 		for _, f := range storedFiles(t) {
 			if strings.HasPrefix(f, prefix+".") {
@@ -194,7 +194,7 @@ func TestBodyFileSwapFails(t *testing.T) {
 func TestWipeRemovesBodies(t *testing.T) {
 	db, _ := openTestDB(t)
 	putTestBody(t, db, "a", []byte("a"), BodyInfo{})
-	dir, _ := config.DataPath("test")
+	dir, _ := paths.DataPath("test")
 	if err := os.WriteFile(filepath.Join(dir, "tmp-crashed"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
