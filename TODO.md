@@ -561,7 +561,7 @@ certificate per connection (VerifyConnection); handshakes bounded to
 aerc can trust it only process-wide (`SSL_CERT_DIR`); a per-account
 `tls-cert` is aerc_implementation.md section 11.
 
-## 19. SMTP can't send a PGP/MIME message the client encrypted
+## 19. SMTP can't send a PGP/MIME message the client encrypted or signed
 
 **Problem.** A message the client encrypted itself (aerc's encrypt on
 send: `Content-Type: multipart/encrypted;
@@ -588,11 +588,23 @@ SendMail returns.
   ciphertext is encrypted to the recipient, maybe not to the sender, so
   the sent copy may be unreadable to the account. aerc's
   `pgp-self-encrypt` (or equivalent) adds the sender's key.
-- multipart/signed (sign only) goes through today? Check: the signed
-  part is an inline body and the signature an attachment
-  (signature.asc), which may reach the recipient as a separate
-  attachment, breaking the signature.
-- A test in smtp/smtp_test.go with a multipart/encrypted message.
+- multipart/signed (sign only) is sent but the signature breaks. Seen
+  2026-11-10 23:53 (build_release/peroxide_1794306234.log): aerc sent
+  a correct `multipart/signed; micalg=pgp-sha512;
+  protocol="application/pgp-signature"`. SendMail took part 1's text
+  as the draft body, uploaded `signature.asc` as an attachment, and
+  sent package Type 4 (plain text). Proton built a new MIME message,
+  so the detached signature no longer covers the bytes it signed. At
+  the recipient: body right, `.asc` attached, nothing verifies.
+- Encrypted sends fail the same way as on 2026-11-09 (five attempts,
+  2026-11-10 23:33 to 23:39, same log).
+- Both have one cause: SendMail takes apart a message the client has
+  already secured and lets Proton rebuild the MIME. A fix sends the
+  client's MIME unchanged. Naming the nameless part (bridge's parser
+  uses `attachment.bin`) would only make the encrypted send deliver
+  the ciphertext as an attachment, and does nothing for signed mail.
+- Tests in smtp/smtp_test.go with a multipart/encrypted and a
+  multipart/signed message.
 
 ## 20. Building a large message peaks at about 14x its size
 
