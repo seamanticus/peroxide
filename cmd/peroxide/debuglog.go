@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -355,7 +354,7 @@ func serveSMTPDebug(s *smtp.Server, w io.Writer) error {
 	if s.TLSConfig == nil {
 		log.Println("SMTP server listening on", s.Addr)
 	} else {
-		l = tls.NewListener(l, s.TLSConfig)
+		l = newTLSListener(l, s.TLSConfig, "SMTP", log.Default())
 		// Every connection uses TLS, but go-smtp can't tell through the tap.
 		s.TLSConfig = nil
 		s.AllowInsecureAuth = true

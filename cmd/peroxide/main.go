@@ -145,8 +145,12 @@ func listenAndServeSMTP(addr string, debug bool, authManager *auth.Manager, tlsC
 	}
 
 	if s.TLSConfig != nil {
+		l, err := net.Listen("tcp", s.Addr)
+		if err != nil {
+			return fmt.Errorf("listen for SMTP: %w", err)
+		}
 		log.Println("SMTP server listening with TLS on", s.Addr)
-		return s.ListenAndServeTLS()
+		return s.Serve(newTLSListener(l, s.TLSConfig, "SMTP", log.Default()))
 	}
 
 	log.Println("SMTP server listening on", s.Addr)
@@ -172,8 +176,12 @@ func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, even
 	}
 
 	if s.TLSConfig != nil {
+		l, err := net.Listen("tcp", s.Addr)
+		if err != nil {
+			return fmt.Errorf("listen for IMAP: %w", err)
+		}
 		log.Println("IMAP server listening with TLS on", s.Addr)
-		return s.ListenAndServeTLS()
+		return s.Serve(newTLSListener(l, s.TLSConfig, "IMAP", log.Default()))
 	}
 
 	log.Println("IMAP server listening on", s.Addr)
