@@ -141,23 +141,6 @@ func TestHumanVerificationURL(t *testing.T) {
 	}
 }
 
-// TestCaptchaURL checks the challenge URL against the one Proton's web client
-// builds (see Captcha.tsx in ProtonMail/WebClients).
-func TestCaptchaURL(t *testing.T) {
-	hv := &HumanVerification{Methods: []string{CaptchaMethod}, Token: "a token/+="}
-
-	got := hv.CaptchaURL()
-	want := CaptchaEndpoint + "/core/v4/captcha?ForceWebMessaging=1&Token=a+token%2F%2B%3D"
-	if got != want {
-		t.Errorf("CaptchaURL() = %q, want %q", got, want)
-	}
-
-	// The challenge must come from a host that lets a local page embed it.
-	if !strings.HasPrefix(got, "https://") {
-		t.Errorf("CaptchaURL() = %q, want an HTTPS URL", got)
-	}
-}
-
 // TestAuthWithVerification_DoesNotSpendTokenOnAuthInfo guards against sending
 // the single-use challenge token on /auth/info: Proton would consume it there
 // and reject the /auth request with error 12087.

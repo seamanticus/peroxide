@@ -234,7 +234,6 @@ func main() {
 	switch inv.command {
 	case "auth":
 		opts := inv.auth
-		protonmail.CaptchaEndpoint = opts.captchaEndpoint
 		username := inv.args[0]
 
 		if opts.remove {
@@ -267,14 +266,22 @@ func main() {
 			log.Fatal(err)
 		}
 		captchaOpts := captcha.Options{
-			Mode:        mode,
-			ListenAddr:  opts.captchaListen,
-			Timeout:     opts.captchaTimeout,
-			OpenBrowser: !opts.noOpenBrowser,
-			Output:      log.Writer(),
+			Mode:    mode,
+			Timeout: opts.captchaTimeout,
+			Output:  log.Writer(),
+		}
+		if mode != captcha.ModeDisabled {
+			// The terminal itself, not stdin: its read deadline bounds the
+			// wait for Enter, and stdin may be a pipe.
+			tty, err := os.Open("/dev/tty")
+			if err != nil {
+				log.Fatalf("open the terminal for human verification: %v", err)
+			}
+			defer tty.Close()
+			captchaOpts.Input = tty
 		}
 
-		// Make sure Ctrl+C tears down the CAPTCHA server cleanly.
+		// Ctrl+C during the wait for Enter ends it cleanly.
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 

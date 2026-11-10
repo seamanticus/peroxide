@@ -4,14 +4,18 @@
 // asking for a CAPTCHA to be completed before the request can be replayed.
 // peroxide doesn't bypass, solve or weaken that challenge: it points the
 // user's own browser at the Proton-operated verification page, waits for the
-// user to complete it there, and then replays the authentication request with
-// the human verification headers Proton expects.
+// user to press Enter once it is solved, and then replays the authentication
+// request with the human verification headers Proton expects.
 //
-// The flow implemented here mirrors the one used by Proton's own clients, see
-// ProtonMail/go-proton-api (hv.go) and ProtonMail/proton-bridge (internal/hv).
+// Outside Proton's own apps, the verification page itself sends the solved
+// CAPTCHA to Proton (POST /core/v4/verification/captcha/<token>, WebClients
+// commit c5d23c0), so the replay carries the original challenge token and
+// nothing needs to be carried back. proton-bridge's CLI works the same way
+// (internal/frontend/cli, promptHvURL).
 package captcha
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -26,10 +30,10 @@ import (
 type Mode string
 
 const (
-	// ModeBrowser starts the local helper and tries to open a browser on it.
+	// ModeBrowser prints the verification URL and opens a browser on it.
 	ModeBrowser Mode = "browser"
-	// ModeManual starts the local helper but only prints its URL. Use this on
-	// headless machines, together with SSH port forwarding.
+	// ModeManual only prints the verification URL. Use this on headless
+	// machines: the URL works from any device.
 	ModeManual Mode = "manual"
 	// ModeDisabled turns human verification handling off: the original API
 	// error is reported to the user instead.
@@ -50,33 +54,24 @@ func ParseMode(s string) (Mode, error) {
 	}
 }
 
-// Defaults for Options.
-const (
-	DefaultListenAddr = "127.0.0.1:8765"
-	DefaultTimeout    = 10 * time.Minute
-)
+// DefaultTimeout is the default for Options.Timeout.
+const DefaultTimeout = 10 * time.Minute
 
 // Options configures the interactive human verification flow.
 type Options struct {
 	// Mode selects how the user is asked to complete the challenge.
 	Mode Mode
-	// ListenAddr is the address of the local helper server. It should always
-	// be a loopback address: anyone able to reach it can complete the
-	// challenge on the user's behalf.
-	ListenAddr string
 	// Timeout bounds how long we wait for the user.
 	Timeout time.Duration
-	// OpenBrowser tries to launch a browser. Ignored unless Mode is
-	// ModeBrowser.
-	OpenBrowser bool
+	// Input is read for the Enter key. Required unless Mode is ModeDisabled.
+	// It must support read deadlines, which bound the wait: a terminal
+	// opened with os.Open("/dev/tty") or a pipe does, os.Stdin may not.
+	Input *os.File
 	// Output receives the user-facing instructions. Defaults to os.Stderr.
 	Output io.Writer
 
 	// openURL is a test hook standing in for the user's browser.
 	openURL func(url string) error
-	// checkChallenge is a test hook standing in for the preflight request to
-	// Proton. Tests never reach the network.
-	checkChallenge func(ctx context.Context, hv *protonmail.HumanVerification, out io.Writer)
 }
 
 // Errors reported by this package. They are always wrapped with more context,
@@ -85,7 +80,7 @@ var (
 	ErrDisabled          = errors.New("captcha: human verification is required, but CAPTCHA handling is disabled")
 	ErrNoChallenge       = errors.New("captcha: the API response doesn't carry a challenge")
 	ErrUnsupportedMethod = errors.New("captcha: the API doesn't offer the CAPTCHA verification method")
-	ErrListen            = errors.New("captcha: failed to start the local verification server")
+	ErrNoInput           = errors.New("captcha: no terminal to confirm the challenge on")
 	ErrTimeout           = errors.New("captcha: timed out waiting for the challenge to be completed")
 	ErrCanceled          = errors.New("captcha: canceled")
 	ErrRejected          = errors.New("captcha: the challenge was rejected by Proton")
@@ -97,9 +92,6 @@ func (opts Options) withDefaults() (Options, error) {
 	} else if _, err := ParseMode(string(opts.Mode)); err != nil {
 		return opts, err
 	}
-	if opts.ListenAddr == "" {
-		opts.ListenAddr = DefaultListenAddr
-	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = DefaultTimeout
 	}
@@ -109,10 +101,88 @@ func (opts Options) withDefaults() (Options, error) {
 	if opts.openURL == nil {
 		opts.openURL = openURL
 	}
-	if opts.checkChallenge == nil {
-		opts.checkChallenge = preflight
-	}
 	return opts, nil
+}
+
+// verifyURL is Proton's verification page offering the CAPTCHA only, the one
+// method whose proof the page sends to Proton by itself.
+func verifyURL(hv *protonmail.HumanVerification) string {
+	return (&protonmail.HumanVerification{
+		Methods: []string{protonmail.CaptchaMethod},
+		Token:   hv.Token,
+	}).URL()
+}
+
+// Solve points the user at Proton's verification page and waits until they
+// press Enter, which they do once the page says the challenge is solved.
+//
+// It cannot tell a solved challenge from an abandoned one: Proton answers the
+// replayed request, see Authenticate.
+func Solve(ctx context.Context, hv *protonmail.HumanVerification, opts Options) error {
+	opts, err := opts.withDefaults()
+	if err != nil {
+		return err
+	}
+	if opts.Mode == ModeDisabled {
+		return ErrDisabled
+	}
+	if hv == nil || hv.Token == "" {
+		return ErrNoChallenge
+	}
+	if !hv.HasMethod(protonmail.CaptchaMethod) {
+		return fmt.Errorf("%w: it offered %v", ErrUnsupportedMethod, hv.Methods)
+	}
+	if opts.Input == nil {
+		return ErrNoInput
+	}
+
+	u := verifyURL(hv)
+	fmt.Fprintf(opts.Output, "\nProton requires human verification. Solve the CAPTCHA on this page,\n"+
+		"in any browser on any device:\n\n%v\n\n", u)
+	if opts.Mode == ModeBrowser {
+		if err := opts.openURL(u); err != nil {
+			fmt.Fprintf(opts.Output, "warning: failed to open a browser (%v)\nOpen the URL above manually.\n\n", err)
+		}
+	}
+	fmt.Fprintf(opts.Output, "Press Enter here once the page says the verification succeeded "+
+		"(up to %v, Ctrl+C to cancel): ", opts.Timeout)
+
+	err = waitForEnter(ctx, opts.Input, opts.Timeout)
+	fmt.Fprintln(opts.Output)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(opts.Output, "Continuing authentication...\n")
+	return nil
+}
+
+// waitForEnter reads one line from in. The read deadline bounds it by
+// timeout, and is moved to now when ctx is done, so no read outlives the
+// call.
+func waitForEnter(ctx context.Context, in *os.File, timeout time.Duration) error {
+	if err := in.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("%w: can't bound the wait: %v", ErrNoInput, err)
+	}
+	stop := context.AfterFunc(ctx, func() {
+		// An error leaves the timeout deadline in place, which still ends
+		// the read.
+		_ = in.SetReadDeadline(time.Now())
+	})
+	defer stop()
+
+	_, err := bufio.NewReader(in).ReadString('\n')
+	switch {
+	case err == nil:
+		return nil
+	case ctx.Err() != nil:
+		return fmt.Errorf("%w: %v", ErrCanceled, ctx.Err())
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		return fmt.Errorf("%w after %v", ErrTimeout, timeout)
+	case errors.Is(err, io.EOF):
+		return fmt.Errorf("%w: the terminal closed its input", ErrCanceled)
+	default:
+		return fmt.Errorf("captcha: read the Enter key: %w", err)
+	}
 }
 
 // Client is the subset of *protonmail.Client used to authenticate.
@@ -125,8 +195,9 @@ type Client interface {
 //
 // When Proton asks for human verification, the user is directed to Proton's
 // own verification page; once they report having completed it, the
-// authentication request is replayed exactly once with the human verification
-// headers. Any further challenge is reported as an error instead of looping.
+// authentication request is replayed exactly once with the original challenge
+// token, which Proton now holds the page's proof for. Any further challenge is
+// reported as an error instead of looping.
 func Authenticate(ctx context.Context, c Client, username, password string, opts Options) (*protonmail.Auth, error) {
 	opts, err := opts.withDefaults()
 	if err != nil {
@@ -151,22 +222,10 @@ func Authenticate(ctx context.Context, c Client, username, password string, opts
 		return nil, fmt.Errorf("%w: %v", ErrDisabled, err)
 	}
 
-	solved, err := Solve(ctx, hv, opts)
-	if err != nil {
+	if err := Solve(ctx, hv, opts); err != nil {
 		return nil, err
 	}
 	hv.SolvedMethod = protonmail.CaptchaMethod
-	if solved != "" {
-		// The challenge result, "<challenge token>:<response>", is what the
-		// API validates.
-		fmt.Fprintf(opts.Output, "Challenge result received from Proton's page (%v bytes).\n", len(solved))
-		hv.Token = solved
-	} else {
-		// The user confirmed without the challenge running locally: replay the
-		// bare token and let the API decide. It usually says no.
-		fmt.Fprintf(opts.Output, "warning: no challenge result was captured, only the bare challenge token can be replayed.\n"+
-			"This happens when the challenge didn't load in peroxide's page and the fallback button was used.\n")
-	}
 
 	auth, err = c.AuthWithVerification(username, password, nil, hv)
 	if err == nil {

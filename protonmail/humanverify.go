@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 )
@@ -28,27 +27,6 @@ const CaptchaMethod = "captcha"
 // solved. The challenge itself is served, rendered and validated by Proton:
 // peroxide only points the user's browser at it.
 var HumanVerificationURL = "https://verify.proton.me/"
-
-// CaptchaEndpoint is the API host serving the CAPTCHA challenge itself.
-//
-// It must be a host that serves both /core/v4/captcha and the widget's assets
-// under /captcha/v1/assets/. Several Proton hosts serve the first but not the
-// second, on which the challenge loads as an empty box.
-//
-// The challenge is served, rendered and scored by Proton throughout.
-var CaptchaEndpoint = "https://mail-api.proton.me"
-
-// CaptchaURL returns the Proton-operated CAPTCHA challenge for this token.
-//
-// On success the page posts a {"type": "pm_captcha", "token": ...} message to
-// its embedder, where the token is the value the API expects back. See
-// Captcha.tsx in ProtonMail/WebClients.
-func (hv *HumanVerification) CaptchaURL() string {
-	v := make(url.Values)
-	v.Set("Token", hv.Token)
-	v.Set("ForceWebMessaging", "1")
-	return CaptchaEndpoint + "/core/v4/captcha?" + v.Encode()
-}
 
 // ErrNoHumanVerification is returned when an error doesn't carry a human
 // verification challenge.

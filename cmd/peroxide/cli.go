@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/seamanticus/peroxide/captcha"
-	"github.com/seamanticus/peroxide/protonmail"
 )
 
 // usage is the whole help: `peroxide help`, `peroxide -h`, `peroxide
@@ -29,11 +28,7 @@ Commands:
       as their password. Asks again if the username is stored already.
         -remove                  delete the stored credentials and exit
         -captcha-mode MODE       browser, manual or disabled (browser)
-        -captcha-listen ADDR     address of the CAPTCHA helper (127.0.0.1:8765)
         -captcha-timeout D       how long to wait for the challenge (10m)
-        -no-open-browser         print the CAPTCHA URL, don't open it
-        -captcha-endpoint URL    host serving the challenge
-                                 (https://mail-api.proton.me)
 
   serve [options]
       Run the IMAP and SMTP servers, over TLS (implicit, not STARTTLS)
@@ -101,12 +96,9 @@ type globalOptions struct {
 }
 
 type authOptions struct {
-	remove          bool
-	captchaMode     string
-	captchaListen   string
-	captchaTimeout  time.Duration
-	noOpenBrowser   bool
-	captchaEndpoint string
+	remove         bool
+	captchaMode    string
+	captchaTimeout time.Duration
 }
 
 type serveOptions struct {
@@ -165,10 +157,7 @@ func commandFlags(command string, inv *invocation) (*flag.FlagSet, bool) {
 		a := &inv.auth
 		fs.BoolVar(&a.remove, "remove", false, "")
 		fs.StringVar(&a.captchaMode, "captcha-mode", string(captcha.ModeBrowser), "")
-		fs.StringVar(&a.captchaListen, "captcha-listen", captcha.DefaultListenAddr, "")
 		fs.DurationVar(&a.captchaTimeout, "captcha-timeout", captcha.DefaultTimeout, "")
-		fs.BoolVar(&a.noOpenBrowser, "no-open-browser", false, "")
-		fs.StringVar(&a.captchaEndpoint, "captcha-endpoint", protonmail.CaptchaEndpoint, "")
 	case "serve":
 		s := &inv.serve
 		fs.StringVar(&s.imapHost, "imap-host", "127.0.0.1", "")
