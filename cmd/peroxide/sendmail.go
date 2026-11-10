@@ -58,11 +58,11 @@ func sendOver(conn net.Conn, addr string, pinned *tls.Config, username, password
 		return fmt.Errorf("cannot read the message's From: %w", err)
 	}
 
-	hint := "is serve using TLS (-tls-cert)? give sendmail the same -tls-cert"
+	hint := "is serve using TLS? then don't give sendmail -plaintext"
 	if pinned != nil {
 		// The handshake runs on the greeting's first read, in its deadline.
 		conn = tls.Client(conn, pinned)
-		hint = "is serve not using TLS, or asking for a client certificate (-tls-client-ca)? sendmail's -tls-cert must be serve's"
+		hint = "is serve running with -plaintext, or asking for a client certificate (-tls-client-ca)? give sendmail the same -plaintext, or serve's -tls-cert"
 	}
 	c := smtp.NewClient(conn)
 	defer c.Close()
@@ -103,9 +103,9 @@ func sendOver(conn net.Conn, addr string, pinned *tls.Config, username, password
 }
 
 // pinnedTLS is a client configuration trusting only the certificate in the
-// PEM file certPath (serve's -tls-cert, its first certificate, the one serve
-// presents), compared byte for byte: serve's certificate is often
-// self-signed, for a name other than the loopback address dialled.
+// PEM file certPath (serve's own, or its -tls-cert: the first certificate,
+// the one serve presents), compared byte for byte: serve's certificate is
+// often self-signed, for a name other than the loopback address dialled.
 func pinnedTLS(certPath string) (*tls.Config, error) {
 	data, err := os.ReadFile(certPath)
 	if err != nil {
@@ -127,15 +127,18 @@ func pinnedTLS(certPath string) (*tls.Config, error) {
 		return nil, fmt.Errorf("cannot read serve's certificate: %w", err)
 	}
 	return &tls.Config{
-		// Verification is VerifyPeerCertificate's pin, not the system's
-		// roots and a host name.
+		// Verification is VerifyConnection's pin, not the system's roots and
+		// a host name. VerifyConnection, unlike VerifyPeerCertificate, also
+		// runs on a resumed session.
 		InsecureSkipVerify: true,
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 || !bytes.Equal(rawCerts[0], want) {
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 || !bytes.Equal(cs.PeerCertificates[0].Raw, want) {
 				return errors.New("the SMTP server's certificate is not serve's")
 			}
 			return nil
 		},
+		// serve's SMTP listener accepts only this protocol (ALPACA).
+		NextProtos: []string{"smtp"},
 		MinVersion: tls.VersionTLS12,
 	}, nil
 }

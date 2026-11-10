@@ -355,6 +355,19 @@ func main() {
 				fmt.Printf("- %v\n", u)
 			}
 		}
+
+		certPath, err := config.CertPath()
+		if err != nil {
+			log.Fatal(err)
+		}
+		switch fp, err := config.CertFileFingerprint(certPath); {
+		case errors.Is(err, os.ErrNotExist):
+			fmt.Printf("TLS certificate: none yet, serve makes %v\n", certPath)
+		case err != nil:
+			log.Fatal(err)
+		default:
+			fmt.Printf("TLS certificate: %v\n  SHA-256 %v\n", certPath, fp)
+		}
 	case "serve":
 		// One process serves both protocols with one auth.Manager: Proton's
 		// refresh tokens are single use, so two processes refreshing the
@@ -365,9 +378,22 @@ func main() {
 			log.Fatal(err)
 		}
 		so := inv.serve
-		tlsConfig, err := config.TLS(so.tlsCert, so.tlsKey, so.tlsClientCA)
-		if err != nil {
-			log.Fatal(err)
+		var tlsConfig *tls.Config
+		if so.plaintext {
+			log.Println("warning: -plaintext: IMAP and SMTP without TLS, the bridge password in clear on loopback")
+		} else {
+			var created bool
+			if tlsConfig, created, err = config.TLS(so.tlsCert, so.tlsKey, so.tlsClientCA); err != nil {
+				log.Fatal(err)
+			}
+			if created {
+				certPath, err := config.CertPath()
+				if err != nil {
+					log.Fatal(err)
+				}
+				log.Printf("Made peroxide's TLS certificate %v, SHA-256 fingerprint %v: have your clients trust it (docs/commands.md)",
+					certPath, config.Fingerprint(tlsConfig.Certificates[0].Certificate[0]))
+			}
 		}
 		smtpAddr := so.smtpHost + ":" + so.smtpPort
 		imapAddr := so.imapHost + ":" + so.imapPort
@@ -432,7 +458,13 @@ func main() {
 			log.Fatal(err)
 		} else if running {
 			addr := inv.sendmail.smtpHost + ":" + inv.sendmail.smtpPort
-			if err := sendThroughServe(addr, inv.sendmail.tlsCert, username, bridgePassword, rcpt, msg); err != nil {
+			certPath := inv.sendmail.tlsCert
+			if certPath == "" && !inv.sendmail.plaintext {
+				if certPath, err = config.CertPath(); err != nil {
+					log.Fatal(err)
+				}
+			}
+			if err := sendThroughServe(addr, certPath, username, bridgePassword, rcpt, msg); err != nil {
 				log.Fatal(err)
 			}
 			return

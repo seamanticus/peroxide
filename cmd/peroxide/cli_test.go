@@ -68,6 +68,18 @@ func TestParseArgs(t *testing.T) {
 		{[]string{"help"}, "help", nil},
 		{[]string{"-h"}, "help", nil},
 		{[]string{"serve", "-h"}, "help", nil},
+
+		// -plaintext: loopback IP literals only, never with a TLS option.
+		{[]string{"serve", "-plaintext"}, "", func(i *invocation) bool { return i.serve.plaintext }},
+		{[]string{"serve", "-plaintext", "-imap-host", "::1", "-smtp-host", "127.0.0.2"}, "", func(i *invocation) bool { return i.serve.plaintext }},
+		{[]string{"serve", "-plaintext", "-imap-host", "0.0.0.0"}, "-plaintext is for loopback addresses only, and -imap-host is \"0.0.0.0\"", nil},
+		{[]string{"serve", "-plaintext", "-smtp-host", "localhost"}, "and -smtp-host is \"localhost\"", nil},
+		{[]string{"serve", "-plaintext", "-disable-imap", "-imap-host", "0.0.0.0"}, "", func(i *invocation) bool { return i.serve.plaintext }},
+		{[]string{"serve", "-plaintext", "-tls-cert", "c", "-tls-key", "k"}, "-plaintext turns TLS off", nil},
+		{[]string{"serve", "-plaintext", "-tls-client-ca", "ca"}, "-plaintext turns TLS off", nil},
+		{[]string{"sendmail", "-plaintext", "bob", "--", "a@x.org"}, "", func(i *invocation) bool { return i.sendmail.plaintext }},
+		{[]string{"sendmail", "-plaintext", "-smtp-host", "192.0.2.1", "bob", "--", "a@x.org"}, "loopback addresses only", nil},
+		{[]string{"sendmail", "-plaintext", "-tls-cert", "c", "bob", "--", "a@x.org"}, "-plaintext turns TLS off", nil},
 		{[]string{"sendmail", "bob", "--", "-h"}, "help", nil},
 	} {
 		inv, err := parseArgs(tc.args)

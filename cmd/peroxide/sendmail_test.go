@@ -101,7 +101,11 @@ func selfSigned(t *testing.T) tls.Certificate {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv, Leaf: leaf}
 }
 
 const relayMessage = "From: Bob <bob@example.org>\r\nTo: carol@example.org\r\nSubject: hi\r\n\r\nhello\r\n"
@@ -204,7 +208,7 @@ func TestSendThroughServeNoGreeting(t *testing.T) {
 				go io.Copy(io.Discard, server)
 				start := time.Now()
 				err := sendOver(client, "serve", tc.pinned, "bob", "pw", []string{"carol@example.org"}, []byte(relayMessage))
-				if err == nil || !strings.Contains(err.Error(), "didn't greet") || !strings.Contains(err.Error(), "-tls-cert") {
+				if err == nil || !strings.Contains(err.Error(), "didn't greet") || !strings.Contains(err.Error(), "-plaintext") {
 					t.Errorf("sendOver() = %v, want no greeting, with the TLS hint", err)
 				}
 				if d := time.Since(start); d != greetTimeout {
@@ -274,7 +278,7 @@ func TestPinnedTLSKeyBeforeCert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pinnedTLS() = %v", err)
 	}
-	if err := pinned.VerifyPeerCertificate(cert.Certificate, nil); err != nil {
+	if err := pinned.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert.Leaf}}); err != nil {
 		t.Errorf("serve's certificate refused: %v", err)
 	}
 

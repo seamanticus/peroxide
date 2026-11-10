@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	rtdebug "runtime/debug"
 	"strings"
 	"time"
@@ -35,22 +36,26 @@ Commands:
                                  (https://mail-api.proton.me)
 
   serve [options]
-      Run the IMAP and SMTP servers. One serve at a time.
+      Run the IMAP and SMTP servers, over TLS (implicit, not STARTTLS)
+      with peroxide's own certificate unless told otherwise. One serve
+      at a time.
         -imap-host H, -imap-port P   where IMAP listens (127.0.0.1:1143)
         -smtp-host H, -smtp-port P   where SMTP listens (127.0.0.1:1025)
         -disable-imap                don't start the IMAP server
         -disable-smtp                don't start the SMTP server
         -show-all-mail=false         leave All Mail out of LIST
-        -tls-cert F, -tls-key F      serve over TLS with this certificate
-        -tls-client-ca F             with TLS, require client certificates
-                                     signed by this CA
+        -tls-cert F, -tls-key F      use this certificate instead
+        -tls-client-ca F             require client certificates signed
+                                     by this CA
+        -plaintext                   no TLS; loopback addresses only
 
   sendmail [options] <username> -- <recipient>...
       Send the message read from stdin, as sendmail(1) does, for
       git send-email. While serve runs, sends through it: give it the
-      same -smtp-* and -tls-cert options as serve.
+      same -smtp-*, -tls-cert and -plaintext options as serve.
         -smtp-host H, -smtp-port P   serve's SMTP (127.0.0.1:1025)
-        -tls-cert F                  serve's certificate, trusted alone
+        -tls-cert F                  serve's certificate, if not its own
+        -plaintext                   serve runs with -plaintext
         -i                           accepted after --, changes nothing
 
   download-mailbox [-discard-local-copy] <username>
@@ -60,7 +65,7 @@ Commands:
                                  again (clients refetch every mailbox)
 
   status
-      List the accounts logged in.
+      List the accounts logged in, and serve's own certificate.
 
   help
       Print this page.
@@ -76,7 +81,7 @@ Options for testing against Proton, any command:
 Environment:
   PEROXIDE_BRIDGE_PASS   the bridge password, instead of asking for it
 
-Files: $XDG_CONFIG_HOME/peroxide (credentials, lock),
+Files: $XDG_CONFIG_HOME/peroxide (credentials, lock, certificate),
        $XDG_DATA_HOME/peroxide (local copy of the mail)
 
 Manual: docs/ in the source, https://github.com/seamanticus/peroxide
@@ -111,11 +116,13 @@ type serveOptions struct {
 	showAllMail              bool
 	tlsCert, tlsKey          string
 	tlsClientCA              string
+	plaintext                bool
 }
 
 type sendmailOptions struct {
 	smtpHost, smtpPort string
 	tlsCert            string
+	plaintext          bool
 	recipients         []string
 }
 
@@ -174,11 +181,13 @@ func commandFlags(command string, inv *invocation) (*flag.FlagSet, bool) {
 		fs.StringVar(&s.tlsCert, "tls-cert", "", "")
 		fs.StringVar(&s.tlsKey, "tls-key", "", "")
 		fs.StringVar(&s.tlsClientCA, "tls-client-ca", "", "")
+		fs.BoolVar(&s.plaintext, "plaintext", false, "")
 	case "sendmail":
 		s := &inv.sendmail
 		fs.StringVar(&s.smtpHost, "smtp-host", "127.0.0.1", "")
 		fs.StringVar(&s.smtpPort, "smtp-port", "1025", "")
 		fs.StringVar(&s.tlsCert, "tls-cert", "", "")
+		fs.BoolVar(&s.plaintext, "plaintext", false, "")
 	case "download-mailbox":
 		fs.BoolVar(&inv.discard, "discard-local-copy", false, "")
 	case "status", "help":
@@ -195,6 +204,16 @@ var commands = []string{"auth", "serve", "sendmail", "download-mailbox", "status
 func undefinedFlag(err error) (string, bool) {
 	name, ok := strings.CutPrefix(err.Error(), "flag provided but not defined: ")
 	return strings.TrimLeft(name, "-"), ok
+}
+
+// plaintextHost refuses -plaintext unless host, the value of -option, is a
+// loopback address: without TLS the bridge password crosses the network in
+// clear. Only IP literals count: a name may resolve to anything.
+func plaintextHost(option, host string) error {
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("-plaintext is for loopback addresses only, and -%v is %q: use TLS, or -%v 127.0.0.1", option, host, option)
 }
 
 // parseArgs parses peroxide's command line, args without the program's name.
@@ -254,6 +273,21 @@ func parseArgs(args []string) (*invocation, error) {
 		if len(inv.args) != 0 {
 			return nil, fmt.Errorf("peroxide %v takes no arguments, got %q (options go before them; see 'peroxide help')", inv.command, inv.args)
 		}
+		if s := inv.serve; inv.command == "serve" && s.plaintext {
+			if s.tlsCert != "" || s.tlsKey != "" || s.tlsClientCA != "" {
+				return nil, errors.New("peroxide serve: -plaintext turns TLS off; it can't go with -tls-cert, -tls-key or -tls-client-ca")
+			}
+			if !s.disableIMAP {
+				if err := plaintextHost("imap-host", s.imapHost); err != nil {
+					return nil, err
+				}
+			}
+			if !s.disableSMTP {
+				if err := plaintextHost("smtp-host", s.smtpHost); err != nil {
+					return nil, err
+				}
+			}
+		}
 	case "auth":
 		if len(inv.args) != 1 {
 			return nil, wrongArgs("auth [options] <username>")
@@ -263,6 +297,14 @@ func parseArgs(args []string) (*invocation, error) {
 			return nil, wrongArgs("download-mailbox [-discard-local-copy] <username>")
 		}
 	case "sendmail":
+		if s := inv.sendmail; s.plaintext {
+			if s.tlsCert != "" {
+				return nil, errors.New("peroxide sendmail: -plaintext turns TLS off; it can't go with -tls-cert")
+			}
+			if err := plaintextHost("smtp-host", s.smtpHost); err != nil {
+				return nil, err
+			}
+		}
 		if len(inv.args) < 2 || inv.args[1] != "--" {
 			return nil, wrongArgs("sendmail [options] <username> -- <recipient>...")
 		}

@@ -9,43 +9,46 @@ import (
 )
 
 // TLS builds the server's TLS configuration from serve's -tls-cert, -tls-key
-// and -tls-client-ca, nil when none is given. Any of them asks for TLS, so a
-// set that can't make it is an error, never a fallback to plain text.
-func TLS(certPath string, keyPath string, clientCAPath string) (*tls.Config, error) {
-	if certPath == "" && keyPath == "" && clientCAPath == "" {
-		return nil, nil
-	}
+// and -tls-client-ca. Without -tls-cert and -tls-key it uses serve's own
+// certificate (ServeCertificate); created says it was made just now. A set
+// that can't make a configuration is an error: there is no fallback to plain
+// text, which only serve's -plaintext asks for.
+func TLS(certPath string, keyPath string, clientCAPath string) (cfg *tls.Config, created bool, err error) {
+	var cert tls.Certificate
 	switch {
 	case certPath == "" && keyPath == "":
-		return nil, fmt.Errorf("-tls-client-ca needs -tls-cert and -tls-key: client certificates are checked over TLS")
+		if cert, created, err = ServeCertificate(); err != nil {
+			return nil, false, err
+		}
 	case keyPath == "":
-		return nil, fmt.Errorf("-tls-cert needs -tls-key, the certificate's private key")
+		return nil, false, fmt.Errorf("-tls-cert needs -tls-key, the certificate's private key")
 	case certPath == "":
-		return nil, fmt.Errorf("-tls-key needs -tls-cert, the certificate it is the key of")
-	}
-
-	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot load -tls-cert %v and -tls-key %v: %w", certPath, keyPath, err)
+		return nil, false, fmt.Errorf("-tls-key needs -tls-cert, the certificate it is the key of")
+	default:
+		if cert, err = tls.LoadX509KeyPair(certPath, keyPath); err != nil {
+			return nil, false, fmt.Errorf("cannot load -tls-cert %v and -tls-key %v: %w", certPath, keyPath, err)
+		}
 	}
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
+		// Go's default today, stated so that it stays.
+		MinVersion: tls.VersionTLS12,
 	}
 
 	if clientCAPath != "" {
 		data, err := os.ReadFile(clientCAPath)
 		if err != nil {
-			return nil, fmt.Errorf("cannot read -tls-client-ca: %w", err)
+			return nil, false, fmt.Errorf("cannot read -tls-client-ca: %w", err)
 		}
 		pool, err := certPool(data)
 		if err != nil {
-			return nil, fmt.Errorf("-tls-client-ca %v: %w", clientCAPath, err)
+			return nil, false, fmt.Errorf("-tls-client-ca %v: %w", clientCAPath, err)
 		}
 		tlsConfig.ClientCAs = pool
 		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 
-	return tlsConfig, nil
+	return tlsConfig, created, nil
 }
 
 // certPool reads every PEM certificate of data. AppendCertsFromPEM skips what

@@ -168,3 +168,21 @@ func Fingerprint(der []byte) string {
 	}
 	return strings.Join(hex, ":")
 }
+
+// CertFileFingerprint is the Fingerprint of the first certificate in the PEM
+// file p; an error wrapping os.ErrNotExist when there is no file.
+func CertFileFingerprint(p string) (string, error) {
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return "", err
+	}
+	for rest := data; ; {
+		var block *pem.Block
+		if block, rest = pem.Decode(rest); block == nil {
+			return "", fmt.Errorf("%v holds no PEM certificate", p)
+		}
+		if block.Type == "CERTIFICATE" {
+			return Fingerprint(block.Bytes), nil
+		}
+	}
+}
