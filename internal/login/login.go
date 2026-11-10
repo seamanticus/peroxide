@@ -6,6 +6,7 @@ package login
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -165,7 +166,7 @@ func confirm(out io.Writer, prompt string) bool {
 // ANSI styles (SGR parameters) for the dialogue.
 const (
 	headingStyle = "1;36" // bold cyan
-	valueStyle   = "1"    // bold
+	valueStyle   = "1;33" // bold yellow
 )
 
 // colourEnv reports whether the environment allows colours: NO_COLOR
@@ -184,6 +185,26 @@ func colourEnv() bool {
 func colour(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	return ok && colourEnv() && term.IsTerminal(int(f.Fd()))
+}
+
+// copyToClipboard asks the terminal tty to put s on the clipboard, with the
+// OSC 52 escape sequence, and reports whether it was sent. Terminals that
+// don't support it ignore it; over SSH it reaches the local terminal. Only a
+// character device gets it, never a pipe or a file, and not TERM=dumb. Stat,
+// not Fd: Fd would put tty in blocking mode and break its read deadline.
+func copyToClipboard(tty *os.File, s string) bool {
+	if tty == nil {
+		return false
+	}
+	fi, err := tty.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	if t := os.Getenv("TERM"); t == "" || t == "dumb" {
+		return false
+	}
+	_, err = fmt.Fprintf(tty, "\x1b]52;c;%v\a", base64.StdEncoding.EncodeToString([]byte(s)))
+	return err == nil
 }
 
 // paint wraps s in the ANSI style when on.

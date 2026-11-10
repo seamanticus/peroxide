@@ -139,8 +139,12 @@ func Solve(ctx context.Context, hv *protonmail.HumanVerification, opts Options) 
 
 	u := verifyURL(hv)
 	style := colour(opts.Output)
-	fmt.Fprintf(opts.Output, "\n%v\nSolve it on this page, in any browser on any device:\n\n%v\n",
-		paint(style, headingStyle, "Proton requires human verification (CAPTCHA)."), box(style, u))
+	fmt.Fprintf(opts.Output, "\n%v\nSolve it on this page, in any browser on any device:\n",
+		paint(style, headingStyle, "Proton requires human verification (CAPTCHA)."))
+	if copyToClipboard(opts.Input, u) {
+		fmt.Fprintf(opts.Output, "(copied to the clipboard, if your terminal allows it)\n")
+	}
+	fmt.Fprintf(opts.Output, "\n%v", box(style, u))
 	if opts.Mode == ModeBrowser {
 		if err := opts.openURL(u); err != nil {
 			fmt.Fprintf(opts.Output, "warning: failed to open a browser (%v)\nOpen the URL above manually.\n\n", err)

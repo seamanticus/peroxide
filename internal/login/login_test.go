@@ -17,7 +17,7 @@ func TestBox(t *testing.T) {
 
 	// Colour wraps the text only: the frame keeps its width.
 	got := box(true, "some text")
-	if want := "| \x1b[1msome text\x1b[0m |\n"; !strings.Contains(got, want) {
+	if want := "| \x1b[1;33msome text\x1b[0m |\n"; !strings.Contains(got, want) {
 		t.Errorf("box(true) = %q, want a line %q", got, want)
 	}
 	if !strings.HasPrefix(got, "+-----------+\n") {
@@ -85,5 +85,60 @@ func TestSolve_PlainOutputWithoutTerminal(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "| "+wantVerifyURL+" |\n") {
 		t.Errorf("the verification URL is not boxed on one line:\n%v", out.String())
+	}
+	// The input is a pipe: no clipboard sequence, so no claim of a copy.
+	if strings.Contains(out.String(), "clipboard") {
+		t.Errorf("a copy to the clipboard was reported without a terminal:\n%v", out.String())
+	}
+}
+
+// TestCopyToClipboard checks that the OSC 52 sequence goes to character
+// devices only, and never with TERM=dumb. /dev/null is a character device
+// that accepts every write, standing in for the terminal.
+func TestCopyToClipboard(t *testing.T) {
+	t.Setenv("TERM", "xterm")
+
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devNull.Close()
+	if !copyToClipboard(devNull, "x") {
+		t.Error("copyToClipboard(character device) = false")
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	if copyToClipboard(w, "x") {
+		t.Error("copyToClipboard(pipe) = true")
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if copyToClipboard(f, "x") {
+		t.Error("copyToClipboard(regular file) = true")
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() != 0 {
+		t.Errorf("the regular file got %v bytes, want none", fi.Size())
+	}
+
+	if copyToClipboard(nil, "x") {
+		t.Error("copyToClipboard(nil) = true")
+	}
+
+	t.Setenv("TERM", "dumb")
+	if copyToClipboard(devNull, "x") {
+		t.Error("copyToClipboard with TERM=dumb = true")
 	}
 }
