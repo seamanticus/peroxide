@@ -33,7 +33,8 @@ which the go command lets no other module import.
 | `internal/imap` | The IMAP backend: mailboxes, FETCH, STORE, COPY, MOVE, EXPUNGE |
 | `internal/imap/database` | The local bolt database of message metadata, per account |
 | `internal/smtp` | The SMTP backend: turns a submitted message into a Proton send |
-| `internal/config` | File locations and the TLS configuration |
+| `internal/paths` | File locations (XDG), the serve lock, the Linux-only build guard |
+| `internal/tlscert` | serve's own TLS certificate and the TLS configuration |
 
 The IMAP and SMTP protocol work (parsing commands, writing responses) is
 done by Simon Ser's libraries, `github.com/emersion/go-imap` (v1) and
