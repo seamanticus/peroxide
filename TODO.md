@@ -561,7 +561,7 @@ certificate per connection (VerifyConnection); handshakes bounded to
 aerc can trust it only process-wide (`SSL_CERT_DIR`); a per-account
 `tls-cert` is aerc_implementation.md section 11.
 
-## 19. SMTP can't send a PGP/MIME message the client encrypted or signed
+## 19. (done: client-signed and client-encrypted PGP/MIME sent whole, signed-only re-signed by the address key; 7ca3a73)
 
 **Problem.** A message the client encrypted itself (aerc's encrypt on
 send: `Content-Type: multipart/encrypted;
@@ -605,6 +605,34 @@ SendMail returns.
   the ciphertext as an attachment, and does nothing for signed mail.
 - Tests in smtp/smtp_test.go with a multipart/encrypted and a
   multipart/signed message.
+
+**Outcome (2026-11-11, smtp/secured.go; docs/smtp.md "Mail your client
+signed or encrypted").** Such a message is no longer taken apart.
+Tried live with aerc to an external address
+(build_release/peroxide_1794340423.log, peroxide_1794341235.log):
+
+- Encrypted (signed inside or not): the client's key packets as each
+  recipient's BodyKeyPacket, its data packet as the body, package
+  PGPMIME (16). Accepted with several key packets; the recipient
+  decrypts it and aerc finds the inner signature Authentic.
+- Signed only: Proton can't deliver it unchanged. ClearMIME (32) with
+  only the client's signature: `2001 Invalid or missing message
+  signature`. With the address key's signature added beside it:
+  accepted, but `signature.asc` held one fresh signature by the address
+  key and the client's was gone (the received message's source). So the
+  signed part is sent re-signed by the address key alone, byte for
+  byte; the docs give the alternatives (encrypt too, or sign with the
+  Proton key in the client).
+
+**Left open.**
+
+1. A recipient with a Proton key (internal scheme) is refused with an
+   error: it would need a key packet to its Proton key, which the
+   client's ciphertext has only if the client encrypted to that key.
+2. The Sent copy is the client's message as text inside the draft's
+   multipart/mixed: readable, but its PGP/MIME isn't. For an
+   encrypted one it is the ciphertext (aerc's `pgp-self-encrypt` makes
+   it readable to the sender).
 
 ## 20. Building a large message peaks at about 14x its size
 

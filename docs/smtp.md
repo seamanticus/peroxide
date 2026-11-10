@@ -74,9 +74,74 @@ error (the text is peroxide's or Proton's message). A failure after
 step 4 leaves the draft in Drafts: delete it, or open it in Proton's
 web app and send it from there.
 
+### Mail your client signed or encrypted (PGP/MIME)
+
+A message your client already secured with OpenPGP, as aerc does with
+`:sign` and `:encrypt` (`s` and `x` on the review screen), is a
+`multipart/signed` (protocol `application/pgp-signature`) or
+`multipart/encrypted` (protocol `application/pgp-encrypted`) message,
+RFC 3156. Taking it apart, as steps 5 and 6 do, would break it, so
+peroxide sends it whole instead (`internal/smtp/secured.go`). Steps 1
+to 4 are the same; the draft then holds your client's message as it
+came, as text, and that is what **Sent** shows. Only recipients without
+a Proton key are supported for now: a recipient with one makes the send
+fail, naming them.
+
+- **Encrypted (and signed inside, or not):** your client's ciphertext
+  goes to Proton as a PGP/MIME package (scheme 16): its key packets, one
+  per key your client encrypted to, and its data packet, both as your
+  client wrote them. Proton reassembles them into the
+  `multipart/encrypted` message your client built. peroxide never sees
+  the plaintext and needs neither the recipient's key nor the session
+  key. The recipient decrypts it, and a signature inside verifies by
+  your own key, the one your client signed with.
+- **Signed only:** the recipient gets a valid PGP/MIME signature, but
+  by your **Proton address key**, not the key your client signed with.
+  The signed part reaches them byte for byte, so the body and its
+  headers are what your client sent.
+
+#### Why a signed-only message loses your signature
+
+This is how Proton's send API works, not something peroxide can work
+around. The only way to have Proton deliver a `multipart/signed`
+message to an external recipient is its clear-signed MIME package
+(ClearMIME, scheme 32): the client hands over the signed part with a
+signature, and Proton builds the message, writing `signature.asc`
+itself. Seen on 2026-11-11:
+
+- A ClearMIME body signed only by your client's key is refused:
+  `2001 Invalid or missing message signature`. Proton checks the
+  signature against your address key.
+- With the address key's signature added beside your client's, Proton
+  accepts it but delivers only a signature of its own by the address
+  key, made afresh. Your client's signature is dropped.
+
+There is no package that sends a client's MIME unchanged and unencrypted.
+So peroxide doesn't send your client's signature at all: it signs the
+signed part with your address key, as Proton's own "Sign external
+messages" does, and Proton delivers that.
+
+The recipient checks that signature against your Proton public key
+(Proton publishes it for lookup, and the web app's
+**Settings > Encryption and keys** exports it). A client that only knows
+your own key shows it as `Unknown` for the address key's ID.
+
+To have the recipient see a signature by a key you control:
+
+- **Encrypt as well as sign** (aerc: `x` and `s`). The ciphertext isn't
+  opened by Proton, so the signature inside is your client's, untouched.
+  This needs the recipient's public key in your keyring.
+- **Sign with your Proton address key in your client.** Export the
+  address's private key from Proton's web app (**Settings > Encryption
+  and keys**), import it into GnuPG, and set aerc's `pgp-key-id` to it
+  (aerc-accounts(5)). Proton's signature is then by the same key your
+  client signs with. You keep a copy of the key outside Proton, and
+  must protect it; when you rotate keys in Proton, export again.
+
 ### What it doesn't do
 
-- **No PGP/MIME or inline PGP to external recipients.** Every
+- **No PGP/MIME or inline PGP to external recipients** built by
+  peroxide; only the client's own (above) is passed on. Every
   recipient with a key gets the "internal" package, Proton's scheme for
   mail between Proton users. Proton's contact settings (encrypt, sign,
   scheme) are not read: a contact's own "sign" choice doesn't override
@@ -127,9 +192,13 @@ recipient from the key lookup and your contact settings: Proton
 recipients get the internal scheme; external recipients with a key get
 PGP/MIME or inline PGP as the contact says; others get clear or
 clear-signed MIME. It keeps the message's MIME structure and all its
-parts. It keeps a hash of each message sent in the last 90 seconds and
-skips a duplicate send. It adds `AUTH LOGIN` beside go-smtp's `AUTH
-PLAIN` (internal/services/imapsmtpserver/smtp.go).
+parts. Its send path has no case for a message the client signed or
+encrypted: it parses it into a body and attachments like any other
+(its parser names unnamed parts `attachment.bin`), so the client's
+signature or ciphertext doesn't survive either (read from the code,
+not tried). It keeps a hash of each message sent in the last 90
+seconds and skips a duplicate send. It adds `AUTH LOGIN` beside
+go-smtp's `AUTH PLAIN` (internal/services/imapsmtpserver/smtp.go).
 
 peroxide's send path is hydroxide's, nearly unchanged; it covers mail
 between Proton users and plain mail to others. It keeps no record of
