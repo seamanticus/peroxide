@@ -42,7 +42,7 @@ func TestTLSListenerHandshake(t *testing.T) {
 		{"tls", func(t *testing.T, c net.Conn) {
 			tc := tls.Client(c, &tls.Config{
 				RootCAs:    pool,
-				ServerName: "localhost",
+				ServerName: "peroxide.test", // selfSigned's name
 				// synctest's clock starts in 2000, before the certificate,
 				// made outside the bubble: verify within its validity.
 				Time: func() time.Time { return cert.Leaf.NotBefore.Add(time.Minute) },
