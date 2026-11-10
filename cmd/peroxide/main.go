@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -16,19 +15,17 @@ import (
 	"os/signal"
 	"runtime"
 	rtdebug "runtime/debug"
-	"strings"
 	"syscall"
 	"time"
 
 	imapserver "github.com/emersion/go-imap/server"
 	"github.com/emersion/go-smtp"
-	"golang.org/x/term"
 
 	"github.com/seamanticus/peroxide/internal/auth"
-	"github.com/seamanticus/peroxide/internal/captcha"
 	"github.com/seamanticus/peroxide/internal/config"
 	"github.com/seamanticus/peroxide/internal/events"
 	imapbackend "github.com/seamanticus/peroxide/internal/imap"
+	"github.com/seamanticus/peroxide/internal/login"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 	smtpbackend "github.com/seamanticus/peroxide/internal/smtp"
 )
@@ -75,45 +72,13 @@ func protonTransport() *http.Transport {
 	}
 }
 
-func askPass(prompt string) ([]byte, error) {
-	f := os.Stdin
-	if !term.IsTerminal(int(f.Fd())) {
-		// This can happen if stdin is used for piping data
-		// TODO: the following assumes Unix
-		var err error
-		if f, err = os.Open("/dev/tty"); err != nil {
-			return nil, err
-		}
-		defer f.Close()
-	}
-	// Prompts go where logs go: stderr, or stdout with -debug. Only the
-	// prompt is written; the password is read without echo.
-	fmt.Fprintf(log.Writer(), "%v: ", prompt)
-	b, err := term.ReadPassword(int(f.Fd()))
-	if err == nil {
-		fmt.Fprintf(log.Writer(), "\n")
-	}
-	return b, err
-}
-
 func askBridgePass() (string, error) {
 	if v := os.Getenv("PEROXIDE_BRIDGE_PASS"); v != "" {
 		return v, nil
 	}
-	b, err := askPass("Bridge password")
+	// Prompts go where logs go: stderr, or stdout with -debug.
+	b, err := login.Password(log.Writer(), "Bridge password")
 	return string(b), err
-}
-
-// promptConfirm asks a yes/no question where logs go and reports whether
-// the answer is y or Y. Everything else, including EOF, means no.
-func promptConfirm(prompt string) bool {
-	fmt.Fprintf(log.Writer(), "%v", prompt)
-	scanner := bufio.NewScanner(os.Stdin)
-	if !scanner.Scan() {
-		return false
-	}
-	answer := strings.TrimSpace(scanner.Text())
-	return answer == "y" || answer == "Y"
 }
 
 // tlsConfigFor returns a copy of the TLS configuration advertising the ALPN
@@ -243,134 +208,27 @@ func main() {
 			break
 		}
 
-		storedUsernames, err := auth.ListUsernames()
+		mode, err := login.ParseMode(opts.captchaMode)
 		if err != nil {
 			log.Fatal(err)
-		}
-		for _, u := range storedUsernames {
-			if u != username {
-				continue
-			}
-
-			if !promptConfirm(fmt.Sprintf("Credentials for %v already exist, delete them to create new ones? [y/N] ", username)) {
-				os.Exit(0)
-			}
-			if err := auth.DeleteUsername(username); err != nil {
-				log.Fatal(err)
-			}
-			break
-		}
-
-		mode, err := captcha.ParseMode(opts.captchaMode)
-		if err != nil {
-			log.Fatal(err)
-		}
-		captchaOpts := captcha.Options{
-			Mode:    mode,
-			Timeout: opts.captchaTimeout,
-			Output:  log.Writer(),
-		}
-		if mode != captcha.ModeDisabled {
-			// The terminal itself, not stdin: its read deadline bounds the
-			// wait for Enter, and stdin may be a pipe.
-			tty, err := os.Open("/dev/tty")
-			if err != nil {
-				log.Fatalf("open the terminal for human verification: %v", err)
-			}
-			defer tty.Close()
-			captchaOpts.Input = tty
 		}
 
 		// Ctrl+C during the wait for Enter ends it cleanly.
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
-		c := newClient()
-
-		var a *protonmail.Auth
-		/*if cachedAuth, ok := auths[username]; ok {
-			var err error
-			a, err = c.AuthRefresh(a)
-			if err != nil {
-				// TODO: handle expired token error
-				log.Fatal(err)
-			}
-		}*/
-
-		var loginPassword string
-		if a == nil {
-			if pass, err := askPass("Password"); err != nil {
-				log.Fatal(err)
-			} else {
-				loginPassword = string(pass)
-			}
-
-			a, err = captcha.Authenticate(ctx, c, username, loginPassword, captchaOpts)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			if a.TwoFactor.Enabled != 0 {
-				if a.TwoFactor.TOTP != 1 {
-					log.Fatal("Only TOTP is supported as a 2FA method")
-				}
-
-				scanner := bufio.NewScanner(os.Stdin)
-				// The code is typed in and echoed by the terminal, never logged.
-				fmt.Fprintf(log.Writer(), "2FA TOTP code: ")
-				scanner.Scan()
-				code := scanner.Text()
-
-				scope, err := c.AuthTOTP(code)
-				if err != nil {
-					log.Fatal(err)
-				}
-				a.Scope = scope
-			}
+		// Prompts go where logs go: stderr, or stdout with -debug.
+		err = login.Run(ctx, newClient(), username, login.Options{
+			Mode:    mode,
+			Timeout: opts.captchaTimeout,
+			Output:  log.Writer(),
+		})
+		if errors.Is(err, login.ErrKept) {
+			break
 		}
-
-		var mailboxPassword string
-		if a.PasswordMode == protonmail.PasswordSingle {
-			mailboxPassword = loginPassword
-		}
-		if mailboxPassword == "" {
-			prompt := "Password"
-			if a.PasswordMode == protonmail.PasswordTwo {
-				prompt = "Mailbox password"
-			}
-			if pass, err := askPass(prompt); err != nil {
-				log.Fatal(err)
-			} else {
-				mailboxPassword = string(pass)
-			}
-		}
-
-		keySalts, err := c.ListKeySalts()
 		if err != nil {
 			log.Fatal(err)
 		}
-
-		_, err = c.Unlock(a, keySalts, mailboxPassword)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		secretKey, bridgePassword, err := auth.GeneratePassword()
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		err = auth.EncryptAndSave(&auth.CachedAuth{
-			Auth:            *a,
-			LoginPassword:   loginPassword,
-			MailboxPassword: mailboxPassword,
-			KeySalts:        keySalts,
-		}, username, secretKey)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		fmt.Println("Bridge password:", bridgePassword)
 	case "status":
 		usernames, err := auth.ListUsernames()
 		if err != nil {

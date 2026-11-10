@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/seamanticus/peroxide/internal/captcha"
+	"github.com/seamanticus/peroxide/internal/login"
 )
 
 // usage is the whole help: `peroxide help`, `peroxide -h`, `peroxide
@@ -156,8 +156,8 @@ func commandFlags(command string, inv *invocation) (*flag.FlagSet, bool) {
 	case "auth":
 		a := &inv.auth
 		fs.BoolVar(&a.remove, "remove", false, "")
-		fs.StringVar(&a.captchaMode, "captcha-mode", string(captcha.ModeBrowser), "")
-		fs.DurationVar(&a.captchaTimeout, "captcha-timeout", captcha.DefaultTimeout, "")
+		fs.StringVar(&a.captchaMode, "captcha-mode", string(login.ModeBrowser), "")
+		fs.DurationVar(&a.captchaTimeout, "captcha-timeout", login.DefaultTimeout, "")
 	case "serve":
 		s := &inv.serve
 		fs.StringVar(&s.imapHost, "imap-host", "127.0.0.1", "")

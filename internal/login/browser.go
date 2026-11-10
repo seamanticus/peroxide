@@ -1,4 +1,4 @@
-package captcha
+package login
 
 import (
 	"fmt"

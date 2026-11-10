@@ -1,4 +1,4 @@
-package captcha
+package login
 
 import (
 	"bytes"
@@ -95,6 +95,10 @@ func enterOpts(t *testing.T, out *bytes.Buffer, b *browser) Options {
 }
 
 const wantVerifyURL = "https://verify.proton.me/?methods=captcha&token=" + testToken
+
+func hvFor(methods ...string) *protonmail.HumanVerification {
+	return &protonmail.HumanVerification{Methods: methods, Token: testToken}
+}
 
 func TestAuthenticate_NoVerificationNeeded(t *testing.T) {
 	want := &protonmail.Auth{UID: "uid"}

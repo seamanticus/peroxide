@@ -298,11 +298,16 @@ func (c *Client) doJSON(req *http.Request, respData any) error {
 
 	if maybeError, ok := respData.(maybeError); ok {
 		if err := maybeError.Err(); err != nil {
-			if apiErr, ok := err.(*APIError); ok {
+			apiErr, ok := err.(*APIError)
+			if ok {
 				apiErr.Status = resp.StatusCode
 				apiErr.RetryAfter = retryAfter(resp.Header, time.Now())
 			}
-			log.Printf("request failed: %v %v: %v", req.Method, req.URL.String(), err)
+			// Human verification is answered by its caller, which tells the
+			// user what to do; -debug still logs the whole response.
+			if !ok || !apiErr.IsHumanVerificationRequired() {
+				log.Printf("request failed: %v %v: %v", req.Method, req.URL.String(), err)
+			}
 			return err
 		}
 	}

@@ -1,4 +1,4 @@
-// Package captcha implements Proton's interactive human verification flow.
+// Proton's interactive human verification, one step of the login.
 //
 // Proton sometimes answers authentication requests with API error 9001,
 // asking for a CAPTCHA to be completed before the request can be replayed.
@@ -12,7 +12,8 @@
 // commit c5d23c0), so the replay carries the original challenge token and
 // nothing needs to be carried back. proton-bridge's CLI works the same way
 // (internal/frontend/cli, promptHvURL).
-package captcha
+
+package login
 
 import (
 	"bufio"
@@ -50,7 +51,7 @@ func ParseMode(s string) (Mode, error) {
 	case ModeDisabled:
 		return ModeDisabled, nil
 	default:
-		return "", fmt.Errorf("captcha: invalid mode %q (want browser, manual or disabled)", s)
+		return "", fmt.Errorf("login: invalid CAPTCHA mode %q (want browser, manual or disabled)", s)
 	}
 }
 
@@ -137,14 +138,15 @@ func Solve(ctx context.Context, hv *protonmail.HumanVerification, opts Options) 
 	}
 
 	u := verifyURL(hv)
-	fmt.Fprintf(opts.Output, "\nProton requires human verification. Solve the CAPTCHA on this page,\n"+
-		"in any browser on any device:\n\n%v\n\n", u)
+	style := colour(opts.Output)
+	fmt.Fprintf(opts.Output, "\n%v\nSolve it on this page, in any browser on any device:\n\n%v\n",
+		paint(style, headingStyle, "Proton requires human verification (CAPTCHA)."), box(style, u))
 	if opts.Mode == ModeBrowser {
 		if err := opts.openURL(u); err != nil {
 			fmt.Fprintf(opts.Output, "warning: failed to open a browser (%v)\nOpen the URL above manually.\n\n", err)
 		}
 	}
-	fmt.Fprintf(opts.Output, "Press Enter here once the page says the verification succeeded "+
+	fmt.Fprintf(opts.Output, "Press Enter here once the page says \"Completed\" "+
 		"(up to %v, Ctrl+C to cancel): ", opts.Timeout)
 
 	err = waitForEnter(ctx, opts.Input, opts.Timeout)
