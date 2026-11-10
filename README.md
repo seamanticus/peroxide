@@ -46,7 +46,7 @@ peroxide auth <username>@protonmail.com
 
 1. Upon dispatch, you will be prompted for a `password`, this is your *PROTONMAIL PASSWORD*. The real one. Don't panic, it is being asked for a good reason.
 
-2. If Proton asks for a Captcha, peroxide prints a `https://verify.proton.me/...` URL and opens it in your browser (through `xdg-open`, in a graphical session). peroxide does not solve the Captcha, it must be done by a human, and tonight the human is you. No browser popped up? Copy the URL into the browser of your preference, whichever one you keep around out of love or habit, on this machine or any other, phone included.
+2. If Proton asks for a Captcha, peroxide prints a `https://verify.proton.me/...` URL and opens it in your browser (through `xdg-open`, in a graphical session). peroxide does not solve the Captcha, it must be done by a human, and tonight the human is you. No browser popped up, or the wrong one? The URL is already on your clipboard if your terminal allows it (most modern ones do); paste it into the browser of your preference, whichever one you keep around out of love or habit, on this machine or any other, phone included.
 
 3. Solve the Captcha... prove to the machine that you are not a machine. The machine, notably, is never asked to prove anything. Proton's page tells Proton you passed; nothing needs copying back. Then press ENTER in the terminal.
 

@@ -175,7 +175,11 @@ in your browser, on Proton's own page:
    `https://verify.proton.me/?methods=captcha&token=<challenge token>`
    and, with `-captcha-mode browser` (the default), opens it with
    `xdg-open` inside a graphical session (`DISPLAY` or
-   `WAYLAND_DISPLAY` set). Only the CAPTCHA is offered.
+   `WAYLAND_DISPLAY` set). Only the CAPTCHA is offered. In both modes
+   it also asks the terminal to copy the URL to the clipboard (the
+   OSC 52 escape sequence, written to `/dev/tty`; over SSH it reaches
+   your local terminal's clipboard). Terminals without OSC 52 ignore
+   it; inside tmux it needs `set -g set-clipboard on`.
 2. You solve the CAPTCHA there. Proton's page itself hands the result
    to Proton (`POST /core/v4/verification/captcha/<challenge token>`),
    which marks the challenge token as solved. Nothing has to be copied

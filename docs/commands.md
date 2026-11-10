@@ -45,9 +45,11 @@ or stderr, so a redirected or `tee`'d `-debug` log never holds it.
 `auth` needs a terminal: it reads the passwords and the Enter key from
 it too.
 
-Sections are separated by blank lines. The CAPTCHA heading and the two
-boxed values are coloured on a terminal, unless `NO_COLOR` is set or
-`TERM` is `dumb`; redirected output is plain text.
+Sections are separated by blank lines. On a terminal the CAPTCHA
+heading is bold cyan and the two boxed values bold yellow, unless
+`NO_COLOR` is set or `TERM` is `dumb`; redirected output is plain text.
+The CAPTCHA URL is also copied to the clipboard through the terminal
+(OSC 52), when the terminal supports it.
 
 If credentials for that username already exist, it asks before
 replacing them. `auth` options:
