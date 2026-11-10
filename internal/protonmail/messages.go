@@ -754,6 +754,21 @@ func (set *MessagePackageSet) AddClearMIME(addr string) (*MessagePackage, error)
 	return pkg, nil
 }
 
+// AddPGPMIME adds addr to receive a body the client encrypted itself as
+// PGP/MIME (Proton's PGPMIME scheme): set.Body holds the client's data packet
+// and keyPackets the client's key packets, every one of them, as nothing
+// tells which is the recipient's. The signature flag stays 0: whether the
+// client signed inside is unknown here.
+func (set *MessagePackageSet) AddPGPMIME(addr string, keyPackets []byte) *MessagePackage {
+	pkg := &MessagePackage{
+		Type:          MessagePackagePGPMIME,
+		BodyKeyPacket: base64.StdEncoding.EncodeToString(keyPackets),
+	}
+	set.Addresses[addr] = pkg
+	set.Type |= MessagePackagePGPMIME
+	return pkg
+}
+
 func serializeEncryptedKey(symKey *packet.EncryptedKey, pub *packet.PublicKey, config *packet.Config) (string, error) {
 	var encoded bytes.Buffer
 	ciphertext := base64.NewEncoder(base64.StdEncoding, &encoded)

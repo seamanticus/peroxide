@@ -72,6 +72,12 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 	if err != nil {
 		return err
 	}
+	// PGP/MIME the client signed or encrypted goes out whole, never taken
+	// apart: that would break the signature or lose the ciphertext.
+	sec, _, err := parseSecured(raw)
+	if err != nil {
+		return err
+	}
 
 	subject, _ := mr.Header.Subject()
 	fromList, _ := mr.Header.AddressList("From")
@@ -175,6 +181,11 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 	msg, err = c.CreateDraftMessage(msg, parentID)
 	if err != nil {
 		return fmt.Errorf("cannot create draft message: %v", err)
+	}
+
+	if sec != nil {
+		recipients := append(append(append([]*mail.Address{}, toList...), ccList...), bccList...)
+		return sendSecured(c, msg, privateKey, sec, raw, recipients)
 	}
 
 	// Parse the incoming MIME message body
