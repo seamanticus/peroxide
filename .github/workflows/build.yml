@@ -98,6 +98,12 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      # The job runs as root in the container, the checkout belongs to the
+      # runner's user: git refuses such a repository (dubious ownership,
+      # status 128), and go build asks it for the commit -V prints.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Go version
         run: go version
 
