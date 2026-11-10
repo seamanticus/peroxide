@@ -20,11 +20,11 @@ func testKey() [32]byte { return [32]byte{1, 2, 3} }
 // setTestDirs points the configuration and data directories at dir.
 func setTestDirs(t *testing.T, dir string) {
 	t.Helper()
-	// os.UserConfigDir reads one of these, depending on the OS.
+	// os.UserConfigDir reads XDG_CONFIG_HOME, else HOME; DataPath reads
+	// XDG_DATA_HOME, else HOME.
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("XDG_DATA_HOME", dir)
 	t.Setenv("HOME", dir)
-	t.Setenv("AppData", dir)
 }
 
 // openTestDB opens the database of the account "test" in a temporary

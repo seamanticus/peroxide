@@ -49,7 +49,6 @@ func openTestDB(t *testing.T) *database.User {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("XDG_DATA_HOME", dir)
 	t.Setenv("HOME", dir)
-	t.Setenv("AppData", dir)
 
 	db, _, err := database.Open("test", testStoreKey())
 	if err != nil {
@@ -357,7 +356,6 @@ func BenchmarkFetchFlags(b *testing.B) {
 	b.Setenv("XDG_CONFIG_HOME", dir)
 	b.Setenv("XDG_DATA_HOME", dir)
 	b.Setenv("HOME", dir)
-	b.Setenv("AppData", dir)
 	db, _, err := database.Open("bench", testStoreKey())
 	if err != nil {
 		b.Fatal(err)

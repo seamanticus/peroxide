@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 )
@@ -60,9 +59,6 @@ func TestDeriveStoreKey(t *testing.T) {
 // older peroxide left readable by everyone, whatever the umask.
 // evidence: witnesses
 func TestSaveAuthsOwnerOnly(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix permission bits")
-	}
 	for _, tc := range []struct {
 		name     string
 		existing os.FileMode // 0: no file yet
@@ -72,8 +68,8 @@ func TestSaveAuthsOwnerOnly(t *testing.T) {
 		{"existing 0666", 0o666},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// os.UserConfigDir reads XDG_CONFIG_HOME on Unix, and HOME on
-			// macOS: point both away from the real ones.
+			// os.UserConfigDir reads XDG_CONFIG_HOME, else HOME: point both
+			// away from the real ones.
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 			t.Setenv("HOME", t.TempDir())
 			p, err := authFilePath()
