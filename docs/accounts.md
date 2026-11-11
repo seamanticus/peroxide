@@ -62,7 +62,9 @@ password. peroxide (internal/auth/manager.go, `Manager.Auth`):
    token, unlocks the keys with the stored mailbox password, writes the
    record back with the new refresh token (only if it is still there
    and still opens with this key; otherwise the login fails), and keeps
-   the session, the keys and a bcrypt hash of the key in memory.
+   the session, the keys and a bcrypt hash of the key in memory. The
+   decrypted record and the key itself stay in memory too, for the
+   session refresh below (`TODO.md` section 22).
 
 So the first client login of a process costs a few requests and a
 bcrypt derivation per key salt; later ones cost one bcrypt comparison.
@@ -109,9 +111,9 @@ Proton's `Addresses` events: peroxide updates the address list (drafts
 and APPEND take their sender from it) and logs `Key <fingerprint> of
 address <...> is new: it is unlocked when peroxide restarts`. Mail
 encrypted to that key can't be decrypted, and the SMTP server can't
-send from that address, until peroxide restarts. The SMTP session's
-address list isn't refreshed at all: a new address can send only after
-the SMTP client logs in again in a new process. `TODO.md` section 7.
+send from that address, until peroxide restarts: the SMTP server reads
+the address list at each login, but its keys are those unlocked at the
+first. `TODO.md` section 7.
 After the restart, messages stored still encrypted are built again with
 the new key and get new UIDs
 ([imap/messages.md](imap/messages.md#messages-that-change)).

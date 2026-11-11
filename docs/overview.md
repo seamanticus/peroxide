@@ -96,9 +96,12 @@ The keys stay unlocked in memory until the process exits.
   `$XDG_DATA_HOME/peroxide/<user>/`): every message, sealed under a key
   derived from the bridge password. See
   [security.md](security.md#the-message-store).
-- In memory only: the unlocked private keys, the Proton session, the
-  store key.
-- Nowhere: the bridge password.
+- In memory, while the process runs: the unlocked private keys, the
+  Proton session, the store key, and, to renew the session, the
+  decrypted `auth.json` record (login and mailbox passwords, key
+  salts) with the key that is the bridge password (`TODO.md` section
+  22).
+- Never on disk: the bridge password and the unlocked keys.
 
 ## How proton-bridge does it
 

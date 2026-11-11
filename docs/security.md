@@ -18,7 +18,10 @@ details are on the pages linked.
   can read and send all your mail.
 - **Your private keys** are unlocked in peroxide's memory for as long as
   it runs, after the first client login. Anyone who can read that
-  process's memory (root, a debugger, a core dump) can take them.
+  process's memory (root, a debugger, a core dump) can take them, and
+  with them your login and mailbox passwords and the bridge password,
+  which peroxide keeps there to renew the session (`TODO.md` section
+  22).
 
 ## What is on disk
 

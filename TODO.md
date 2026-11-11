@@ -74,12 +74,14 @@ keys themselves are still unlocked only at login.
 addresses created, changed and deleted in Proton to the address list, but
 not their keys. Private keys are unlocked once per peroxide process, by
 `protonmail.Client.Unlock` at the first login of the account, and
-`auth.Manager` caches that session (auth/auth.go, `sessions`). A key
+`auth.Manager` caches that session (internal/auth/manager.go,
+`sessions`). A key
 added later (a new address, a key rotation) is logged as "is new: it is
 unlocked when peroxide restarts" and stays locked until then: mail
 encrypted to it fails to decrypt, and drafts from that address fail with
-"sender address key hasn't been decrypted". The SMTP session's address
-list (smtp/smtp.go, `session.addrs`) isn't refreshed at all.
+"sender address key hasn't been decrypted". The SMTP session reads the
+address list at each login (internal/smtp/smtp.go, `authPlain`), so only
+its keys, the cached session's, are stale.
 
 Since d6657fd such mail is served, not failed: its body as an armored
 text part whose armor Comment says the key isn't unlocked, its
@@ -100,18 +102,54 @@ decrypted on every read with an AES-GCM key bridge holds for its whole run
 (internal/vault/vault.go, `New`, `getUnsafe`): the key that unlocks
 everything is in memory, the trade-off ruled out above.
 
-**Steps.**
+**Audit (2026-11-11, at e42df13).**
 
-1. Pick a way to unlock on an event without holding the secret, e.g.
-   re-reading it from the encrypted `auth.json` with a key the client
-   proves again, or deferring to the next IMAP/SMTP login that carries
-   the bridge password. To be decided.
-2. Unlock the new keys of `event.Address` with the user key ring and
-   add them to the session's key ring (`auth.session.privateKeys`), so
-   IMAP and SMTP see them.
-3. Refresh the SMTP session's address list from the same events.
-4. Tests: an address event with a new key makes it usable for
-   decryption without restarting.
+- The constraint doesn't hold today: section 22.
+- `Manager.Auth` hands every later login the cached key ring; only a
+  restart unlocks anew. The daily session renewal (`ReAuth`, the access
+  token lasts 86400 s) does run `Client.Unlock` over the current
+  addresses, and drops the result.
+- Address keys carry a `Token`: they unlock with the user key, which
+  `Client.Unlock` unlocks with the mailbox password and drops. A key
+  without a `Token` needs its salt, which `auth.json` holds only for
+  the keys of when `peroxide auth` ran.
+- `Event.User` isn't read (protonmail/events.go): a changed user key
+  goes unseen. bridge reads it (`OnUserEvent`).
+- Messages left encrypted are built again at each fresh IMAP session
+  when the unlocked keys differ (`refreshFallbacks`, download.go).
+- aerc logs in over IMAP once, when it starts; SMTP at every send.
+- aerc reconnects by itself (worker/imap/observer.go, app/account.go):
+  the observer waits on go-imap's `LoggedOut` and posts a `ConnError`;
+  the account view shows the error, empties the message list and
+  posts `Reconnect`, at once the first time, then after 1.8^n seconds
+  up to `reconnect-maxwait`; `connect()` logs in again with the
+  configured password and selects. Read from the code, not tried.
+
+**Decided: unlock at the next login, and force that login.** Nothing
+that unlocks keys is kept for it.
+
+1. `Manager`: a session can be marked stale. The next `Auth` of the
+   account, IMAP or SMTP, whose password passes the bcrypt check reads
+   `auth.json` again with that password, runs `Client.Unlock` and
+   replaces the session's key ring. A failure leaves the old ring and
+   the mark.
+2. `handleAddressEvent`: when the event brings an active key that
+   isn't unlocked, mark the session stale and end the account's IMAP
+   connections with BYE (`backend.disconnect`, as `rebuild` does, but
+   wiping nothing). The login that follows must wait for the old
+   session to end, as after a rebuild (`getUser`'s closing check), so
+   that it starts a user with the new ring: an immediate reconnect
+   would otherwise join the old one. That fresh session builds the
+   armored messages again (`refreshFallbacks`).
+3. A key that still fails to unlock (no `Token` and no salt) must not
+   disconnect again at every event: remember the keys tried.
+4. Tests: a stale session unlocks again at the next `Auth` and only
+   then; an address event with a new key disconnects once; a login
+   after it decrypts with the new key.
+5. Docs: docs/accounts.md "Keys that change while peroxide runs".
+
+Left out: reading `Event.User`; fetching salts for keys without a
+`Token`.
 
 ## 8. (done: The All Mail Problem; 1f0bfb4, 2e372dd, 1476ca8, cfbc46b)
 
@@ -765,3 +803,48 @@ copy readable in Proton's apps.**
 **Order.** Part 1, then the probe, then part 2. With both, a
 self-encrypted send is readable everywhere: aerc by the GPG key (part
 1 or 2), Proton's apps by the decrypted draft (part 2).
+
+## 22. Passwords stay in memory for the whole run
+
+**Problem.** `Manager.Auth` (internal/auth/manager.go) sets the
+client's `ReAuth` to a closure over the decrypted `auth.json` record
+(`CachedAuth`: login password, mailbox password, key salts, refresh
+token) and over the secret key, which is the bridge password. The
+client lives as long as the process, so all of them do: whoever reads
+peroxide's memory gets the Proton password, not only the unlocked keys.
+Inherited from hydroxide (480af10, 2017). It is what `ReAuth` needs
+today: the refresh token to renew the session, the login password to
+log in again when the token is spent (10013), the mailbox password
+because `authenticate` unlocks the keys again each time (and drops
+them), and the secret key to save the new token (`saveRenewed`).
+
+The unlocked address keys and the store key must stay in memory:
+without them no mail is decrypted or served. This section is about
+what need not.
+
+**How proton-bridge does it**: no login password is stored at all; a
+spent refresh token signs the account out. The salted key password is
+in its vault, whose key is in memory (section 7).
+
+**Sketch, to be designed.**
+
+1. `ReAuth` renews with the refresh token only and doesn't unlock:
+   split `authenticate` so that renewal needs neither password.
+2. No background login with the stored password. A spent token fails
+   the requests; the next client login, which brings the bridge
+   password, reads `auth.json` and logs in again (section 7's stale
+   session does the reading).
+3. Saving the renewed token without the secret key: seal it to a
+   public key derived from the bridge password (NaCl box, anonymous
+   sender; x/crypto/nacl/box is in the module already), kept beside
+   the record, so that memory holds nothing that opens `auth.json`.
+   This changes the file's format: old records must still read.
+4. Then drop the record and the secret key once `Auth` returns; wipe
+   the byte slices (strings can't be wiped: `CachedAuth` would hold
+   bytes).
+5. Tests; docs/overview.md, accounts.md, security.md.
+
+**Related, not decided.** Nothing stops a core dump or a same-user
+ptrace of the process (`prctl(PR_SET_DUMPABLE, 0)`, RLIMIT_CORE);
+`runtime/secret` (erases temporaries) is still behind
+GOEXPERIMENT=runtimesecret in go1.27.
