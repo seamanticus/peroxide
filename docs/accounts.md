@@ -105,18 +105,31 @@ refreshes. Downloads aren't cut off once their answer has started.
 
 ## Keys that change while peroxide runs
 
-The private keys are unlocked once per process, at the first login. A
-key Proton adds later (a new address, a key rotation) arrives through
+The private keys are unlocked at the first login of a process and kept.
+A key Proton adds later (a new address, a key rotation) arrives through
 Proton's `Addresses` events: peroxide updates the address list (drafts
-and APPEND take their sender from it) and logs `Key <fingerprint> of
-address <...> is new: it is unlocked when peroxide restarts`. Mail
-encrypted to that key can't be decrypted, and the SMTP server can't
-send from that address, until peroxide restarts: the SMTP server reads
-the address list at each login, but its keys are those unlocked at the
-first. `TODO.md` section 7.
-After the restart, messages stored still encrypted are built again with
-the new key and get new UIDs
-([imap/messages.md](imap/messages.md#messages-that-change)).
+and APPEND take their sender from it), and when the address has an
+active key it hasn't unlocked:
+
+1. It logs `Key <fingerprint> of address <...> is new: it is unlocked
+   at the next login` and marks the account's session stale. It unlocks
+   nothing itself: that takes the mailbox password, which the next
+   login reads from `auth.json` with the bridge password the client
+   sends.
+2. It disconnects the account's IMAP clients with `* BYE Your Proton
+   account has a new key: please log in again to unlock it`. A client
+   that reconnects by itself (aerc does, at once) logs in again; in
+   others, reconnect.
+3. That login, or an SMTP login (every send makes one) if it comes
+   first, unlocks all the account's keys again. The IMAP login waits
+   for the old session to end and starts a new one, which builds the
+   messages stored still encrypted again with the new key, under new
+   UIDs ([imap/messages.md](imap/messages.md#messages-that-change)).
+
+So a new key works within one events poll and a reconnect, without a
+restart. A key that still can't be unlocked (the log says why)
+disconnects once, not at every event. A change of the account's user
+key isn't seen until peroxide restarts.
 
 ## Files on disk
 

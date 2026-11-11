@@ -65,7 +65,7 @@ Proton app, sends the solved CAPTCHA to Proton itself
 with the original token, as proton-bridge's CLI does. Not yet tested
 against a live 9001: how long the proof stays redeemable is unknown.
 
-## 7. Unlock keys added by `Addresses` events
+## 7. (done: keys added by `Addresses` events unlocked at a forced login; 89f98d4)
 
 Done so far (da1f6f3): `Addresses` events update the address list; the
 keys themselves are still unlocked only at login.
@@ -126,7 +126,10 @@ everything is in memory, the trade-off ruled out above.
   configured password and selects. Read from the code, not tried.
 
 **Decided: unlock at the next login, and force that login.** Nothing
-that unlocks keys is kept for it.
+that unlocks keys is kept for it. Done in 89f98d4 as planned below
+(Manager.MarkStale and UnlockAgain, user.relogin, user.ending for
+rebuild and relogin alike); tests compiled and run clean by the user,
+not tried live with a real key change.
 
 1. `Manager`: a session can be marked stale. The next `Auth` of the
    account, IMAP or SMTP, whose password passes the bcrypt check reads
