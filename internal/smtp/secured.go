@@ -20,6 +20,7 @@ import (
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-message/textproto"
 
+	"github.com/seamanticus/peroxide/internal/msgbuild"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
@@ -312,9 +313,10 @@ func planSecured(c *protonmail.Client, own openpgp.EntityList, sec *secured, rec
 // sendSecured sends draft msg, already created, encrypted by the client as
 // PGP/MIME, with the client's data packet as the body and the recipient's
 // key packet (planSecured) in a PGPMIME package, which Proton reassembles
-// into the multipart/encrypted the client built. The draft, and so the Sent
-// copy, holds the client's message as text: Proton takes only text/plain
-// and text/html draft bodies (2011 for multipart/mixed).
+// into the multipart/encrypted the client built. Proton takes only
+// text/plain and text/html draft bodies (2011 for multipart/mixed), so the
+// draft, and so the Sent copy, is the client's message as text behind
+// msgbuild's marker, which peroxide serves as that message.
 func sendSecured(c *protonmail.Client, msg *protonmail.Message, privateKey *openpgp.Entity, sec *secured, raw []byte, plan []assignment) error {
 	if sec.encrypted == nil {
 		panic("invariant: sendSecured of a message the client didn't encrypt")
@@ -324,7 +326,7 @@ func sendSecured(c *protonmail.Client, msg *protonmail.Message, privateKey *open
 		return err
 	}
 	log.Println("uploading message body (client-encrypted PGP/MIME, kept whole)")
-	draft, err := uploadDraftBody(c, msg, privateKey, "text/plain", entity)
+	draft, err := uploadDraftBody(c, msg, privateKey, "text/plain", msgbuild.ClientPGPMIMEBody(entity))
 	if err != nil {
 		return fmt.Errorf("cannot update draft message: %v", err)
 	}

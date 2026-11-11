@@ -48,8 +48,9 @@ type Builder struct {
 // message with attachments is a multipart/mixed of its body and attachments;
 // a body that is a MIME message itself (received as PGP/MIME, MIMEType
 // multipart/mixed) is that message; a body encrypted to no key of the
-// account is passed through as PGP/MIME. Other bodies are a multipart/mixed
-// of one part, as peroxide always served them.
+// account is passed through as PGP/MIME. The Sent copy of a message the
+// client encrypted itself is that message (clientPGPMIME). Other bodies
+// are a multipart/mixed of one part, as peroxide always served them.
 func (mb *Builder) Build(ctx context.Context, full *protonmail.Message) ([]byte, bool, error) {
 	switch {
 	case len(full.Attachments) > 0:
@@ -61,6 +62,11 @@ func (mb *Builder) Build(ctx context.Context, full *protonmail.Message) ([]byte,
 		literal, err := passThroughMessage(full)
 		return literal, true, err
 	default:
+		// Not a fallback: no key added later would decrypt more of it.
+		if literal, ok := mb.clientPGPMIME(full); ok {
+			log.Printf("Message %v is the client's own PGP/MIME: served as sent", full.ID)
+			return literal, false, nil
+		}
 		return mb.buildMultipart(ctx, full)
 	}
 }
@@ -269,6 +275,15 @@ func (mb *Builder) buildPGPMIME(ctx context.Context, full *protonmail.Message) (
 	}
 
 	bodyHeader, bodyData := SplitEntity(plain)
+	literal, err := joinEntity(h, bodyHeader, bodyData)
+	return literal, false, err
+}
+
+// joinEntity writes a message of header h joined by the fields of an
+// entity's header, as bridge does (buildPGPRFC822), and the entity's body.
+// Fields h has win, but the entity's Content-Type replaces h's; the entity
+// never sets SignatureHeader, which only peroxide writes.
+func joinEntity(h message.Header, bodyHeader textproto.Header, bodyData []byte) ([]byte, error) {
 	h.Del("Content-Type")
 	for f := bodyHeader.Fields(); f.Next(); {
 		if !h.Has(f.Key()) && !strings.EqualFold(f.Key(), SignatureHeader) {
@@ -277,10 +292,10 @@ func (mb *Builder) buildPGPMIME(ctx context.Context, full *protonmail.Message) (
 	}
 	var b bytes.Buffer
 	if err := textproto.WriteHeader(&b, h.Header); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	b.Write(bodyData)
-	return b.Bytes(), false, nil
+	return b.Bytes(), nil
 }
 
 // SplitEntity splits a MIME entity into its header and body. One whose start
