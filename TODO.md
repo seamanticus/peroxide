@@ -874,19 +874,39 @@ When a session's `auth.json` record is removed or replaced while
 `serve` runs, `auth.Manager.endSession` logs the session out at Proton
 with `protonmail.Client.Logout`: `DELETE /auth` with the session's own
 `X-Pm-Uid` and access token, as go-proton-api's `AuthDelete` sends
-(`/auth/v4`; peroxide's paths have no version). It has never been seen
-live. Check, with `-debug`:
+(`/auth/v4`; peroxide's paths have no version).
 
-1. Run `peroxide auth <user>` again while `serve` runs, then log in
-   from aerc with the new bridge password. Expect `>> DELETE
+**Seen live (2026-11-12, `peroxide_1794429671.log`).** `peroxide auth
+-remove` while `serve` ran and aerc was connected: the old session
+kept serving the connected client (a new message arrived at 09:52).
+After aerc's `:disconnect`/`:connect`, its login with the old bridge
+password logged `The stored credentials of <user> were removed or
+replaced`, sent `DELETE /api/auth`, got `200 {"Code":1000}`, logged
+`Logged out the ended session of <user> at Proton`, and was refused;
+Proton's web settings no longer listed the session. aerc's retries
+were each refused locally, with no request to Proton. So steps 1 and
+2 hold, and step 4 is answered: the unversioned path works. Only
+step 3, a refresh ending the session, is left. Check, with `-debug`:
+
+1. (done, by `auth -remove` and the old password; the new-password
+   case runs the same endSession) Run `peroxide auth <user>` again
+   while `serve` runs, then log in from aerc with the new bridge
+   password. Expect `>> DELETE
    /api/auth`, `<< DELETE /api/auth 200` and `Logged out the ended
    session of <user> at Proton`.
-2. In Proton's web settings, "Session management": the old session
-   is gone.
+2. (done) In Proton's web settings, "Session management": the old
+   session is gone.
 3. Also the refresh path: leave `serve` running a day after `peroxide
    auth` with no login; the log shows the refresh, then the logout with
-   the tokens it got.
-4. If Proton answers anything but 1000 (a 404 for the unversioned path,
+   the tokens it got. aerc must stay connected without reconnecting
+   the whole day: a login with the old password ends the session
+   through the login path instead (`stored credentials` right after an
+   `AUTHENTICATE` line, not after `POST /api/auth/refresh`). Then the
+   clients get the BYE, and the events failure and the BYE may log in
+   either order. Step-by-step instructions: `TODO23_step3.md` in the
+   workspace, outside the repository.
+4. (answered: 1000 on the unversioned path) If Proton answers
+   anything but 1000 (a 404 for the unversioned path,
    a 401 for an expired access token on a dead session), decide whether
    to use `/auth/v4`, or to refresh first so the logout carries a live
    token.
