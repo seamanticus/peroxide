@@ -807,7 +807,23 @@ copy readable in Proton's apps.**
 self-encrypted send is readable everywhere: aerc by the GPG key (part
 1 or 2), Proton's apps by the decrypted draft (part 2).
 
-## 22. Passwords stay in memory for the whole run
+## 22. (done: no password kept in memory, session.json, dead sessions revived at login, non-dumpable; 719ebca, a8b93fa)
+
+**Outcome.** Decided 2026-11-11: (a) renewed tokens in session.json,
+sealed with a key derived from the bridge password, auth.json written
+by `peroxide auth` only; (b) a spent token kills the session and the
+IMAP clients get BYE, the next client login opens it again; (c)
+prctl(PR_SET_DUMPABLE, 0). Added after the first live test: a CAPTCHA
+or 2FA answer to the password login is remembered per record, and
+later logins are refused locally until `peroxide auth`. Tried live
+(build_release/peroxide_1794384440.log, _1794386294.log,
+_1794386896.log): restart from session.json, revoke in Proton's web
+app, one refused password login, retries answered locally, `peroxide
+auth` in the same serve run picked up by the next login. Left: Go can't
+wipe the passwords that pass through memory at a login ("not kept",
+not "wiped"); `runtime/secret` is still an experiment.
+
+The section as written before:
 
 **Problem.** `Manager.Auth` (internal/auth/manager.go) sets the
 client's `ReAuth` to a closure over the decrypted `auth.json` record
