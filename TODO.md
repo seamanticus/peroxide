@@ -606,10 +606,10 @@ SendMail returns.
 - Tests in smtp/smtp_test.go with a multipart/encrypted and a
   multipart/signed message.
 
-**Outcome (2026-11-11, smtp/secured.go; docs/smtp.md "Mail your client
-signed or encrypted").** Such a message is no longer taken apart.
-Tried live with aerc to an external address
-(build_release/peroxide_1794340423.log, peroxide_1794341235.log):
+**Outcome (2026-11-11, smtp/secured.go, msgbuild/sentcopy.go;
+docs/encrypt.md).** Such a message is no longer taken apart. Tried
+live with aerc to an external address (the logs cited here, but
+peroxide_1794375432.log, have since been deleted):
 
 - Encrypted (signed inside or not): the recipient's one key packet,
   as the client wrote it, as their BodyKeyPacket, the data packet as
@@ -635,19 +635,27 @@ Tried live with aerc to an external address
   client). A Proton recipient gets it as internal mail, signed inside,
   so aerc shows no signature (T1c, build_release/peroxide_1794368431.log;
   peroxide's X-Peroxide-Signature header says pass).
+- With an attachment (T8, T9, build_release/peroxide_1794375432.log):
+  encrypted, the PDF stays inside the client's ciphertext, nothing is
+  uploaded apart, PGPMIME (16), received intact; signed only, the PDF
+  is uploaded under its own name and the send is ClearMIME (32), the
+  attachment's signature checked pass. The upload failure that opened
+  this section is gone.
+- Tests: TestParseSecuredSigned, TestParseSecuredEncrypted,
+  TestAssignPackets (smtp), TestClientPGPMIME (msgbuild).
 
-**Left open.**
+**Left open** (neither is peroxide work in this section):
 
 1. Client-encrypted mail to Proton users, or to several external
-   recipients at once, is refused (see the outcome); the client sends
-   it unencrypted to Proton users, or to each external recipient apart.
+   recipients at once, is refused (see the outcome): Proton's send API
+   allows nothing else. Documented in docs/encrypt.md; asked of Proton
+   in the letter (requests C and D, not sent yet).
 2. The Sent copy of a client-encrypted message is the client's message
    as a text/plain draft body (Proton refuses multipart/mixed drafts,
    2011), behind msgbuild's marker line: peroxide serves it over IMAP
    as the multipart/encrypted it was, Proton's apps show the marker and
-   the source as text. It is encrypted to the recipient only (item 1 of
-   section 21 would add the sender), so no one but the recipient can
-   read its content.
+   the source as text. It is encrypted to the recipient only, so no one
+   but the recipient can read its content: section 21 plans the fix.
 
 ## 20. Building a large message peaks at about 14x its size
 
