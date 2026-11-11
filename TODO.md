@@ -561,7 +561,7 @@ certificate per connection (VerifyConnection); handshakes bounded to
 aerc can trust it only process-wide (`SSL_CERT_DIR`); a per-account
 `tls-cert` is aerc_implementation.md section 11.
 
-## 19. (done: client-signed and client-encrypted PGP/MIME sent whole, signed-only re-signed by the address key; 7ca3a73)
+## 19. (done: client-encrypted PGP/MIME sent whole to one external recipient, signed-only re-signed by the address key; 7ca3a73, b7a1263)
 
 **Problem.** A message the client encrypted itself (aerc's encrypt on
 send: `Content-Type: multipart/encrypted;
@@ -611,28 +611,40 @@ signed or encrypted").** Such a message is no longer taken apart.
 Tried live with aerc to an external address
 (build_release/peroxide_1794340423.log, peroxide_1794341235.log):
 
-- Encrypted (signed inside or not): the client's key packets as each
-  recipient's BodyKeyPacket, its data packet as the body, package
-  PGPMIME (16). Accepted with several key packets; the recipient
-  decrypts it and aerc finds the inner signature Authentic.
+- Encrypted (signed inside or not): the recipient's one key packet,
+  as the client wrote it, as their BodyKeyPacket, the data packet as
+  the body, package PGPMIME (16). The recipient decrypts it and aerc
+  finds the inner signature Authentic. Proton takes only one packet per
+  recipient (`2001 Multiple packets present`, with aerc's
+  `pgp-self-encrypt`, live test 2026-11-11), so
+  packets to the account's own keys are left out, and a send that
+  leaves other than one packet, or has several external recipients, is
+  refused before the draft. Proton users are refused too: PGPMIME for
+  them gives `2001 Wrong type of package for internal recipient`
+  (same day), an internal package (1) with a
+  multipart/mixed body `2001 Invalid package type`
+  (build_release/peroxide_1794366434.log).
 - Signed only: Proton can't deliver it unchanged. ClearMIME (32) with
   only the client's signature: `2001 Invalid or missing message
   signature`. With the address key's signature added beside it:
   accepted, but `signature.asc` held one fresh signature by the address
   key and the client's was gone (the received message's source). So the
-  signed part is sent re-signed by the address key alone, byte for
-  byte; the docs give the alternatives (encrypt too, or sign with the
-  Proton key in the client).
+  signed part is unwrapped and sent as the message, signed by the
+  address key for every recipient (b7a1263); the docs give the
+  alternatives (encrypt too, or sign with the Proton key in the
+  client). A Proton recipient gets it as internal mail, signed inside,
+  so aerc shows no signature (T1c, build_release/peroxide_1794368431.log;
+  peroxide's X-Peroxide-Signature header says pass).
 
 **Left open.**
 
-1. A recipient with a Proton key (internal scheme) is refused with an
-   error: it would need a key packet to its Proton key, which the
-   client's ciphertext has only if the client encrypted to that key.
-2. The Sent copy is the client's message as text inside the draft's
-   multipart/mixed: readable, but its PGP/MIME isn't. For an
-   encrypted one it is the ciphertext (aerc's `pgp-self-encrypt` makes
-   it readable to the sender).
+1. Client-encrypted mail to Proton users, or to several external
+   recipients at once, is refused (see the outcome); the client sends
+   it unencrypted to Proton users, or to each external recipient apart.
+2. The Sent copy of a client-encrypted message is the client's message
+   as a text/plain draft body (Proton refuses multipart/mixed drafts,
+   2011): its PGP/MIME isn't readable as such. It is the ciphertext,
+   which the sender can read only if the client also encrypted to them.
 
 ## 20. Building a large message peaks at about 14x its size
 
