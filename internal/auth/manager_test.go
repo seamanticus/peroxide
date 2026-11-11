@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"slices"
@@ -139,18 +140,49 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// A refresh token spent by another process (10013) is retried with the one
-// that process stored in auth.json, before any login; only when auth.json
-// holds the same spent token does it fall to logging in again.
+// tokenAPI answers /auth/refresh by the refresh token sent: "spent" tokens
+// with 10013, others with a session whose refresh token is "next". Every
+// other request is refused, and all are recorded.
+func tokenAPI(t *testing.T, requests *[]string, spent ...string) roundTripFunc {
+	return func(r *http.Request) (*http.Response, error) {
+		body := `{"Code":2001,"Error":"refused"}`
+		status := http.StatusUnprocessableEntity
+		if r.URL.Path == "/auth/refresh" {
+			var sent struct{ RefreshToken string }
+			if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+				t.Error(err)
+			}
+			*requests = append(*requests, "refresh "+sent.RefreshToken)
+			if slices.Contains(spent, sent.RefreshToken) {
+				body = `{"Code":10013,"Error":"Invalid refresh token"}`
+			} else {
+				status, body = http.StatusOK, `{"Code":1000,"UID":"u","AccessToken":"a","RefreshToken":"next","ExpiresIn":3600}`
+			}
+		} else {
+			*requests = append(*requests, r.Method+" "+r.URL.Path)
+		}
+		return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	}
+}
+
+// A client's login renews the session last saved: session.json's when it
+// has one this bridge password opens, else the auth.json record's own. A
+// refresh token spent by another process (10013) is retried with the one
+// that process stored since; only when none is left does it log in again
+// with the login password.
 // evidence: witnesses
-func TestAuthenticateTriesStoredToken(t *testing.T) {
+func TestOpenSessionTriesStoredToken(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
-		stored       string // refresh token auth.json holds
+		saved        string // refresh token session.json holds at first, "" for none
+		storedSince  string // one another process stores during the first refresh
 		wantRequests []string
 	}{
-		{"another process stored a new one", "new", []string{"refresh old", "refresh new", "GET /users"}},
-		{"the same one is stored", "old", []string{"refresh old", "POST /auth/info"}},
+		{"no session saved: the record's token", "", "", []string{"refresh record", "GET /users"}},
+		{"the session saved", "saved", "", []string{"refresh saved", "GET /users"}},
+		{"spent, another process stored a new one", "old", "new", []string{"refresh old", "refresh new", "GET /users"}},
+		{"spent, none newer", "old", "", []string{"refresh old", "POST /auth/info"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -159,42 +191,187 @@ func TestAuthenticateTriesStoredToken(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := EncryptAndSave(&CachedAuth{UID: "u", RefreshToken: tc.stored}, "bob", secretKey); err != nil {
+			if err := EncryptAndSave(&CachedAuth{UID: "u", RefreshToken: "record"}, "bob", secretKey); err != nil {
 				t.Fatal(err)
+			}
+			record, id, err := readRecord("bob", secretKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessionKey, err := deriveSessionKey(secretKey, "bob")
+			if err != nil {
+				t.Fatal(err)
+			}
+			save := func(token string) {
+				t.Helper()
+				if err := saveSession(&protonmail.Auth{UID: "u", RefreshToken: token}, "bob", &sessionKey, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.saved != "" {
+				save(tc.saved)
 			}
 
 			var requests []string
+			api := tokenAPI(t, &requests, "old")
 			transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				body := `{"Code":2001,"Error":"refused"}`
-				status := http.StatusUnprocessableEntity
-				if r.URL.Path == "/auth/refresh" {
-					b, _ := io.ReadAll(r.Body)
-					switch {
-					case strings.Contains(string(b), `"RefreshToken":"old"`):
-						requests = append(requests, "refresh old")
-						body = `{"Code":10013,"Error":"Invalid refresh token"}`
-					case strings.Contains(string(b), `"RefreshToken":"new"`):
-						requests = append(requests, "refresh new")
-						status, body = http.StatusOK, `{"Code":1000,"UID":"u","AccessToken":"a","RefreshToken":"next","ExpiresIn":3600}`
-					default:
-						t.Errorf("refresh with %s", b)
-					}
-				} else {
-					requests = append(requests, r.Method+" "+r.URL.Path)
+				resp, err := api(r)
+				if tc.storedSince != "" && len(requests) == 1 {
+					save(tc.storedSince)
 				}
-				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}},
-					Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+				return resp, err
 			})
 			c := &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{Transport: transport}}
-			cached := &CachedAuth{UID: "u", RefreshToken: "old"}
 			// Fails after what is checked: GET /users and /auth/info are refused.
-			if _, err := authenticate(c, cached, "bob", secretKey); err == nil {
-				t.Error("authenticate() = nil, want the refused request after")
+			if _, err := openSession(c, record, id, "bob", secretKey); err == nil {
+				t.Error("openSession() = nil, want the refused request after")
 			}
 			if !slices.Equal(requests, tc.wantRequests) {
 				t.Errorf("requests %q, want %q", requests, tc.wantRequests)
 			}
 		})
+	}
+}
+
+// A running session renews with its refresh token alone and saves the new
+// one in session.json. When Proton refuses the token for good, it logs in
+// with no password, as it keeps none: the session is dead, its requests
+// fail without asking Proton again, and its death is signalled once. A
+// server error leaves it alive.
+// evidence: witnesses
+func TestRenewKeepsNoPassword(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	secretKey, _, err := GeneratePassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EncryptAndSave(&CachedAuth{UID: "u", RefreshToken: "record", LoginPassword: "pw"}, "bob", secretKey); err != nil {
+		t.Fatal(err)
+	}
+	_, id, err := readRecord("bob", secretKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionKey, err := deriveSessionKey(secretKey, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var requests []string
+	unavailable := false
+	api := tokenAPI(t, &requests, "next")
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if unavailable {
+			requests = append(requests, "unavailable")
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: http.Header{"Content-Type": {"application/json"}},
+				Body: io.NopCloser(strings.NewReader(`{"Code":503,"Error":"later"}`)), Request: r}, nil
+		}
+		return api(r)
+	})
+	m := NewManager(nil)
+	s := &session{
+		c:          &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{Transport: transport}},
+		died:       make(chan struct{}, 1),
+		auth:       protonmail.Auth{UID: "u", RefreshToken: "first"},
+		sessionKey: sessionKey,
+		record:     id,
+	}
+
+	unavailable = true
+	if err := m.renew(s, "bob"); err == nil || errors.Is(err, errSessionDead) {
+		t.Errorf("renew() while Proton is unavailable = %v, want an error that isn't the session's end", err)
+	}
+	unavailable = false
+
+	requests = nil
+	if err := m.renew(s, "bob"); err != nil {
+		t.Fatalf("renew() = %v", err)
+	}
+	if got := storedSession("bob", &sessionKey); got == nil || got.RefreshToken != "next" {
+		t.Errorf("storedSession() = %+v, want the renewed one", got)
+	}
+	if s.auth.RefreshToken != "next" || !slices.Equal(requests, []string{"refresh first"}) {
+		t.Errorf("after renew(): token %q, requests %q", s.auth.RefreshToken, requests)
+	}
+
+	if len(s.died) != 0 {
+		t.Error("the session's death is signalled while it lives")
+	}
+
+	// "next" is refused: no /auth/info, no login.
+	requests = nil
+	if err := m.renew(s, "bob"); !errors.Is(err, errSessionDead) {
+		t.Errorf("renew() with a refused token = %v, want errSessionDead", err)
+	}
+	if err := m.renew(s, "bob"); !errors.Is(err, errSessionDead) {
+		t.Errorf("renew() of a dead session = %v, want errSessionDead", err)
+	}
+	if !slices.Equal(requests, []string{"refresh next"}) {
+		t.Errorf("requests %q, want one refused refresh and nothing else", requests)
+	}
+	if len(s.died) != 1 {
+		t.Errorf("%v signals of the session's death, want 1", len(s.died))
+	}
+}
+
+// Once Proton has refused the stored password for want of a human (CAPTCHA,
+// 2FA), logins of the account are refused at once with that answer and no
+// request, however often a client retries; a wrong bridge password is still
+// just unauthorized. A record `peroxide auth` stores anew is tried again.
+// The refusal is set by hand: making one needs a whole SRP login.
+// evidence: witnesses
+func TestAuthRefusedUntilNewRecord(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	secretKey, password, err := GeneratePassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherPassword, err := GeneratePassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EncryptAndSave(&CachedAuth{UID: "u", RefreshToken: "record"}, "bob", secretKey); err != nil {
+		t.Fatal(err)
+	}
+	_, id, err := readRecord("bob", secretKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var requests []string
+	m := NewManager(func() *protonmail.Client {
+		return &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{Transport: tokenAPI(t, &requests)}}
+	})
+	needs := &needsAuthError{"needs a human"}
+	m.refused["bob"] = refusal{record: id, err: needs}
+
+	for range 3 {
+		if _, _, _, err := m.Auth("bob", password); !errors.Is(err, needs) {
+			t.Errorf("Auth() of a refused record = %v, want the refusal", err)
+		}
+	}
+	if _, _, _, err := m.Auth("bob", otherPassword); !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("Auth() with a wrong password = %v, want ErrUnauthorized", err)
+	}
+	if len(requests) != 0 {
+		t.Errorf("requests %q, want none", requests)
+	}
+
+	// `peroxide auth` again, even with the same key, seals a new record.
+	if err := EncryptAndSave(&CachedAuth{UID: "u", RefreshToken: "anew"}, "bob", secretKey); err != nil {
+		t.Fatal(err)
+	}
+	// Fails after what is checked: GET /users is refused.
+	if _, _, _, err := m.Auth("bob", password); err == nil || errors.Is(err, needs) {
+		t.Errorf("Auth() of a new record = %v, want it tried", err)
+	}
+	if !slices.Equal(requests, []string{"refresh anew", "GET /users"}) {
+		t.Errorf("requests %q, want the new record's session renewed", requests)
+	}
+	if _, ok := m.refused["bob"]; ok {
+		t.Error("the refusal outlived the record it was for")
 	}
 }
 

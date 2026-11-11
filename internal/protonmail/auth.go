@@ -362,6 +362,12 @@ func (c *Client) Unlock(auth *Auth, keySalts map[string][]byte, passphrase strin
 	return c.unlock(keySalts, passphrase, false)
 }
 
+// UseSession makes the client's requests use auth's session, as a refresh
+// just gave it.
+func (c *Client) UseSession(auth *Auth) {
+	c.setSession(auth.UID, auth.AccessToken)
+}
+
 // UnlockAgain unlocks the keys the account and its addresses have now, with
 // the session the client holds: for keys added since Unlock.
 func (c *Client) UnlockAgain(keySalts map[string][]byte, passphrase string) (openpgp.EntityList, error) {

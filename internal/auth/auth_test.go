@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"crypto/hkdf"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
 // The store key is HKDF-SHA256 of the secret key, salted with the user ID:
@@ -149,12 +150,14 @@ func TestEncryptAndSaveConcurrent(t *testing.T) {
 	}
 }
 
-// A running session's renewal is saved over its own record only: once the
-// account is removed, or logged in anew with another bridge password, the
-// renewal leaves auth.json as it is.
+// A running session's renewal goes to session.json, sealed with its session
+// key, and never touches auth.json; it is saved only while auth.json holds
+// the record the session was read from. Removing the account, or logging in
+// anew (even with the same secret key: the record is sealed afresh), drops
+// the saved session and refuses later saves.
 // evidence: witnesses
 func TestSaveSessionOwnRecordOnly(t *testing.T) {
-	session, _, err := GeneratePassword()
+	secret, _, err := GeneratePassword()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,58 +167,77 @@ func TestSaveSessionOwnRecordOnly(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name    string
-		stored  *[32]byte // the key bob's record is sealed with; nil: no record
+		change  func() error // after the session was read and saved once
 		wantErr error
-		wantUID string // bob's UID in auth.json afterwards, "" for none
 	}{
-		{"own record", session, nil, "renewed"},
-		{"removed", nil, errSessionNotStored, ""},
-		{"logged in anew", other, errSessionNotStored, "anew"},
+		{"own record", func() error { return nil }, nil},
+		{"removed", func() error { return DeleteUsername("bob") }, errSessionNotStored},
+		{"logged in anew", func() error { return EncryptAndSave(&CachedAuth{}, "bob", other) }, errSessionNotStored},
+		{"logged in anew, same key", func() error { return EncryptAndSave(&CachedAuth{}, "bob", secret) }, errSessionNotStored},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 			t.Setenv("HOME", t.TempDir())
-			if err := EncryptAndSave(&CachedAuth{UID: "alice"}, "alice", other); err != nil {
+			if err := EncryptAndSave(&CachedAuth{}, "alice", other); err != nil {
 				t.Fatal(err)
 			}
-			if tc.stored != nil {
-				if err := EncryptAndSave(&CachedAuth{UID: "anew"}, "bob", tc.stored); err != nil {
-					t.Fatal(err)
+			if err := EncryptAndSave(&CachedAuth{LoginPassword: "pw"}, "bob", secret); err != nil {
+				t.Fatal(err)
+			}
+			_, id, err := readRecord("bob", secret)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessionKey, err := deriveSessionKey(secret, "bob")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sessionKey == *secret {
+				t.Fatal("the session key is the secret key")
+			}
+			if err := saveSession(&protonmail.Auth{UID: "first"}, "bob", &sessionKey, id); err != nil {
+				t.Fatalf("saveSession() = %v", err)
+			}
+			if got := storedSession("bob", &sessionKey); got == nil || got.UID != "first" {
+				t.Fatalf("storedSession() = %+v, want the one saved", got)
+			}
+			if got := storedSession("bob", other); got != nil {
+				t.Errorf("storedSession() with another key = %+v, want none", got)
+			}
+
+			if err := tc.change(); err != nil {
+				t.Fatal(err)
+			}
+			p, err := authFilePath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantErr != nil {
+				if got := storedSession("bob", &sessionKey); got != nil {
+					t.Errorf("after the change, storedSession() = %+v, want it dropped", got)
 				}
 			}
 
-			if err := saveSession(&CachedAuth{UID: "renewed"}, "bob", session); !errors.Is(err, tc.wantErr) {
+			if err := saveSession(&protonmail.Auth{UID: "renewed"}, "bob", &sessionKey, id); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("saveSession() = %v, want %v", err, tc.wantErr)
 			}
-
-			auths, err := readCachedAuths()
+			got := storedSession("bob", &sessionKey)
+			if tc.wantErr == nil && (got == nil || got.UID != "renewed") {
+				t.Errorf("storedSession() = %+v, want the renewed one", got)
+			}
+			if tc.wantErr != nil && got != nil {
+				t.Errorf("storedSession() = %+v, want none: the save was refused", got)
+			}
+			after, err := os.ReadFile(p)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, ok := auths["alice"]; !ok {
-				t.Error("alice's record is gone")
-			}
-			sealed, ok := auths["bob"]
-			if tc.wantUID == "" {
-				if ok {
-					t.Error("bob's removed record is back")
-				}
-				return
-			}
-			key := session
-			if tc.stored != nil {
-				key = tc.stored
-			}
-			plain, err := decrypt(sealed, key)
-			if err != nil {
-				t.Fatalf("bob's record doesn't open with the key it was sealed with: %v", err)
-			}
-			var got CachedAuth
-			if err := json.Unmarshal(plain, &got); err != nil {
-				t.Fatal(err)
-			}
-			if got.UID != tc.wantUID {
-				t.Errorf("bob's UID = %q, want %q", got.UID, tc.wantUID)
+			if !bytes.Equal(before, after) {
+				t.Error("saveSession() changed auth.json")
 			}
 		})
 	}

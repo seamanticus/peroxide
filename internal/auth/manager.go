@@ -24,41 +24,91 @@ func isSpentRefreshToken(err error) bool {
 	return ok && apiErr.Code == 10013
 }
 
-func authenticate(c *protonmail.Client, cachedAuth *CachedAuth, username string, secretKey *[32]byte) (openpgp.EntityList, error) {
-	auth, err := c.AuthRefresh(&cachedAuth.Auth)
+// refresh renews the session current with its refresh token. A token spent
+// by another peroxide process (sendmail without serve, download-mailbox) is
+// retried with the one that process stored in session.json.
+func refresh(c *protonmail.Client, current *protonmail.Auth, username string, sessionKey *[32]byte) (*protonmail.Auth, error) {
+	auth, err := c.AuthRefresh(current)
 	if isSpentRefreshToken(err) {
-		// Before logging in again, which Proton may answer with CAPTCHA:
-		// another process may have spent the token and stored the next one.
-		if stored := storedAuth(username, secretKey); stored != nil && stored.RefreshToken != cachedAuth.RefreshToken {
+		if stored := storedSession(username, sessionKey); stored != nil && stored.RefreshToken != current.RefreshToken {
 			log.Printf("The refresh token of %v was spent by another peroxide process: using the one it stored", username)
 			auth, err = c.AuthRefresh(stored)
 		}
 	}
-	if isSpentRefreshToken(err) {
-		// Invalid refresh token, re-authenticate
-		authInfo, err := c.AuthInfo(username)
-		if err != nil {
-			return nil, fmt.Errorf("cannot re-authenticate: failed to get auth info: %v", err)
-		}
+	return auth, err
+}
 
-		auth, err = c.Auth(username, cachedAuth.LoginPassword, authInfo)
-		if apiErr, ok := err.(*protonmail.APIError); ok && apiErr.IsHumanVerificationRequired() {
-			// Human verification can't be completed from a background
-			// session: it needs a browser and a human.
-			return nil, fmt.Errorf("cannot re-authenticate: Proton requires human verification, please run `peroxide auth %v` again", username)
-		} else if err != nil {
-			return nil, fmt.Errorf("cannot re-authenticate: %v", err)
-		}
+// needsAuthError is a login again with the stored password that only
+// `peroxide auth` can mend: Proton asks for human verification or a second
+// factor, which a client's login can't answer.
+type needsAuthError struct{ msg string }
 
-		if auth.TwoFactor.Enabled != 0 {
-			return nil, fmt.Errorf("cannot re-authenticate: two factor authentication enabled, please login again manually")
-		}
+func (e *needsAuthError) Error() string { return e.msg }
+
+// loginAgain logs username in to Proton with the login password of its
+// record, for a session whose refresh token Proton refuses.
+func loginAgain(c *protonmail.Client, record *CachedAuth, username string) (*protonmail.Auth, error) {
+	authInfo, err := c.AuthInfo(username)
+	if err != nil {
+		return nil, fmt.Errorf("cannot re-authenticate: failed to get auth info: %v", err)
+	}
+
+	auth, err := c.Auth(username, record.LoginPassword, authInfo)
+	if apiErr, ok := err.(*protonmail.APIError); ok && apiErr.IsHumanVerificationRequired() {
+		// Human verification can't be completed from a client's login: it
+		// needs a browser and a human.
+		return nil, &needsAuthError{fmt.Sprintf("cannot re-authenticate: Proton requires human verification, please run `peroxide auth %v` again", username)}
 	} else if err != nil {
+		return nil, fmt.Errorf("cannot re-authenticate: %v", err)
+	}
+
+	if auth.TwoFactor.Enabled != 0 {
+		return nil, &needsAuthError{fmt.Sprintf("cannot re-authenticate: two factor authentication enabled, please run `peroxide auth %v` again", username)}
+	}
+	return auth, nil
+}
+
+// opened is what openSession gives a session to keep.
+type opened struct {
+	auth        protonmail.Auth
+	sessionKey  [32]byte
+	privateKeys openpgp.EntityList
+}
+
+// openSession gets username a working Proton session and its unlocked keys
+// from its auth.json record, with the secret key of a client's login: the
+// only time the passwords are read. It renews the session last saved
+// (session.json, else the record's own); if its refresh token is spent, it
+// logs in again with the login password. The new tokens are saved, and a
+// failed save fails the login: the record may be gone (removed: refuse it)
+// or session.json unwritable.
+func openSession(c *protonmail.Client, record *CachedAuth, id recordID, username string, secretKey *[32]byte) (*opened, error) {
+	sessionKey, err := deriveSessionKey(secretKey, username)
+	if err != nil {
 		return nil, err
 	}
-	cachedAuth.Auth = *auth
+	current := &record.Auth
+	if stored := storedSession(username, &sessionKey); stored != nil {
+		current = stored
+	}
 
-	return c.Unlock(auth, cachedAuth.KeySalts, cachedAuth.MailboxPassword)
+	auth, err := refresh(c, current, username, &sessionKey)
+	if isSpentRefreshToken(err) {
+		log.Printf("The refresh token of %v is spent: logging in again", username)
+		auth, err = loginAgain(c, record, username)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	privateKeys, err := c.Unlock(auth, record.KeySalts, record.MailboxPassword)
+	if err != nil {
+		return nil, err
+	}
+	if err := saveSession(auth, username, &sessionKey, id); err != nil {
+		return nil, fmt.Errorf("cannot save the session of %v: %w", username, err)
+	}
+	return &opened{auth: *auth, sessionKey: sessionKey, privateKeys: privateKeys}, nil
 }
 
 // storeKeyInfo labels the store key's derivation, so that it differs from
@@ -86,14 +136,35 @@ func deriveStoreKey(secretKey *[32]byte, userID string) (StoreKey, error) {
 type session struct {
 	hashedSecretKey []byte
 	c               *protonmail.Client
-	privateKeys     openpgp.EntityList
 	storeKey        StoreKey
-	// Set by MarkStale, under Manager.mu: the account has a key that isn't
-	// in privateKeys.
+	// Gets a value when the session dies (renew), taken back when it is
+	// opened again: buffered, so that renew never waits for a reader.
+	died chan struct{}
+
+	// Below, under Manager.mu.
+
+	privateKeys openpgp.EntityList
+	// What renews the session and saves it, and nothing more: the tokens,
+	// the key of its session.json record and the ID of the auth.json record
+	// it was read from. The passwords and the secret key are not kept.
+	auth       protonmail.Auth
+	sessionKey [32]byte
+	record     recordID
+	// Set when the refresh token is spent: requests fail until a client's
+	// login, which brings the bridge password, opens the session again.
+	dead bool
+	// Set by MarkStale: the account has a key that isn't in privateKeys.
 	stale bool
-	// The IDs of the keys MarkStale was given, under Manager.mu: a key that
-	// stays locked is reported once.
+	// The IDs of the keys MarkStale was given: a key that stays locked is
+	// reported once.
 	tried map[string]struct{}
+}
+
+// refusal is a login again that needs `peroxide auth` (needsAuthError), and
+// the auth.json record it was tried with.
+type refusal struct {
+	record recordID
+	err    error
 }
 
 var ErrUnauthorized = errors.New("Invalid username or password")
@@ -108,6 +179,11 @@ type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]*session
 	logins   map[string]chan struct{}
+	// The accounts whose stored password Proton won't take without a human:
+	// their logins are refused at once, with no request, until `peroxide
+	// auth` stores a new record. A client retrying its login would otherwise
+	// send Proton the password again each time.
+	refused map[string]refusal
 }
 
 // loginLock returns the lock of username's login: send to take it, receive
@@ -123,28 +199,29 @@ func (m *Manager) loginLock(username string) chan struct{} {
 	return l
 }
 
-// readRecord opens username's record in auth.json with secretKey.
-func readRecord(username string, secretKey *[32]byte) (*CachedAuth, error) {
+// readRecord opens username's record in auth.json with secretKey, and
+// returns the ID of the sealed record with it.
+func readRecord(username string, secretKey *[32]byte) (*CachedAuth, recordID, error) {
 	auths, err := readCachedAuths()
 	if err != nil && !os.IsNotExist(err) {
-		return nil, err
+		return nil, recordID{}, err
 	}
 
 	encrypted, ok := auths[username]
 	if !ok {
-		return nil, ErrUnauthorized
+		return nil, recordID{}, ErrUnauthorized
 	}
 
 	decrypted, err := decrypt(encrypted, secretKey)
 	if err != nil {
-		return nil, ErrUnauthorized
+		return nil, recordID{}, ErrUnauthorized
 	}
 
 	var cachedAuth CachedAuth
 	if err := json.Unmarshal(decrypted, &cachedAuth); err != nil {
-		return nil, err
+		return nil, recordID{}, err
 	}
-	return &cachedAuth, nil
+	return &cachedAuth, recordIDOf(encrypted), nil
 }
 
 // MarkStale records that username's account has the key keyID, which its
@@ -176,7 +253,7 @@ func (m *Manager) MarkStale(username, keyID string) bool {
 // the mark as they were: the login goes on with the keys it had, and the
 // next one tries again. Called holding username's login lock.
 func (m *Manager) unlockAgain(s *session, username string, secretKey *[32]byte) {
-	record, err := readRecord(username, secretKey)
+	record, _, err := readRecord(username, secretKey)
 	if err != nil {
 		log.Printf("cannot unlock the new keys of %v: cannot read its credentials: %v", username, err)
 		return
@@ -193,10 +270,111 @@ func (m *Manager) unlockAgain(s *session, username string, secretKey *[32]byte) 
 	s.stale = false
 }
 
+// errSessionDead fails the requests of a session Proton won't renew.
+var errSessionDead = errors.New("the Proton session has ended: log in again from your mail client")
+
+// SessionDied returns the channel that gets a value when username's Proton
+// session dies: its refresh token is spent, and only a client's login, which
+// brings the bridge password, can open it again (Auth). A caller serving
+// clients has them log in again. It is nil without a session.
+func (m *Manager) SessionDied(username string) <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.sessions[username]; ok {
+		return s.died
+	}
+	return nil
+}
+
+// renew is the client's ReAuth: it renews s with its refresh token and saves
+// the new one. It has no password to log in again with: if the token is
+// spent, the session is dead until a client's login revives it (Auth), which
+// SessionDied's reader hastens.
+func (m *Manager) renew(s *session, username string) error {
+	m.mu.Lock()
+	current, sessionKey, record, dead := s.auth, s.sessionKey, s.record, s.dead
+	m.mu.Unlock()
+	if dead {
+		return errSessionDead
+	}
+
+	auth, err := refresh(s.c, &current, username, &sessionKey)
+	if isSpentRefreshToken(err) {
+		log.Printf("The refresh token of %v is spent: its session is opened again at the next login", username)
+		m.mu.Lock()
+		s.dead = true
+		m.mu.Unlock()
+		select {
+		case s.died <- struct{}{}:
+		default:
+		}
+		return fmt.Errorf("%w (%v)", errSessionDead, err)
+	}
+	if err != nil {
+		return err
+	}
+	s.c.UseSession(auth)
+	m.mu.Lock()
+	s.auth = *auth
+	m.mu.Unlock()
+	saveRenewed(auth, username, &sessionKey, record)
+	return nil
+}
+
+// open reads username's record with secretKey and opens a session from it
+// (openSession), unless that record was refused before.
+func (m *Manager) open(c *protonmail.Client, username string, secretKey *[32]byte) (*opened, recordID, error) {
+	record, id, err := readRecord(username, secretKey)
+	if err != nil {
+		return nil, recordID{}, err
+	}
+	m.mu.Lock()
+	r, ok := m.refused[username]
+	m.mu.Unlock()
+	if ok && r.record == id {
+		return nil, recordID{}, r.err
+	}
+	o, err := openSession(c, record, id, username, secretKey)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := errors.AsType[*needsAuthError](err); ok {
+		m.refused[username] = refusal{record: id, err: err}
+	} else {
+		delete(m.refused, username)
+	}
+	if err != nil {
+		return nil, recordID{}, err
+	}
+	return o, id, nil
+}
+
+// revive opens s, a dead session, again from username's record. Called
+// holding username's login lock.
+func (m *Manager) revive(s *session, username string, secretKey *[32]byte) error {
+	o, id, err := m.open(s.c, username, secretKey)
+	if err != nil {
+		return err
+	}
+	log.Printf("Opened the Proton session of %v again", username)
+	// This login is the one the signal asked for.
+	select {
+	case <-s.died:
+	default:
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s.auth, s.sessionKey, s.record = o.auth, o.sessionKey, id
+	s.privateKeys = o.privateKeys
+	s.dead, s.stale = false, false
+	return nil
+}
+
 // Auth logs username in with its bridge password, once per process, and
 // returns its API client, its unlocked keys and the key sealing its stored
 // messages. Logins of one account wait for each other; of others, not. A
-// session marked stale (MarkStale) unlocks its keys again first.
+// session marked stale (MarkStale) unlocks its keys again first, and a dead
+// one (renew) is opened again; one that died is also replaced when the
+// password is that of credentials stored since (`peroxide auth` again).
 func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.EntityList, StoreKey, error) {
 	var secretKey [32]byte
 	passwordBytes, err := base64.StdEncoding.DecodeString(password)
@@ -211,44 +389,41 @@ func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.E
 
 	m.mu.Lock()
 	s, ok := m.sessions[username]
+	dead, stale := ok && s.dead, ok && s.stale
 	m.mu.Unlock()
-	if ok {
-		err := bcrypt.CompareHashAndPassword(s.hashedSecretKey, secretKey[:])
-		if err != nil {
+	if ok && bcrypt.CompareHashAndPassword(s.hashedSecretKey, secretKey[:]) != nil {
+		if !dead {
 			return nil, nil, StoreKey{}, ErrUnauthorized
 		}
-		m.mu.Lock()
-		stale := s.stale
-		m.mu.Unlock()
-		if stale {
+		// Not this session's password: it may be that of new credentials,
+		// which the record tells.
+		ok = false
+	}
+	if ok {
+		if dead {
+			if err := m.revive(s, username, &secretKey); err != nil {
+				return nil, nil, StoreKey{}, err
+			}
+		} else if stale {
 			m.unlockAgain(s, username, &secretKey)
 		}
 	} else {
-		cachedAuth, err := readRecord(username, &secretKey)
-		if err != nil {
-			return nil, nil, StoreKey{}, err
-		}
-
 		c := m.newClient()
-		c.ReAuth = func() error {
-			if _, err := authenticate(c, cachedAuth, username, &secretKey); err != nil {
-				return err
-			}
-			saveRenewed(cachedAuth, username, &secretKey)
-			return nil
-		}
-
-		// authenticate updates cachedAuth with the new refresh token
-		privateKeys, err := authenticate(c, cachedAuth, username, &secretKey)
+		o, id, err := m.open(c, username, &secretKey)
 		if err != nil {
 			return nil, nil, StoreKey{}, err
 		}
-
-		// Unlike a refresh's, a failed save fails the login: the record may
-		// be gone (removed: refuse it) or auth.json unwritable.
-		if err := saveSession(cachedAuth, username, &secretKey); err != nil {
-			return nil, nil, StoreKey{}, fmt.Errorf("cannot save the session of %v: %w", username, err)
+		s = &session{
+			c:           c,
+			died:        make(chan struct{}, 1),
+			privateKeys: o.privateKeys,
+			auth:        o.auth,
+			sessionKey:  o.sessionKey,
+			record:      id,
 		}
+		// The closure holds the session, not the record: no password and
+		// no secret key outlive this call.
+		c.ReAuth = func() error { return m.renew(s, username) }
 
 		// The user ID from the account itself: the cached Auth holds what
 		// the last /auth/refresh returned, which need not carry it. One
@@ -257,22 +432,16 @@ func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.E
 		if err != nil {
 			return nil, nil, StoreKey{}, fmt.Errorf("cannot get the account: %w", err)
 		}
-		storeKey, err := deriveStoreKey(&secretKey, pu.ID)
+		s.storeKey, err = deriveStoreKey(&secretKey, pu.ID)
 		if err != nil {
 			return nil, nil, StoreKey{}, err
 		}
 
-		hashed, err := bcrypt.GenerateFromPassword(secretKey[:], bcrypt.DefaultCost)
+		s.hashedSecretKey, err = bcrypt.GenerateFromPassword(secretKey[:], bcrypt.DefaultCost)
 		if err != nil {
 			return nil, nil, StoreKey{}, err
 		}
 
-		s = &session{
-			c:               c,
-			privateKeys:     privateKeys,
-			hashedSecretKey: hashed,
-			storeKey:        storeKey,
-		}
 		m.mu.Lock()
 		m.sessions[username] = s
 		m.mu.Unlock()
@@ -288,5 +457,6 @@ func NewManager(newClient func() *protonmail.Client) *Manager {
 		newClient: newClient,
 		sessions:  make(map[string]*session),
 		logins:    make(map[string]chan struct{}),
+		refused:   make(map[string]refusal),
 	}
 }

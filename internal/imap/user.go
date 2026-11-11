@@ -97,6 +97,10 @@ type user struct {
 	// (unlockSyncAndSend), so updates reach clients in the order the changes
 	// were made. A 1-slot channel, as syncSem.
 	sendSem chan struct{}
+	// Gets a value when the account's Proton session dies
+	// (auth.Manager.SessionDied): the events goroutine then has the clients
+	// log in again. Nil where no clients are served.
+	sessionDied <-chan struct{}
 	// Set, under syncSem, when the events were rewound (download done, or a
 	// page to retry): pages delivered before the rewind took effect are
 	// dropped until the one asked after replayFrom comes (Event.After).
@@ -182,6 +186,7 @@ func newUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 		syncSem:     make(chan struct{}, 1),
 		sendSem:     make(chan struct{}, 1),
 		numClients:  1,
+		sessionDied: be.sessions.SessionDied(username),
 	}
 
 	db, keyChanged, err := database.Open(u.Name, storeKey)
@@ -821,7 +826,20 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 	// clients have gone, are drained unapplied, and their IDs not stored.
 	rebuilding := false
 	deliver := func(ups []imapbackend.Update) { u.sendOn(updates, ups) }
-	for event := range events {
+	for {
+		var event *protonmail.Event
+		select {
+		case e, ok := <-events:
+			if !ok {
+				return
+			}
+			event = e
+		case <-u.sessionDied:
+			// No events come any more: the session can't ask for them.
+			u.relogin(updates, "its Proton session ended",
+				"Your Proton session ended: please log in again to open it")
+			continue
+		}
 		if rebuilding {
 			continue
 		}
@@ -916,7 +934,8 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			rebuilding = true
 		} else if newKey {
 			// The pages that follow are still applied: nothing is wiped.
-			u.relogin(updates)
+			u.relogin(updates, "logging in again unlocks its new key",
+				"Your Proton account has a new key: please log in again to unlock it")
 		}
 	}
 }
@@ -1040,14 +1059,16 @@ func (u *user) rebuild(updates chan<- imapbackend.Update) {
 	u.bye(updates, "Proton's mail changed in a way peroxide must download again: please log in again")
 }
 
-// relogin disconnects every client of the account, with BYE, because the
-// account has a key this session hasn't unlocked (markLockedKeys). Nothing
-// that unlocks keys is kept: the login that follows brings the bridge
-// password, with which auth.Manager unlocks the keys again, and waits for
+// relogin disconnects every client of the account, with BYE saying info,
+// because only a login can mend the session: the account has a key it hasn't
+// unlocked (markLockedKeys), or its Proton session died
+// (auth.Manager.SessionDied). Nothing that unlocks keys or logs in is kept:
+// the login that follows brings the bridge password, with which
+// auth.Manager unlocks the keys or opens the session again, and waits for
 // this user to end (getUser), so that it starts one with the new keys, which
-// builds again the messages left encrypted (refreshFallbacks). Called by the
-// events goroutine only, without syncSem.
-func (u *user) relogin(updates chan<- imapbackend.Update) {
+// builds again the messages left encrypted (refreshFallbacks). why is for
+// the log. Called by the events goroutine only, without syncSem.
+func (u *user) relogin(updates chan<- imapbackend.Update, why, info string) {
 	u.Lock()
 	ending := u.ending
 	u.ending = true
@@ -1055,8 +1076,8 @@ func (u *user) relogin(updates chan<- imapbackend.Update) {
 	if ending {
 		return
 	}
-	log.Printf("Disconnecting the clients of %q: logging in again unlocks its new key", u.u.Name)
-	u.bye(updates, "Your Proton account has a new key: please log in again to unlock it")
+	log.Printf("Disconnecting the clients of %q: %v", u.u.Name, why)
+	u.bye(updates, info)
 }
 
 // bye tells every client of the account why it is disconnected, then ends

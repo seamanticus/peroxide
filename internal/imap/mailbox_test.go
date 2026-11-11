@@ -675,6 +675,38 @@ func TestAddressEventWithNewKeyDisconnects(t *testing.T) {
 	}
 }
 
+// When the account's Proton session dies, the events goroutine, which gets
+// no more events, has the clients log in again: one BYE, and the user takes
+// no new login, so that the next one starts on the session opened again.
+// evidence: witnesses
+func TestSessionDeathDisconnects(t *testing.T) {
+	inbox, _ := newTestMailbox(t, nil)
+	u := inbox.u
+	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
+	u.backend = &backend{}
+	died := make(chan struct{}, 1)
+	u.sessionDied = died
+
+	events := make(chan *protonmail.Event)
+	updates := make(chan imapbackend.Update)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		u.receiveEvents(updates, events)
+	}()
+	died <- struct{}{}
+	up := <-updates
+	if s, ok := up.(*imapbackend.StatusUpdate); !ok || s.Type != imap.StatusRespBye || s.Username() != "bob" {
+		t.Errorf("sent %#v, want a BYE to bob", up)
+	}
+	close(up.Done())
+	close(events)
+	<-done
+	if !u.ending {
+		t.Error("the user still takes logins, want it ending")
+	}
+}
+
 // roundTripFunc answers HTTP requests in memory: unlike an httptest server,
 // it starts no goroutine, so it works inside a synctest bubble.
 type roundTripFunc func(*http.Request) (*http.Response, error)
