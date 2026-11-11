@@ -867,3 +867,26 @@ in its vault, whose key is in memory (section 7).
 ptrace of the process (`prctl(PR_SET_DUMPABLE, 0)`, RLIMIT_CORE);
 `runtime/secret` (erases temporaries) is still behind
 GOEXPERIMENT=runtimesecret in go1.27.
+
+## 23. Check what Proton answers to `DELETE /auth`
+
+When a session's `auth.json` record is removed or replaced while
+`serve` runs, `auth.Manager.endSession` logs the session out at Proton
+with `protonmail.Client.Logout`: `DELETE /auth` with the session's own
+`X-Pm-Uid` and access token, as go-proton-api's `AuthDelete` sends
+(`/auth/v4`; peroxide's paths have no version). It has never been seen
+live. Check, with `-debug`:
+
+1. Run `peroxide auth <user>` again while `serve` runs, then log in
+   from aerc with the new bridge password. Expect `>> DELETE
+   /api/auth`, `<< DELETE /api/auth 200` and `Logged out the ended
+   session of <user> at Proton`.
+2. In Proton's web settings, "Session management": the old session
+   is gone.
+3. Also the refresh path: leave `serve` running a day after `peroxide
+   auth` with no login; the log shows the refresh, then the logout with
+   the tokens it got.
+4. If Proton answers anything but 1000 (a 404 for the unversioned path,
+   a 401 for an expired access token on a dead session), decide whether
+   to use `/auth/v4`, or to refresh first so the logout carries a live
+   token.

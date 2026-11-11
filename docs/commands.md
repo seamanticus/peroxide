@@ -69,8 +69,11 @@ sessions. If either server stops with an error, the process exits. Use
 `serve` is the only command that runs a server: run one per account set.
 Proton's refresh tokens are single use, so two peroxide processes
 holding sessions for the same account would each refresh it, and the
-slower one, its token spent, is logged out until `peroxide auth` is run
-again. (Older peroxide had separate `imap` and `smtp` commands, which
+slower one, its token spent, would have to fall back on the token the
+other saved in `session.json`, or log in with the stored password, which
+Proton may answer with a CAPTCHA
+([accounts.md](accounts.md#logging-in-from-a-client)). (Older peroxide
+had separate `imap` and `smtp` commands, which
 did exactly that when run side by side.) `serve` holds a lock,
 `serve.lock` in the configuration directory, while it runs: a second
 `serve` stops with "peroxide serve is already running", `sendmail`
@@ -328,10 +331,13 @@ proton-bridge sends.
 
 ## Environment
 
-- `PEROXIDE_BRIDGE_PASS`: the bridge password for `sendmail`, instead
-  of a prompt. Environment variables can be read by other processes of
-  the same user (`/proc/<pid>/environ`); prefer piping it from a
-  password manager into the command's environment only.
+- `PEROXIDE_BRIDGE_PASS`: the bridge password for `sendmail` and
+  `download-mailbox`, instead of a prompt. peroxide's own environment
+  can be read only by root, as it makes itself non-dumpable
+  ([security.md](security.md)), but the shell or script that sets the
+  variable can be read by other processes of the same user
+  (`/proc/<pid>/environ`): set it for the one command only, piped from
+  a password manager, never exported in a long-lived shell.
 - `XDG_CONFIG_HOME`: where `peroxide/` is created (default
   `~/.config`). See
   [accounts.md](accounts.md#files-on-disk).

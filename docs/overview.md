@@ -58,7 +58,8 @@ client logs in.
 peroxide decrypts the matching `auth.json` entry with it, refreshes the
 Proton session, and unlocks your private keys. The unlocked keys stay
 in memory for as long as the process runs: a second login, from any
-client, only checks the password against a bcrypt hash and reuses them.
+client, only checks the password against a one-way verifier derived
+from it, and reuses them.
 
 **The IMAP account opens.** peroxide lists your Proton folders and
 labels, opens `~/.config/peroxide/<user>.db`, and starts polling

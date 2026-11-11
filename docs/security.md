@@ -23,6 +23,11 @@ details are on the pages linked.
   core dump, and other processes of your user can't attach a debugger
   to it or read its memory. Root can. If the call is refused, peroxide
   warns and runs on.
+- **Memory can reach swap.** peroxide doesn't lock its memory
+  (`mlock`), so the unlocked keys, the tokens and the derived keys may
+  be written to a swap partition or file under memory pressure, and
+  stay there after peroxide exits. Encrypt swap, or run without it, if
+  that matters to you.
 - **Your passwords and the bridge password are not kept in memory.**
   They are read from `auth.json`, with the bridge password a client
   sends, only while that login needs them: the first of a process, one
@@ -58,6 +63,18 @@ Consequences:
 - `peroxide auth -remove` leaves `<user>.db`, the message store and the
   Proton session behind
   ([accounts.md](accounts.md#files-on-disk)).
+- **A leaked bridge password is revoked without a restart**: run
+  `peroxide auth` again, then log in once from your client with the new
+  password. A running `serve` then ends the session of the old
+  credentials, logs it out at Proton, disconnects its clients and
+  refuses the old password. Without that login it does so at the
+  account's next refresh, about a day later at most; until then
+  clients already connected still work. A login with the old password
+  ends the session too, and is refused
+  ([accounts.md](accounts.md#logging-in-from-a-client)).
+- **The bridge password is checked with a fast one-way verifier, not a
+  slow password hash**: it is 32 random bytes, which no guessing finds
+  at any speed ([accounts.md](accounts.md#logging-in-from-a-client)).
 
 ## The message store
 
