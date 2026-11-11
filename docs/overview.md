@@ -90,17 +90,19 @@ The keys stay unlocked in memory until the process exits.
 ## What peroxide keeps where
 
 - On disk, in `~/.config/peroxide/` (or `$XDG_CONFIG_HOME/peroxide/`):
-  `auth.json` (credentials, encrypted) and one `<user>.db` per account
+  `auth.json` (credentials, encrypted), `session.json` (the Proton
+  session's tokens, encrypted) and one `<user>.db` per account
   (message metadata). See [accounts.md](accounts.md).
 - On disk, in `~/.local/share/peroxide/<user>/` (or
   `$XDG_DATA_HOME/peroxide/<user>/`): every message, sealed under a key
   derived from the bridge password. See
   [security.md](security.md#the-message-store).
 - In memory, while the process runs: the unlocked private keys, the
-  Proton session, the store key, and, to renew the session, the
-  decrypted `auth.json` record (login and mailbox passwords, key
-  salts) with the key that is the bridge password (`TODO.md` section
-  22).
+  Proton session's tokens, the store key and the session key (which
+  opens only the `session.json` record). Your passwords and the bridge
+  password pass through memory at each client login that needs them
+  and are not kept; Go can't erase them, so traces may linger until the
+  memory is reused ([security.md](security.md)).
 - Never on disk: the bridge password and the unlocked keys.
 
 ## How proton-bridge does it

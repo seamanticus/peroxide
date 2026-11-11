@@ -17,17 +17,26 @@ details are on the pages linked.
   themselves with the bridge password. Any local process that has it
   can read and send all your mail.
 - **Your private keys** are unlocked in peroxide's memory for as long as
-  it runs, after the first client login. Anyone who can read that
-  process's memory (root, a debugger, a core dump) can take them, and
-  with them your login and mailbox passwords and the bridge password,
-  which peroxide keeps there to renew the session (`TODO.md` section
-  22).
+  it runs, after the first client login, with the Proton session's
+  tokens and the key of the message store. peroxide makes itself
+  non-dumpable at start (`prctl(PR_SET_DUMPABLE, 0)`): it leaves no
+  core dump, and other processes of your user can't attach a debugger
+  to it or read its memory. Root can. If the call is refused, peroxide
+  warns and runs on.
+- **Your passwords and the bridge password are not kept in memory.**
+  They are read from `auth.json`, with the bridge password a client
+  sends, only while that login needs them: the first of a process, one
+  after a key change, one after the session died
+  ([accounts.md](accounts.md#logging-in-from-a-client)). Go gives no way
+  to erase them afterwards, so copies may linger in freed memory until
+  it is reused: "not kept", not "wiped".
 
 ## What is on disk
 
 | | Content | Protection |
 |---|---|---|
-| `auth.json` | Session tokens, **login password**, **mailbox password**, key salts | NaCl secretbox under a key that *is* the bridge password; file mode 0600, directory 0700 |
+| `auth.json` | **Login password**, **mailbox password**, key salts, the session of when `auth` ran | NaCl secretbox under a key that *is* the bridge password; file mode 0600, directory 0700 |
+| `session.json` | The Proton session's tokens, renewed about daily | NaCl secretbox under a key derived from the bridge password; file mode 0600 |
 | `<user>.db` | Message metadata of every message listed: subjects, addresses, dates, labels, attachment names | none, file mode 0700, directory 0700 |
 | message store, `~/.local/share/peroxide/<user>/` | Every message as served to clients, decrypted, one file each; in `<user>.db`, its structure and envelope | AES-256-GCM under a key derived from the bridge password, never stored; files 0600, directory 0700 |
 | `-debug` output, if you keep it | Decrypted mail and metadata | whatever you give it |
