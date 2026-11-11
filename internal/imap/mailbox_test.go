@@ -19,6 +19,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/emersion/go-imap"
 	imapbackend "github.com/emersion/go-imap/backend"
 	imapserver "github.com/emersion/go-imap/server"
@@ -565,6 +567,110 @@ func TestAddressEvents(t *testing.T) {
 		}
 		if got := addressEmails(before); !slices.Equal(got, kept) {
 			t.Errorf("%v: list read before changed to %v, was %v", step.name, got, kept)
+		}
+	}
+}
+
+// armoredKey returns e's private key as Proton lists an address key.
+func armoredKey(t *testing.T, id string, e *openpgp.Entity) *protonmail.PrivateKey {
+	t.Helper()
+	var b bytes.Buffer
+	aw, err := armor.Encode(&b, "PGP PRIVATE KEY BLOCK", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.SerializePrivateWithoutSigning(aw, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := aw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &protonmail.PrivateKey{ID: id, Active: 1, PrivateKey: b.String()}
+}
+
+// An address event bringing an active key the session hasn't unlocked marks
+// the session stale and disconnects the account's clients with BYE, once:
+// the login that follows unlocks it. The user then takes no new login
+// (getUser waits for it to end). A key already unlocked, an inactive one, or
+// the same key again, disconnect no one.
+// evidence: witnesses
+func TestAddressEventWithNewKeyDisconnects(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	secretKey, password, err := auth.GeneratePassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.EncryptAndSave(&auth.CachedAuth{}, "bob", secretKey); err != nil {
+		t.Fatal(err)
+	}
+	have, added := newKey(t, "have"), newKey(t, "added")
+	apiUser := &protonmail.User{ID: "uid", Name: "bob", Keys: []*protonmail.PrivateKey{armoredKey(t, "user", newKey(t, "user"))}}
+	apiAddr := &protonmail.Address{ID: "a1", Email: "bob@proton.me", Keys: []*protonmail.PrivateKey{armoredKey(t, "k1", have)}}
+	sessions := auth.NewManager(func() *protonmail.Client {
+		return &protonmail.Client{RootURL: "https://api.test", HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			body := map[string]any{"Code": 1000, "UID": "u", "AccessToken": "a", "RefreshToken": "n", "ExpiresIn": 3600,
+				"User": apiUser, "Addresses": []*protonmail.Address{apiAddr}}
+			b, err := json.Marshal(body)
+			if err != nil {
+				t.Error(err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}},
+				Body: io.NopCloser(bytes.NewReader(b)), Request: r}, nil
+		})}}
+	})
+	if _, _, _, err := sessions.Auth("bob", password); err != nil {
+		t.Fatalf("Auth() = %v", err)
+	}
+
+	inbox, _ := newTestMailbox(t, nil)
+	u := inbox.u
+	u.username = "bob"
+	u.mailboxes = map[string]*mailbox{protonmail.LabelInbox: inbox}
+	u.privateKeys = openpgp.EntityList{have}
+	u.backend = &backend{sessions: sessions}
+
+	inactive := armoredKey(t, "k0", newKey(t, "inactive"))
+	inactive.Active = 0
+	for _, step := range []struct {
+		name    string
+		keys    []*protonmail.PrivateKey
+		wantBye bool
+	}{
+		{"key already unlocked", []*protonmail.PrivateKey{armoredKey(t, "k1", have)}, false},
+		{"inactive key", []*protonmail.PrivateKey{armoredKey(t, "k1", have), inactive}, false},
+		{"new key", []*protonmail.PrivateKey{armoredKey(t, "k1", have), armoredKey(t, "k2", added)}, true},
+		{"the same key again", []*protonmail.PrivateKey{armoredKey(t, "k1", have), armoredKey(t, "k2", added)}, false},
+	} {
+		events := make(chan *protonmail.Event, 1)
+		events <- &protonmail.Event{Addresses: []*protonmail.EventAddress{{ID: "a1", Action: protonmail.EventUpdate,
+			Address: &protonmail.Address{ID: "a1", Email: "bob@proton.me", Keys: step.keys}}}}
+		close(events)
+		updates := make(chan imapbackend.Update)
+		byes := 0
+		delivered := make(chan struct{})
+		go func() {
+			defer close(delivered)
+			for up := range updates {
+				if s, ok := up.(*imapbackend.StatusUpdate); ok && s.Type == imap.StatusRespBye && s.Username() == "bob" {
+					byes++
+				}
+				close(up.Done())
+			}
+		}()
+		u.receiveEvents(updates, events)
+		close(updates)
+		<-delivered
+
+		want := 0
+		if step.wantBye {
+			want = 1
+		}
+		if byes != want {
+			t.Errorf("%v: %v BYE sent, want %v", step.name, byes, want)
+		}
+		if step.wantBye && !u.ending {
+			t.Errorf("%v: the user still takes logins, want it ending", step.name)
 		}
 	}
 }

@@ -106,9 +106,9 @@ type user struct {
 	sync.Mutex // protects everything below
 
 	numClients int
-	// Set by rebuild: no login joins this user, which is ending.
-	rebuilding bool
-	mailboxes  map[string]*mailbox // indexed by label ID
+	// Set by rebuild and relogin: no login joins this user, which is ending.
+	ending    bool
+	mailboxes map[string]*mailbox // indexed by label ID
 	// Every mailbox by name, and folders and labels in LIST order: rebuilt
 	// by nameMailboxes whenever a name may have changed.
 	byName map[string]*mailbox
@@ -140,9 +140,10 @@ func getUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 		}
 
 		u.Lock()
-		// A user being rebuilt is closing too: its clients are being
-		// disconnected, and the login that follows wipes the database.
-		closing := u.numClients == 0 || u.rebuilding
+		// A user being rebuilt or logged in again is closing too: its
+		// clients are being disconnected, and the login that follows starts
+		// a user anew, on a wiped database or with the keys unlocked again.
+		closing := u.numClients == 0 || u.ending
 		if !closing {
 			u.numClients++
 		}
@@ -827,6 +828,7 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 		var eventUpdates []imapbackend.Update
 		var failed, retry int
 		var changed []string
+		newKey := false
 
 		// Applied whole while no download page is stored, and sent in turn
 		// (unlockSyncAndSend).
@@ -849,7 +851,9 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 				checkNames = checkNames || check
 			}
 			for _, eventAddress := range event.Addresses {
-				u.handleAddressEvent(eventAddress)
+				if u.handleAddressEvent(eventAddress) {
+					newKey = true
+				}
 			}
 
 			for _, eventMessage := range event.Messages {
@@ -910,6 +914,9 @@ func (u *user) receiveEvents(updates chan<- imapbackend.Update, events <-chan *p
 			}
 			u.rebuild(updates)
 			rebuilding = true
+		} else if newKey {
+			// The pages that follow are still applied: nothing is wiped.
+			u.relogin(updates)
 		}
 	}
 }
@@ -1022,7 +1029,7 @@ func (u *user) updateUnknownMessage(apiID string) ([]imapbackend.Update, error) 
 // without syncSem.
 func (u *user) rebuild(updates chan<- imapbackend.Update) {
 	u.Lock()
-	u.rebuilding = true
+	u.ending = true
 	u.Unlock()
 	if err := u.db.SetNeedsRebuild(); err != nil {
 		// The page's event ID isn't stored either: the next session applies
@@ -1030,12 +1037,36 @@ func (u *user) rebuild(updates chan<- imapbackend.Update) {
 		log.Printf("cannot mark the database of %q for a rebuild: %v", u.u.Name, err)
 	}
 	u.stopDownload()
+	u.bye(updates, "Proton's mail changed in a way peroxide must download again: please log in again")
+}
 
+// relogin disconnects every client of the account, with BYE, because the
+// account has a key this session hasn't unlocked (markLockedKeys). Nothing
+// that unlocks keys is kept: the login that follows brings the bridge
+// password, with which auth.Manager unlocks the keys again, and waits for
+// this user to end (getUser), so that it starts one with the new keys, which
+// builds again the messages left encrypted (refreshFallbacks). Called by the
+// events goroutine only, without syncSem.
+func (u *user) relogin(updates chan<- imapbackend.Update) {
+	u.Lock()
+	ending := u.ending
+	u.ending = true
+	u.Unlock()
+	if ending {
+		return
+	}
+	log.Printf("Disconnecting the clients of %q: logging in again unlocks its new key", u.u.Name)
+	u.bye(updates, "Your Proton account has a new key: please log in again to unlock it")
+}
+
+// bye tells every client of the account why it is disconnected, then ends
+// their connections.
+func (u *user) bye(updates chan<- imapbackend.Update, info string) {
 	bye := &imapbackend.StatusUpdate{
 		Update: imapbackend.NewUpdate(u.u.Name, ""),
 		StatusResp: &imap.StatusResp{
 			Type: imap.StatusRespBye,
-			Info: "Proton's mail changed in a way peroxide must download again: please log in again",
+			Info: info,
 		},
 	}
 	// In turn after what clients were told before (sendSem), bounded.

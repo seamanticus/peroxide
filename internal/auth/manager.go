@@ -88,6 +88,12 @@ type session struct {
 	c               *protonmail.Client
 	privateKeys     openpgp.EntityList
 	storeKey        StoreKey
+	// Set by MarkStale, under Manager.mu: the account has a key that isn't
+	// in privateKeys.
+	stale bool
+	// The IDs of the keys MarkStale was given, under Manager.mu: a key that
+	// stays locked is reported once.
+	tried map[string]struct{}
 }
 
 var ErrUnauthorized = errors.New("Invalid username or password")
@@ -117,9 +123,80 @@ func (m *Manager) loginLock(username string) chan struct{} {
 	return l
 }
 
+// readRecord opens username's record in auth.json with secretKey.
+func readRecord(username string, secretKey *[32]byte) (*CachedAuth, error) {
+	auths, err := readCachedAuths()
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	encrypted, ok := auths[username]
+	if !ok {
+		return nil, ErrUnauthorized
+	}
+
+	decrypted, err := decrypt(encrypted, secretKey)
+	if err != nil {
+		return nil, ErrUnauthorized
+	}
+
+	var cachedAuth CachedAuth
+	if err := json.Unmarshal(decrypted, &cachedAuth); err != nil {
+		return nil, err
+	}
+	return &cachedAuth, nil
+}
+
+// MarkStale records that username's account has the key keyID, which its
+// session hasn't unlocked (a new address, a key rotation). Nothing that
+// unlocks keys is kept for it: the next Auth of the account, which brings
+// the bridge password, unlocks them again. It reports whether the key is
+// news: false for a key marked before, which that Auth couldn't unlock or
+// hasn't yet, and without a session, whose first Auth unlocks anyway.
+func (m *Manager) MarkStale(username, keyID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[username]
+	if !ok {
+		return false
+	}
+	if _, ok := s.tried[keyID]; ok {
+		return false
+	}
+	if s.tried == nil {
+		s.tried = make(map[string]struct{})
+	}
+	s.tried[keyID] = struct{}{}
+	s.stale = true
+	return true
+}
+
+// unlockAgain replaces the keys of s, a stale session, with those the
+// mailbox password in auth.json unlocks now. A failure leaves the keys and
+// the mark as they were: the login goes on with the keys it had, and the
+// next one tries again. Called holding username's login lock.
+func (m *Manager) unlockAgain(s *session, username string, secretKey *[32]byte) {
+	record, err := readRecord(username, secretKey)
+	if err != nil {
+		log.Printf("cannot unlock the new keys of %v: cannot read its credentials: %v", username, err)
+		return
+	}
+	privateKeys, err := s.c.UnlockAgain(record.KeySalts, record.MailboxPassword)
+	if err != nil {
+		log.Printf("cannot unlock the new keys of %v: %v", username, err)
+		return
+	}
+	log.Printf("Unlocked the keys of %v again: %v keys", username, len(privateKeys))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s.privateKeys = privateKeys
+	s.stale = false
+}
+
 // Auth logs username in with its bridge password, once per process, and
 // returns its API client, its unlocked keys and the key sealing its stored
-// messages. Logins of one account wait for each other; of others, not.
+// messages. Logins of one account wait for each other; of others, not. A
+// session marked stale (MarkStale) unlocks its keys again first.
 func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.EntityList, StoreKey, error) {
 	var secretKey [32]byte
 	passwordBytes, err := base64.StdEncoding.DecodeString(password)
@@ -140,45 +217,36 @@ func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.E
 		if err != nil {
 			return nil, nil, StoreKey{}, ErrUnauthorized
 		}
+		m.mu.Lock()
+		stale := s.stale
+		m.mu.Unlock()
+		if stale {
+			m.unlockAgain(s, username, &secretKey)
+		}
 	} else {
-		auths, err := readCachedAuths()
-		if err != nil && !os.IsNotExist(err) {
-			return nil, nil, StoreKey{}, err
-		}
-
-		encrypted, ok := auths[username]
-		if !ok {
-			return nil, nil, StoreKey{}, ErrUnauthorized
-		}
-
-		decrypted, err := decrypt(encrypted, &secretKey)
+		cachedAuth, err := readRecord(username, &secretKey)
 		if err != nil {
-			return nil, nil, StoreKey{}, ErrUnauthorized
-		}
-
-		var cachedAuth CachedAuth
-		if err := json.Unmarshal(decrypted, &cachedAuth); err != nil {
 			return nil, nil, StoreKey{}, err
 		}
 
 		c := m.newClient()
 		c.ReAuth = func() error {
-			if _, err := authenticate(c, &cachedAuth, username, &secretKey); err != nil {
+			if _, err := authenticate(c, cachedAuth, username, &secretKey); err != nil {
 				return err
 			}
-			saveRenewed(&cachedAuth, username, &secretKey)
+			saveRenewed(cachedAuth, username, &secretKey)
 			return nil
 		}
 
 		// authenticate updates cachedAuth with the new refresh token
-		privateKeys, err := authenticate(c, &cachedAuth, username, &secretKey)
+		privateKeys, err := authenticate(c, cachedAuth, username, &secretKey)
 		if err != nil {
 			return nil, nil, StoreKey{}, err
 		}
 
 		// Unlike a refresh's, a failed save fails the login: the record may
 		// be gone (removed: refuse it) or auth.json unwritable.
-		if err := saveSession(&cachedAuth, username, &secretKey); err != nil {
+		if err := saveSession(cachedAuth, username, &secretKey); err != nil {
 			return nil, nil, StoreKey{}, fmt.Errorf("cannot save the session of %v: %w", username, err)
 		}
 
@@ -210,6 +278,8 @@ func (m *Manager) Auth(username, password string) (*protonmail.Client, openpgp.E
 		m.mu.Unlock()
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return s.c, s.privateKeys, s.storeKey, nil
 }
 

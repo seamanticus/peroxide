@@ -359,7 +359,19 @@ func (c *Client) Unlock(auth *Auth, keySalts map[string][]byte, passphrase strin
 
 	// With the token just got, a 401 is the answer: renewing would refresh
 	// again, and inside ReAuth wait for itself.
-	u, err := c.currentUser(false)
+	return c.unlock(keySalts, passphrase, false)
+}
+
+// UnlockAgain unlocks the keys the account and its addresses have now, with
+// the session the client holds: for keys added since Unlock.
+func (c *Client) UnlockAgain(keySalts map[string][]byte, passphrase string) (openpgp.EntityList, error) {
+	return c.unlock(keySalts, passphrase, true)
+}
+
+// unlock is Unlock without setting the session; renew says whether a 401
+// may renew it (see withoutRenewal).
+func (c *Client) unlock(keySalts map[string][]byte, passphrase string, renew bool) (openpgp.EntityList, error) {
+	u, err := c.currentUser(renew)
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +381,7 @@ func (c *Client) Unlock(auth *Auth, keySalts map[string][]byte, passphrase strin
 		return nil, err
 	}
 
-	addrs, err := c.listAddresses(false)
+	addrs, err := c.listAddresses(renew)
 	if err != nil {
 		return nil, err
 	}
