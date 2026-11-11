@@ -169,7 +169,24 @@ func listenAndServeIMAP(addr string, debug bool, authManager *auth.Manager, even
 	return s.ListenAndServe()
 }
 
+// protectMemory makes the process non-dumpable (prctl(2) PR_SET_DUMPABLE):
+// it leaves no core dump, and no process of the same user, only root, can
+// attach to it or read its memory (ptrace(2), /proc/<pid>/mem), which holds
+// the unlocked keys. Programs it starts (the browser of `auth`) are not
+// affected: execve(2) sets the flag again.
+func protectMemory() error {
+	if _, _, errno := syscall.Syscall(syscall.SYS_PRCTL, syscall.PR_SET_DUMPABLE, 0, 0); errno != 0 {
+		return fmt.Errorf("prctl(PR_SET_DUMPABLE, 0): %w", errno)
+	}
+	return nil
+}
+
 func main() {
+	// Before anything secret is read. Not fatal: a sandbox may refuse
+	// prctl, and peroxide is then as it was without it.
+	if err := protectMemory(); err != nil {
+		fmt.Fprintln(os.Stderr, "peroxide: warning: cannot keep other processes from reading this one's memory:", err)
+	}
 	inv, err := parseArgs(os.Args[1:])
 	if errors.Is(err, errHelp) {
 		fmt.Print(usage)
