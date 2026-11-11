@@ -362,6 +362,21 @@ func (c *Client) Unlock(auth *Auth, keySalts map[string][]byte, passphrase strin
 	return c.unlock(keySalts, passphrase, false)
 }
 
+// Logout ends auth's session at Proton (DELETE /auth, what proton-bridge's
+// AuthDelete sends): its access and refresh tokens are refused from then
+// on. It is sent with auth's tokens, whatever the client holds, and a 401
+// fails it rather than renewing the session it ends.
+func (c *Client) Logout(auth *Auth) error {
+	req, err := c.newRequest(http.MethodDelete, "/auth", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Pm-Uid", auth.UID)
+	req.Header.Set("Authorization", "Bearer "+auth.AccessToken)
+	var respData resp
+	return c.doJSON(withoutRenewal(req), &respData)
+}
+
 // UseSession makes the client's requests use auth's session, as a refresh
 // just gave it.
 func (c *Client) UseSession(auth *Auth) {
