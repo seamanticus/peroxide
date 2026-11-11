@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,6 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 
 	"golang.org/x/crypto/nacl/secretbox"
@@ -72,7 +74,6 @@ type CachedAuth struct {
 	LoginPassword   string
 	MailboxPassword string
 	KeySalts        map[string][]byte
-	// TODO: add padding
 }
 
 func readCachedAuths() (map[string]string, error) {
@@ -145,23 +146,50 @@ func writeSealed(name string, records map[string]string) error {
 	if err := os.Rename(tmp, p); err != nil {
 		return fmt.Errorf("failed to replace %v: %v", name, err)
 	}
+	// The rename is durable once the directory is: a crash could otherwise
+	// bring back the old file, whose refresh token is spent.
+	dir, err := os.Open(filepath.Dir(p))
+	if err != nil {
+		return fmt.Errorf("cannot open the directory of %v: %w", name, err)
+	}
+	defer dir.Close()
+	if err := dir.Sync(); err != nil {
+		return fmt.Errorf("cannot sync the directory of %v: %w", name, err)
+	}
 	return nil
 }
 
+// padTo is the block a record's cleartext is padded to, with trailing JSON
+// whitespace, before it is sealed: the length of a sealed record tells the
+// lengths of the passwords and tokens in it only to within a block.
+const padTo = 512
+
+// pad returns msg followed by spaces up to the next multiple of padTo, at
+// least one. JSON decoding ignores them.
+func pad(msg []byte) []byte {
+	n := (len(msg)/padTo + 1) * padTo
+	return slices.Concat(msg, bytes.Repeat([]byte{' '}, n-len(msg)))
+}
+
+// encrypt seals msg, padded (pad), with secretKey.
 func encrypt(msg []byte, secretKey *[32]byte) (string, error) {
 	var nonce [24]byte
 	if _, err := io.ReadFull(rand.Reader, nonce[:]); err != nil {
 		return "", fmt.Errorf("failed to generate nonce: %v", err)
 	}
 
-	encrypted := secretbox.Seal(nonce[:], msg, &nonce, secretKey)
+	encrypted := secretbox.Seal(nonce[:], pad(msg), &nonce, secretKey)
 	return base64.StdEncoding.EncodeToString(encrypted), nil
 }
 
+// decrypt opens what encrypt sealed; the padding stays.
 func decrypt(encryptedString string, secretKey *[32]byte) ([]byte, error) {
 	encrypted, err := base64.StdEncoding.DecodeString(encryptedString)
 	if err != nil {
 		return nil, fmt.Errorf("invalid encrypted string: %v", err)
+	}
+	if len(encrypted) < 24+secretbox.Overhead {
+		return nil, errors.New("invalid encrypted string: too short")
 	}
 
 	var nonce [24]byte
@@ -244,6 +272,21 @@ type recordID [sha256.Size]byte
 
 func recordIDOf(sealed string) recordID { return sha256.Sum256([]byte(sealed)) }
 
+// storedRecordID returns the ID of username's record in auth.json now, and
+// whether it has one. No lock: auth.json is replaced by a rename, so a
+// reader sees one whole file or the other.
+func storedRecordID(username string) (recordID, bool, error) {
+	auths, err := readCachedAuths()
+	if err != nil {
+		return recordID{}, false, err
+	}
+	sealed, ok := auths[username]
+	if !ok {
+		return recordID{}, false, nil
+	}
+	return recordIDOf(sealed), true, nil
+}
+
 // errSessionNotStored is saveSession's answer when username's auth.json
 // record is gone (`peroxide auth -remove`) or replaced (`peroxide auth`
 // again) since this process logged in.
@@ -286,36 +329,44 @@ func saveSession(auth *protonmail.Auth, username string, sessionKey *[32]byte, r
 
 // saveRenewed saves the session a refresh just renewed, logging rather than
 // failing when it can't: the session works in memory either way, and failing
-// the request that set off the refresh would gain nothing.
-func saveRenewed(auth *protonmail.Auth, username string, sessionKey *[32]byte, record recordID) {
+// the request that set off the refresh would gain nothing. It reports false
+// when the record the session was read from is gone or replaced: the
+// session must then end.
+func saveRenewed(auth *protonmail.Auth, username string, sessionKey *[32]byte, record recordID) bool {
 	err := saveSession(auth, username, sessionKey, record)
-	switch {
-	case err == nil:
-	case errors.Is(err, errSessionNotStored):
-		log.Printf("Not saving the renewed session of %v: %v since this process logged in; it keeps the session until it exits", username, err)
-	default:
+	if errors.Is(err, errSessionNotStored) {
+		return false
+	}
+	if err != nil {
 		log.Printf("warning: cannot save the renewed session of %v: %v; the refresh token session.json holds is spent, so the next start logs in with the password again", username, err)
 	}
+	return true
 }
 
 // storedSession returns the session username has in session.json now, which
 // another peroxide process (sendmail without serve, download-mailbox) may
 // have refreshed since this one read it, or nil if there is none this key
-// opens: none saved yet, or one of an earlier bridge password.
-func storedSession(username string, sessionKey *[32]byte) *protonmail.Auth {
+// opens: none saved yet, or one of an earlier bridge password. A file that
+// can't be read, or a record this key opens that isn't a session, is an
+// error: falling back to an older, spent token would log in with the
+// password for nothing.
+func storedSession(username string, sessionKey *[32]byte) (*protonmail.Auth, error) {
 	sessions, err := readSealed(sessionFile)
-	if err != nil || sessions[username] == "" {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if sessions[username] == "" {
+		return nil, nil
 	}
 	b, err := decrypt(sessions[username], sessionKey)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var stored protonmail.Auth
 	if err := json.Unmarshal(b, &stored); err != nil {
-		return nil
+		return nil, fmt.Errorf("cannot read the session of %v in %v: %w", username, sessionFile, err)
 	}
-	return &stored
+	return &stored, nil
 }
 
 func ListUsernames() ([]string, error) {

@@ -2,6 +2,8 @@ package paths
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 )
@@ -67,4 +69,48 @@ func TestServeRunningChecksDontConflict(t *testing.T) {
 		t.Fatalf("LockServe() after the check = %v", err)
 	}
 	l.Release()
+}
+
+// The configuration and data directories are left closed to other users,
+// even when they existed before with a wider mode; one closed already keeps
+// its mode.
+// evidence: witnesses
+func TestDirectoriesOwnerOnly(t *testing.T) {
+	configHome, dataHome := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	for _, tc := range []struct {
+		name string
+		dir  string
+		path func(string) (string, error)
+	}{
+		{"Path", filepath.Join(configHome, "peroxide"), Path},
+		{"DataPath", filepath.Join(dataHome, "peroxide"), DataPath},
+	} {
+		for _, tm := range []struct{ before, want os.FileMode }{{0, 0o700}, {0o755, 0o700}, {0o777, 0o700}, {0o500, 0o500}} {
+			before := tm.before
+			if before != 0 {
+				// os.Chmod: Mkdir's mode is narrowed by the umask.
+				if err := os.MkdirAll(tc.dir, before); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(tc.dir, before); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := tc.path("x"); err != nil {
+				t.Fatalf("%v() with the directory %o = %v", tc.name, before, err)
+			}
+			fi, err := os.Stat(tc.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fi.Mode().Perm(); got != tm.want {
+				t.Errorf("%v() with the directory %o left it %o, want %o", tc.name, before, got, tm.want)
+			}
+			if err := os.RemoveAll(tc.dir); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 }

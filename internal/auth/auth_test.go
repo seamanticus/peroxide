@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"crypto/hkdf"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
+	"golang.org/x/crypto/nacl/secretbox"
+
+	"github.com/seamanticus/peroxide/internal/paths"
 	"github.com/seamanticus/peroxide/internal/protonmail"
 )
 
@@ -198,10 +203,10 @@ func TestSaveSessionOwnRecordOnly(t *testing.T) {
 			if err := saveSession(&protonmail.Auth{UID: "first"}, "bob", &sessionKey, id); err != nil {
 				t.Fatalf("saveSession() = %v", err)
 			}
-			if got := storedSession("bob", &sessionKey); got == nil || got.UID != "first" {
+			if got := mustStoredSession(t, "bob", &sessionKey); got == nil || got.UID != "first" {
 				t.Fatalf("storedSession() = %+v, want the one saved", got)
 			}
-			if got := storedSession("bob", other); got != nil {
+			if got := mustStoredSession(t, "bob", other); got != nil {
 				t.Errorf("storedSession() with another key = %+v, want none", got)
 			}
 
@@ -217,7 +222,7 @@ func TestSaveSessionOwnRecordOnly(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.wantErr != nil {
-				if got := storedSession("bob", &sessionKey); got != nil {
+				if got := mustStoredSession(t, "bob", &sessionKey); got != nil {
 					t.Errorf("after the change, storedSession() = %+v, want it dropped", got)
 				}
 			}
@@ -225,7 +230,7 @@ func TestSaveSessionOwnRecordOnly(t *testing.T) {
 			if err := saveSession(&protonmail.Auth{UID: "renewed"}, "bob", &sessionKey, id); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("saveSession() = %v, want %v", err, tc.wantErr)
 			}
-			got := storedSession("bob", &sessionKey)
+			got := mustStoredSession(t, "bob", &sessionKey)
 			if tc.wantErr == nil && (got == nil || got.UID != "renewed") {
 				t.Errorf("storedSession() = %+v, want the renewed one", got)
 			}
@@ -238,6 +243,144 @@ func TestSaveSessionOwnRecordOnly(t *testing.T) {
 			}
 			if !bytes.Equal(before, after) {
 				t.Error("saveSession() changed auth.json")
+			}
+		})
+	}
+}
+
+// mustStoredSession is storedSession, failing the test on its error.
+func mustStoredSession(t *testing.T, username string, sessionKey *[32]byte) *protonmail.Auth {
+	t.Helper()
+	stored, err := storedSession(username, sessionKey)
+	if err != nil {
+		t.Fatalf("storedSession() = %v", err)
+	}
+	return stored
+}
+
+// A sealed record too short to hold a nonce and a tag, as a truncated file
+// gives, is an error, not a panic; so is one that isn't base64 or whose tag
+// fails. A record that opens gives back what was sealed.
+// evidence: witnesses
+func TestDecryptRejectsDamagedRecords(t *testing.T) {
+	key, _, err := GeneratePassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := encrypt([]byte(`{"a":1}`), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flipped := bytes.Clone(raw)
+	flipped[len(flipped)-1] ^= 1
+	for _, tc := range []struct {
+		name   string
+		sealed string
+	}{
+		{"empty", ""},
+		{"one byte", base64.StdEncoding.EncodeToString([]byte{1})},
+		{"nonce only", base64.StdEncoding.EncodeToString(raw[:24])},
+		{"nonce and part of the tag", base64.StdEncoding.EncodeToString(raw[:24+secretbox.Overhead-1])},
+		{"not base64", "%%%"},
+		{"tag fails", base64.StdEncoding.EncodeToString(flipped)},
+	} {
+		if _, err := decrypt(tc.sealed, key); err == nil {
+			t.Errorf("%v: decrypt() = nil, want an error", tc.name)
+		}
+	}
+	got, err := decrypt(sealed, key)
+	if err != nil || strings.TrimRight(string(got), " ") != `{"a":1}` {
+		t.Errorf("decrypt() = %q, %v, want the sealed text", got, err)
+	}
+}
+
+// Sealed records are padded to whole blocks: passwords of different lengths
+// within a block give records of one length, and the padding doesn't change
+// what is read back.
+// evidence: witnesses
+func TestRecordsArePadded(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	key, _, err := GeneratePassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{0, 1, padTo - 1, padTo, padTo + 1} {
+		if got := len(pad(make([]byte, n))); got%padTo != 0 || got <= n {
+			t.Errorf("len(pad(%v bytes)) = %v, want a multiple of %v above %v", n, got, padTo, n)
+		}
+	}
+	lengths := map[int]bool{}
+	for _, pw := range []string{"", "a", "a much longer login password than the others"} {
+		if err := EncryptAndSave(&CachedAuth{LoginPassword: pw, MailboxPassword: pw}, "bob", key); err != nil {
+			t.Fatal(err)
+		}
+		auths, err := readCachedAuths()
+		if err != nil {
+			t.Fatal(err)
+		}
+		lengths[len(auths["bob"])] = true
+		record, _, err := readRecord("bob", key)
+		if err != nil || record.LoginPassword != pw {
+			t.Errorf("readRecord() = %+v, %v, want login password %q", record, err, pw)
+		}
+	}
+	if len(lengths) != 1 {
+		t.Errorf("records of %v lengths, want one", len(lengths))
+	}
+}
+
+// storedSession tells no saved session (nil) from a session.json it can't
+// read or a record its key opens that isn't a session (an error). A record
+// of another bridge password is no session, not an error.
+// evidence: witnesses
+func TestStoredSessionErrors(t *testing.T) {
+	key, _, err := GeneratePassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _, err := GeneratePassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	notSession, err := encrypt([]byte(`[1]`), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ofOther, err := encrypt([]byte(`{"UID":"u"}`), other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		file    string // "": no file
+		wantErr bool
+	}{
+		{"no file", "", false},
+		{"no record", `{}`, false},
+		{"another key's", `{"bob":"` + ofOther + `"}`, false},
+		{"not JSON", `{"bob":`, true},
+		{"not a session", `{"bob":"` + notSession + `"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("HOME", t.TempDir())
+			if tc.file != "" {
+				p, err := paths.Path(sessionFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(tc.file), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := storedSession("bob", key)
+			if (err != nil) != tc.wantErr || got != nil {
+				t.Errorf("storedSession() = %+v, %v; want nil and an error: %v", got, err, tc.wantErr)
 			}
 		})
 	}

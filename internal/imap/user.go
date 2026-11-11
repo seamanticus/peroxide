@@ -147,7 +147,10 @@ func getUser(be *backend, username string, c *protonmail.Client, privateKeys ope
 		// A user being rebuilt or logged in again is closing too: its
 		// clients are being disconnected, and the login that follows starts
 		// a user anew, on a wiped database or with the keys unlocked again.
-		closing := u.numClients == 0 || u.ending
+		// So is one whose session auth.Manager ended for new credentials
+		// (another client c): its events goroutine may not have seen the
+		// signal (sessionDied) yet.
+		closing := u.numClients == 0 || u.ending || u.c != c
 		if !closing {
 			u.numClients++
 		}

@@ -707,6 +707,55 @@ func TestSessionDeathDisconnects(t *testing.T) {
 	}
 }
 
+// A login whose session isn't the user's (auth.Manager ended it for new
+// credentials and opened another) doesn't join the user, even before its
+// events goroutine has seen the end: it waits for the user to close, and
+// joins the one that follows. A login with the user's own session joins it.
+// evidence: witnesses
+func TestLoginWithAnotherSessionWaits(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		old, ended := &protonmail.Client{}, &protonmail.Client{}
+		be := &backend{users: make(map[string]*user)}
+		u := &user{username: "bob", backend: be, c: old, numClients: 1}
+		release := make(chan struct{})
+		u.eventLoop.Go(func() { <-release })
+		be.users["bob"] = u
+
+		if got, err := getUser(be, "bob", old, nil, auth.StoreKey{}); err != nil || got != u {
+			t.Fatalf("getUser() with the user's session = %p, %v; want the user", got, err)
+		}
+
+		got := make(chan *user, 1)
+		go func() {
+			nu, err := getUser(be, "bob", ended, nil, auth.StoreKey{})
+			if err != nil {
+				t.Error(err)
+			}
+			got <- nu
+		}()
+		synctest.Wait()
+		if len(got) != 0 {
+			t.Fatal("getUser() with another session joined the user")
+		}
+		u.Lock()
+		clients := u.numClients
+		u.Unlock()
+		if clients != 2 {
+			t.Errorf("the user has %v clients, want 2", clients)
+		}
+
+		// What the user's closing and a login with the new session leave.
+		next := &user{username: "bob", backend: be, c: ended, numClients: 1}
+		be.Lock()
+		be.users["bob"] = next
+		be.Unlock()
+		close(release)
+		if nu := <-got; nu != next || next.numClients != 2 {
+			t.Errorf("getUser() = %p with %v clients, want the next user with 2", nu, next.numClients)
+		}
+	})
+}
+
 // roundTripFunc answers HTTP requests in memory: unlike an httptest server,
 // it starts no goroutine, so it works inside a synctest bubble.
 type roundTripFunc func(*http.Request) (*http.Response, error)
