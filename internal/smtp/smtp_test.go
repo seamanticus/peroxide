@@ -2,6 +2,7 @@ package smtp
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 
@@ -58,6 +59,115 @@ func TestParseSecuredSigned(t *testing.T) {
 	}
 	if _, err := openpgp.CheckDetachedSignature(openpgp.EntityList{signer}, bytes.NewReader(sec.signed.content), &sig, nil); err != nil {
 		t.Errorf("the client's signature doesn't verify over the split content: %v", err)
+	}
+
+	unwrapped, err := unwrapSigned([]byte(raw), sec.signed)
+	if err != nil {
+		t.Fatalf("unwrapSigned() = %v", err)
+	}
+	want := "Content-Transfer-Encoding: quoted-printable\r\n" +
+		"Content-Type: text/plain; charset=UTF-8; format=flowed\r\n" +
+		"Mime-Version: 1.0\r\nFrom: <c@example.org>\r\nTo: <x@example.org>\r\n\r\n" +
+		"This is a signed message\r\n"
+	if string(unwrapped) != want {
+		t.Errorf("unwrapSigned() =\n%q\nwant\n%q", unwrapped, want)
+	}
+
+	// RFC 2045 section 5.2: a part without Content-Type is plain text.
+	bare, err := unwrapSigned([]byte(raw), &signedParts{content: []byte("\r\nhi\r\n")})
+	if err != nil {
+		t.Fatalf("unwrapSigned() of a part without header = %v", err)
+	}
+	wantBare := "Content-Type: text/plain; charset=us-ascii\r\nMime-Version: 1.0\r\n" +
+		"From: <c@example.org>\r\nTo: <x@example.org>\r\n\r\nhi\r\n"
+	if string(bare) != wantBare {
+		t.Errorf("unwrapSigned() of a part without header =\n%q\nwant\n%q", bare, wantBare)
+	}
+}
+
+// One external recipient gets the one key packet left once the account's
+// own keys' are set aside, as the client wrote it. Proton users, several
+// external recipients and anything that can't be told apart are refused.
+// evidence: witnesses
+func TestAssignPackets(t *testing.T) {
+	newEntity := func(name string) *openpgp.Entity {
+		t.Helper()
+		e, err := openpgp.NewEntity(name, "", name+"@example.org", &packet.Config{Algorithm: packet.PubKeyAlgoEdDSA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	rcpt, self, other := newEntity("r"), newEntity("s"), newEntity("o")
+	keyPackets := func(to ...*openpgp.Entity) []byte {
+		t.Helper()
+		var ct bytes.Buffer
+		w, err := openpgp.Encrypt(&ct, to, nil, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		raw := "Content-Type: multipart/encrypted; boundary=ee; protocol=\"application/pgp-encrypted\"\r\n\r\n" +
+			"--ee\r\nContent-Type: application/pgp-encrypted\r\n\r\nVersion: 1\r\n" +
+			"\r\n--ee\r\nContent-Type: application/octet-stream\r\n\r\n" +
+			armored(t, "PGP MESSAGE", ct.Bytes()) + "\r\n--ee--\r\n"
+		sec, ok, err := parseSecured([]byte(raw))
+		if err != nil || !ok {
+			t.Fatalf("parseSecured() = %v, %v", ok, err)
+		}
+		return sec.encrypted.keyPackets
+	}
+
+	all := keyPackets(rcpt, self, other)
+	ps, err := splitKeyPackets(all)
+	if err != nil {
+		t.Fatalf("splitKeyPackets() = %v", err)
+	}
+	if len(ps) != 3 || !bytes.Equal(slices.Concat(ps[0].raw, ps[1].raw, ps[2].raw), all) {
+		t.Fatalf("splitKeyPackets() = %d packets, want 3 that join back to the client's bytes", len(ps))
+	}
+	// openpgp.Encrypt writes one packet per recipient, in order.
+	pRcpt, pSelf, pOther := ps[0], ps[1], ps[2]
+	proton := recipientKey{addr: "p@example.org", key: rcpt}
+	ext := recipientKey{addr: "x@example.org"}
+	ext2 := recipientKey{addr: "y@example.org"}
+	ownSelf := openpgp.EntityList{self}
+
+	for _, tc := range []struct {
+		name  string
+		ps    []keyPacket
+		rcpts []recipientKey
+		own   openpgp.EntityList
+		want  []assignment // nil: refused
+	}{
+		{"external, no self-encryption", []keyPacket{pOther}, []recipientKey{ext}, nil,
+			[]assignment{{ext.addr, pOther.raw}}},
+		{"external, self-encrypted to the Proton key", []keyPacket{pSelf, pOther}, []recipientKey{ext}, ownSelf,
+			[]assignment{{ext.addr, pOther.raw}}},
+		{"proton user", ps, []recipientKey{proton}, ownSelf, nil},
+		{"proton user and external", ps, []recipientKey{proton, ext}, ownSelf, nil},
+		{"no recipients", ps, nil, nil, nil},
+		{"external, self-encrypted to a key Proton doesn't know", []keyPacket{pSelf, pOther}, []recipientKey{ext}, nil, nil},
+		{"external, only own packets", []keyPacket{pSelf}, []recipientKey{ext}, ownSelf, nil},
+		{"two externals", []keyPacket{pRcpt, pOther}, []recipientKey{ext, ext2}, nil, nil},
+		{"no key packets", nil, []recipientKey{ext}, nil, nil},
+	} {
+		got, err := assignPackets(tc.ps, tc.rcpts, tc.own)
+		switch {
+		case tc.want == nil && err == nil:
+			t.Errorf("%s: assignPackets() = %v, want refused", tc.name, got)
+		case tc.want != nil && err != nil:
+			t.Errorf("%s: assignPackets() = %v", tc.name, err)
+		case tc.want != nil && !slices.EqualFunc(got, tc.want, func(a, b assignment) bool {
+			return a.addr == b.addr && bytes.Equal(a.packet, b.packet)
+		}):
+			t.Errorf("%s: assignPackets() = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

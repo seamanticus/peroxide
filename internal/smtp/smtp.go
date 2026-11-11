@@ -67,14 +67,26 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 	if err != nil {
 		return fmt.Errorf("cannot read the message: %w", err)
 	}
-	// Parse the incoming MIME message header
-	mr, err := mail.CreateReader(bytes.NewReader(raw))
+	// PGP/MIME the client signed or encrypted is never taken apart as it
+	// stands: that would break the signature or lose the ciphertext.
+	sec, _, err := parseSecured(raw)
 	if err != nil {
 		return err
 	}
-	// PGP/MIME the client signed or encrypted goes out whole, never taken
-	// apart: that would break the signature or lose the ciphertext.
-	sec, _, err := parseSecured(raw)
+	// Proton delivers no client signature (docs/smtp.md), so a signed
+	// message is sent as its signed part, signed by the address key for
+	// every recipient, whatever "Sign external messages" says.
+	forceSign := false
+	if sec != nil && sec.signed != nil {
+		raw, err = unwrapSigned(raw, sec.signed)
+		if err != nil {
+			return err
+		}
+		sec, forceSign = nil, true
+		log.Println("client-signed message: sending its signed part, signed with the address key")
+	}
+	// Parse the incoming MIME message header
+	mr, err := mail.CreateReader(bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -149,8 +161,6 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 	}
 
 	// Create an empty draft
-	log.Println("creating draft message")
-
 	plaintext, err := msg.Encrypt([]*openpgp.Entity{privateKey}, privateKey)
 	if err != nil {
 		return err
@@ -178,14 +188,23 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 		}
 	}
 
+	// Checked before the draft exists, so a refused send leaves none.
+	var plan []assignment
+	if sec != nil {
+		recipients := append(append(append([]*mail.Address{}, toList...), ccList...), bccList...)
+		if plan, err = planSecured(c, privateKeys, sec, recipients); err != nil {
+			return err
+		}
+	}
+
+	log.Println("creating draft message")
 	msg, err = c.CreateDraftMessage(msg, parentID)
 	if err != nil {
 		return fmt.Errorf("cannot create draft message: %v", err)
 	}
 
 	if sec != nil {
-		recipients := append(append(append([]*mail.Address{}, toList...), ccList...), bccList...)
-		return sendSecured(c, msg, privateKey, sec, raw, recipients)
+		return sendSecured(c, msg, privateKey, sec, raw, plan)
 	}
 
 	// Parse the incoming MIME message body
@@ -352,7 +371,7 @@ func SendMail(c *protonmail.Client, u *protonmail.User, privateKeys openpgp.Enti
 			return fmt.Errorf("cannot get the mail settings: %w", err)
 		}
 		var set *protonmail.MessagePackageSet
-		if settings.Sign == protonmail.SignExternalEnabled {
+		if forceSign || settings.Sign == protonmail.SignExternalEnabled {
 			set, err = signedMIMEPackage(raw, privateKey, plaintextRecipients)
 		} else {
 			set, err = cleartextPackage(body.Bytes(), bodyType, attachmentKeys, privateKey, plaintextRecipients)

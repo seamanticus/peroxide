@@ -754,15 +754,15 @@ func (set *MessagePackageSet) AddClearMIME(addr string) (*MessagePackage, error)
 	return pkg, nil
 }
 
-// AddPGPMIME adds addr to receive a body the client encrypted itself as
-// PGP/MIME (Proton's PGPMIME scheme): set.Body holds the client's data packet
-// and keyPackets the client's key packets, every one of them, as nothing
-// tells which is the recipient's. The signature flag stays 0: whether the
-// client signed inside is unknown here.
-func (set *MessagePackageSet) AddPGPMIME(addr string, keyPackets []byte) *MessagePackage {
+// AddPGPMIME adds addr, an external recipient, to receive a body the client
+// encrypted itself as PGP/MIME (Proton's PGPMIME scheme): set.Body holds the
+// client's data packet and keyPacket the client's one key packet for addr
+// (Proton refuses more: 2001 Multiple packets present). The signature flag
+// stays 0: whether the client signed inside is unknown here.
+func (set *MessagePackageSet) AddPGPMIME(addr string, keyPacket []byte) *MessagePackage {
 	pkg := &MessagePackage{
 		Type:          MessagePackagePGPMIME,
-		BodyKeyPacket: base64.StdEncoding.EncodeToString(keyPackets),
+		BodyKeyPacket: base64.StdEncoding.EncodeToString(keyPacket),
 	}
 	set.Addresses[addr] = pkg
 	set.Type |= MessagePackagePGPMIME
