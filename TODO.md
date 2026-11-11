@@ -643,8 +643,11 @@ Tried live with aerc to an external address
    it unencrypted to Proton users, or to each external recipient apart.
 2. The Sent copy of a client-encrypted message is the client's message
    as a text/plain draft body (Proton refuses multipart/mixed drafts,
-   2011): its PGP/MIME isn't readable as such. It is the ciphertext,
-   which the sender can read only if the client also encrypted to them.
+   2011), behind msgbuild's marker line: peroxide serves it over IMAP
+   as the multipart/encrypted it was, Proton's apps show the marker and
+   the source as text. It is encrypted to the recipient only (item 1 of
+   section 21 would add the sender), so no one but the recipient can
+   read its content.
 
 ## 20. Building a large message peaks at about 14x its size
 
@@ -677,3 +680,80 @@ unparseable Content-Disposition) would pick the path first and save
 that buffer: about 2.4 copies. Measured series, 2026-11-09: 780cc70
 9.01 copies / 315 MiB, 408c39c 1.87 per part, 5f5ce61 5.53 whole /
 236 MiB, da00766 3.55 whole / 177 MiB.
+
+## 21. Self-encrypted client PGP/MIME and a readable Sent copy
+
+**Problem.** A message the client encrypted itself (section 19) may
+carry one key packet only, the recipient's. assignPackets sets aside
+packets to the account's Proton keys, but any other key is refused, so
+aerc's `pgp-self-encrypt` (a packet to the user's own GPG key) makes the
+send fail. Its Sent copy (msgbuild/sentcopy.go) is therefore encrypted
+to the recipient alone: aerc shows it as PGP/MIME it can't decrypt, and
+Proton's apps show the marker line and the armored source. Two parts,
+meant to be built together; part 1 is useful alone.
+
+**1. The user's own public keys, stored per account (option (c)).**
+
+- Store: `CachedAuth` (internal/auth/store.go) gains `OwnKeys []string`
+  (`json:",omitempty"`): armored public keys. The record is sealed by
+  the bridge password like the rest, so old records read as none and
+  an older peroxide ignores the field (encoding/json skips unknown
+  fields; v2 too, unless RejectUnknownMembers is set).
+- Command: `peroxide own-key [-remove] <username> [<key.asc>]` (name to
+  decide), asking for the bridge password like `sendmail`; it unseals
+  the record, changes OwnKeys and saves through updateAuths, so it
+  can't race `serve`'s saveSession (which must keep OwnKeys: it reseals
+  the whole CachedAuth, read it first).
+- Validation at the trust boundary: parses as `openpgp.ReadArmoredKeyRing`;
+  no private key material (refuse a secret key, never store it); at
+  least one encryption-capable, unexpired, unrevoked subkey; at most a
+  handful of keys. Listing (`own-key <username>`) prints fingerprints.
+- Use: `Manager.Auth` returns them (its signature and 5 callers change:
+  cmd/peroxide/main.go twice, smtp.go, imap/backend.go, tests), or a
+  separate `Manager.OwnKeys(username, password)`; the second keeps
+  Auth's callers untouched. smtp's planSecured passes
+  `own = account keys + OwnKeys` to assignPackets, matching every
+  subkey (hasKeyID), so a rotated subkey only needs the key exported
+  again.
+- Effect: `pgp-self-encrypt=true` works; the Sent copy carries a packet
+  to the user's GPG key, and the PGP/MIME msgbuild serves decrypts in
+  aerc. A wrong key leaks nothing: the send is refused (packet left
+  over) or the recipient gets their own packet as now.
+- Tests: store round trip with and without OwnKeys, a secret key
+  refused, a key without an encryption subkey refused, assignPackets
+  with an own GPG packet set aside.
+- About 200-250 lines with tests, about 7 files, docs/accounts.md and
+  docs/commands.md.
+
+**2. The user's GPG key imported into Proton (option (d)), and a Sent
+copy readable in Proton's apps.**
+
+- The user imports the GPG secret key for the address in Proton's web
+  settings (Encryption and keys), as a non-primary key; untested with
+  this account. Proton then stores it encrypted by the mailbox
+  password, publishes its public key for the address (external senders
+  may encrypt to it), and peroxide unlocks it at login like any address
+  key. With part 1 or without, assignPackets already sets its packets
+  aside: `pgp-self-encrypt=true` works with no code.
+- New: when the client's message carries a packet to an unlocked
+  account key, peroxide can decrypt it in smtp (it holds the session
+  key then) and upload a real draft: the text and HTML parts as the
+  body, attachments as draft attachments, like a message sent
+  unencrypted. The send itself stays the client's PGPMIME package. The
+  Sent copy is then readable in Proton's apps and over IMAP as a normal
+  message; the client's signature inside would be lost from it (or
+  kept as an attachment: decide).
+- To probe live first: does Proton accept a draft with attachments
+  next to a PGPMIME package that has no AttachmentKeyPackets? Does the
+  Sent copy keep the draft's attachments? If not, fall back to the
+  marker copy, which is still decryptable in aerc.
+- Risks: the user's GPG secret key is held by Proton (as their address
+  keys are); decrypting in smtp touches plaintext peroxide never had
+  on this path; the MIME parse of the decrypted entity needs the same
+  limits as FETCH building (section 20).
+- About 150+ lines with tests in smtp, after the probe; docs/smtp.md
+  and docs/encrypt.md.
+
+**Order.** Part 1, then the probe, then part 2. With both, a
+self-encrypted send is readable everywhere: aerc by the GPG key (part
+1 or 2), Proton's apps by the decrypted draft (part 2).

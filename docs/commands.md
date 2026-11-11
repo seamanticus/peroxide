@@ -120,6 +120,11 @@ the command line become Bcc recipients unless they already appear in
 To or Cc, or the message has a Bcc header. It asks for the bridge
 password or reads `PEROXIDE_BRIDGE_PASS`.
 
+For `git send-email`:
+
+    [sendemail]
+        sendmailcmd = peroxide sendmail you@proton.me --
+
 `-i` is accepted, because `git send-email` always passes it, and
 changes nothing: peroxide reads stdin to its end whatever it contains,
 so a line holding only `.` never ends
@@ -130,7 +135,8 @@ prints the help, as anywhere else.
 While `serve` runs, `sendmail` hands the message to `serve`'s SMTP
 server (`-smtp-host`, `-smtp-port`), logged in with the username and
 bridge password, so that the account keeps the one session `serve`
-holds; the envelope sender is the message's From. Give it the same
+holds (logging in itself would spend the refresh token `serve` holds);
+the envelope sender is the message's From. Give it the same
 `-smtp-host` and `-smtp-port` as `serve`, after the command. Over TLS
 it trusts only serve's certificate, byte for byte, so a self-signed one
 works: peroxide's own by default, or with `-tls-cert` the file `serve`
@@ -139,9 +145,11 @@ the file may hold the key too). If `serve` runs with `-plaintext`, give
 `sendmail` `-plaintext` too. If `serve`
 runs with `-disable-smtp` or `-tls-client-ca`, `sendmail` fails rather
 than log in itself. If `serve` doesn't greet within 10 seconds (TLS on
-one side only), it fails with that hint. A `QUIT` that fails after
-`serve` accepted the message is a warning, not a failure. With no
-`serve` running, it sends on its own, as `serve` would.
+one side only, each waiting for the other), it fails with that hint. A
+`QUIT` that fails after `serve` accepted the message is a warning, not
+a failure, so that `git send-email` doesn't send it again. With no
+`serve` running, it sends on its own, as `serve` would: each run logs
+in and unlocks your keys afresh, and the session ends with the command.
 
 ## Options
 

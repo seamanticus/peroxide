@@ -37,15 +37,15 @@ Consequences:
 
 - **The bridge password is as sensitive as your Proton password.** With
   `auth.json` it gives your Proton login and mailbox passwords, and
-  with the message store your mail. Keep it in a password manager or a
-  gpg-encrypted file the client decrypts on demand, not in a client's
-  configuration in plain text.
+  with the message store your mail. How to keep it:
+  [accounts.md](accounts.md#what-the-stored-credentials-mean).
 - **Full-disk encryption matters.** `<user>.db` is the metadata of your
   mailbox, unencrypted. Proton doesn't encrypt subjects and addresses
   end to end either (it needs them to list and route mail), but on your
   disk peroxide adds no protection of its own.
-- `peroxide auth -remove` deletes the credentials, not `<user>.db`, and
-  not the message store, and doesn't end the session on Proton's side.
+- `peroxide auth -remove` leaves `<user>.db`, the message store and the
+  Proton session behind
+  ([accounts.md](accounts.md#files-on-disk)).
 
 ## The message store
 
@@ -98,16 +98,9 @@ look, not in a cache directory.
 
 ## Crypto peroxide does and doesn't do
 
-- Decrypts with your unlocked keys (ProtonMail's go-crypto, an OpenPGP
-  implementation); serves mail it can't decrypt as armored text or
-  PGP/MIME, never as a guess (see [imap/messages.md](imap/messages.md)).
-- **Doesn't verify signatures** of received mail, so a forged sender
-  isn't flagged.
-- Sends Proton-to-Proton mail encrypted and signed; sends mail to other
-  addresses unencrypted and unsigned (see [smtp.md](smtp.md)). Proton
-  applies its own encryption at rest either way.
-- Doesn't check that a recipient's key is the right one: it trusts
-  Proton's key server.
+Encryption and signatures of messages, sent and received, are in
+[encrypt.md](encrypt.md#crypto-peroxide-does-and-doesnt-do). This page
+is about protecting peroxide itself: your secrets, its files, its ports.
 
 ## Logs
 

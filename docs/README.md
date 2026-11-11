@@ -33,6 +33,9 @@ code as it is at the commit you are reading it from.
   - [imap/changes.md](imap/changes.md): STORE, COPY, MOVE, EXPUNGE and
     APPEND.
 - [smtp.md](smtp.md): sending mail, and `peroxide sendmail`.
+- [encrypt.md](encrypt.md): signing and encrypting mail in your client,
+  what each choice gets you and your recipients, to Proton users and
+  others, and what you get when others do.
 - [debug.md](debug.md): the `-debug` flag, what it hides, what it
   doesn't, and how to treat its output.
 - [security.md](security.md): what peroxide protects, what it trusts,

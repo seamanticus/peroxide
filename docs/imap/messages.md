@@ -87,6 +87,12 @@ calls; the server then derives BODYSTRUCTURE and ENVELOPE from the bytes
   as `multipart/signed` (RFC 3156), the signed part byte for byte and
   the signature as `OpenPGP_signature.asc`, so that your client can
   verify it.
+- **The Sent copy of mail your client encrypted** (a text draft or sent
+  message whose body, signed by your own address key, starts with
+  peroxide's `X-Peroxide-Body:` line): the `multipart/encrypted`
+  message your client sent, its header fields joined to the message's
+  ([../encrypt.md](../encrypt.md#the-sent-copy-of-mail-your-client-encrypted)).
+  It has no `X-Peroxide-Signature` field.
 - **Otherwise**: a `multipart/mixed` of the body alone.
 
 The build is deterministic: building a message again gives the same
@@ -116,10 +122,10 @@ size.
 **HEADER.FIELDS** and **HEADER.FIELDS.NOT** send only the fields named,
 or all but those, matched without regard to case.
 
-**Signatures** of the body are checked by peroxide and the verdict
-written in the header ([Signatures](#signatures)); a PGP/MIME
-signature is also handed to your client (above), which can check it
-itself. Attachments' signatures are not checked.
+**Signatures** of the body and attachments are checked by peroxide and
+the verdict written in the header ([Signatures](#signatures)); a
+PGP/MIME signature is also handed to your client (above), which can
+check it itself.
 
 **Bytes that can't be parsed.** If a built message can't be parsed
 (malformed MIME inside a PGP/MIME body, say), it is served instead as a
