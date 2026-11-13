@@ -6,8 +6,8 @@
 password interactively. Step by step (internal/login/login.go, `Run`;
 internal/protonmail/auth.go):
 
-1. **Password.** Read from the terminal without echo. If stdin is a
-   pipe, peroxide opens `/dev/tty` instead.
+1. **Password.** Read from the terminal without echo. If stdin isn't a
+   terminal, peroxide opens `/dev/tty` instead.
 2. **SRP login.** Proton never receives the password. peroxide asks
    `/auth/info` for the SRP parameters and salt, computes an SRP proof
    from the password (internal/protonmail/srp.go) and sends it to `/auth`. Proton
@@ -17,9 +17,11 @@ internal/protonmail/auth.go):
    request as a new, suspicious client.
 3. **Human verification.** If Proton answers code 9001, it wants a
    CAPTCHA solved first (see below). peroxide replays the login once
-   with the challenge token; a second challenge is an error.
-4. **Two-factor.** With TOTP on, peroxide reads a 6-digit code and sends
-   it to `/auth/2fa`. Security keys are not supported.
+   with the challenge token; a second challenge, or Proton refusing the
+   token, is an error.
+4. **Two-factor.** With TOTP on, peroxide reads a 6-digit code from
+   standard input (your terminal echoes it) and sends it to
+   `/auth/2fa`. Security keys are not supported.
 5. **Mailbox password.** Proton accounts have one password, or (older
    "two-password mode") a login password and a separate mailbox
    password that unlocks the keys. peroxide asks for the second only in
@@ -63,14 +65,9 @@ password. peroxide (internal/auth/manager.go, `Manager.Auth`):
    time. If the record is unchanged, a matching key reuses the session
    and the unlocked keys, with no request to Proton. If the record is
    gone (`peroxide auth -remove`) or replaced (`peroxide auth` again),
-   the session is ended by a login with its old bridge password, which
-   is then refused, or by one with the new password, which goes on as in
-   step 3 with the record stored now: logged as `The stored credentials
-   of <user> were removed or replaced`, the session is logged out at
-   Proton (`DELETE /auth`), its tokens and keys dropped, and its IMAP
-   clients disconnected with a BYE. A login with neither password is
-   refused and ends nothing, so no client can disconnect another
-   without a password. An `auth.json` that can't be read is logged and
+   a login with the old or the new bridge password ends the session
+   ([below](#when-the-stored-credentials-change)); the new one then goes
+   on as in step 3. An `auth.json` that can't be read is logged and
    answered "Invalid username or password": the client, not yet
    authenticated, learns nothing about the file.
 3. **Otherwise** it decrypts the username's `auth.json` record with the
@@ -107,8 +104,7 @@ the bridge password is 32 random bytes, which no guessing can find at
 any speed (NIST SP 800-63B asks for an approved one-way function, not a
 slow one, for random secrets of 112 bits or more). A guess is also
 tested by one decryption of `auth.json`, which must stay fast for
-logins. proton-bridge keeps its bridge password itself and compares it
-in constant time.
+logins.
 
 So the first client login of a process costs a few requests and a
 bcrypt derivation per key salt (Proton's scheme for the mailbox
@@ -139,20 +135,7 @@ as in step 3 above.
 Each refresh saves the new tokens in `session.json`, sealed with the
 session key, and only while `auth.json` still holds the record the
 session came from; `auth.json` itself is written by `peroxide auth`
-alone. After `peroxide auth -remove` or a new `peroxide auth` of the
-account while `serve` runs, the session read from the old record ends
-at the account's next login with either password (step 2), or at its
-next refresh (about daily), whichever comes first. Until then the
-clients already connected keep working: log in once with the new
-password to cut them off at once. Ending it logs the session out at Proton (`DELETE /auth`;
-a refresh ending it logs out the tokens it just got), so copied tokens
-stop working too; if that request fails, the log says so, and the
-session stays valid at Proton until it expires: revoke it in Proton's
-web settings, "Session management". Its IMAP clients get `* BYE Your
-Proton session ended` and are disconnected; an SMTP connection logged
-in before fails its next send, and the client logs in again. The old
-bridge password is refused from then on, and the new one opens a new
-session. If `session.json` can't be written at
+alone. If `session.json` can't be written at
 all (disk full), the log says so: the stored refresh token is then
 spent, and the next start logs in with the password, which Proton may
 answer with a CAPTCHA. Every write of `auth.json` and `session.json` is
@@ -160,9 +143,36 @@ synced to disk with its directory, so a crash can't bring back a file
 whose refresh token is spent.
 
 Every Proton request has 30 seconds to connect, 30 for the TLS
-handshake and 30 for its answer to start, as in proton-bridge; a
-request over them fails rather than hold the account's logins and
+handshake and 30 for its answer to start; a request over them fails
+rather than hold the account's logins and
 refreshes. Downloads aren't cut off once their answer has started.
+
+### When the stored credentials change
+
+After `peroxide auth -remove` or a new `peroxide auth` of the account
+while `serve` runs, the session read from the old record ends at the
+account's next login with either bridge password, or at its next
+refresh (about daily), whichever comes first. Until then the clients
+already connected keep working: log in once with the new password to
+cut them off at once. A login with neither password is refused and
+ends nothing, so no client can disconnect another without a password.
+
+Ending the session:
+
+- logs `The stored credentials of <user> were removed or replaced:
+  ending the session read from them`;
+- logs it out at Proton (`DELETE /auth`; a refresh ending it logs out
+  the tokens it just got), so copied tokens stop working too. If that
+  request fails, the log says so, and the session stays valid at Proton
+  until it expires: revoke it in Proton's web settings, "Session
+  management";
+- drops its tokens and keys, disconnects its IMAP clients with `* BYE
+  Your Proton session ended: please log in again to open it`, and fails
+  the next send of an SMTP connection logged in before, so the client
+  logs in again.
+
+The old bridge password is refused from then on, and the new one opens
+a new session.
 
 ## Keys that change while peroxide runs
 
@@ -216,26 +226,27 @@ sealed under the store key, the structure and envelope of each message
 stored. **No keys.** The metadata is everything a mailbox listing
 shows, readable by anyone who can read the file.
 
-The records of `auth.json` and `session.json` are padded with spaces to
-a multiple of 512 bytes before they are sealed, so their length doesn't
+The records of `auth.json` and `session.json` are padded with spaces
+(at least one) up to the next multiple of 512 bytes before they are
+sealed, so their length doesn't
 tell how long the passwords or tokens in them are. Records an older
 peroxide wrote have no padding and are still read.
 
 The messages themselves are in the data directory, `peroxide/<username>/`
 under `$XDG_DATA_HOME` (else `~/.local/share`), one sealed file each:
-[security.md](security.md#the-message-store). Delete `<username>.db` and
-that directory at will while peroxide is stopped: both are rebuilt from
+[security.md](security.md#the-message-store). Delete `<username>.db`
+(in the configuration directory above) and that directory at will while
+peroxide is stopped: both are rebuilt from
 Proton (deleting only some files of the directory makes those messages
 download again).
 
 `peroxide auth -remove <username>` deletes the `auth.json` record and
-the `session.json` one. It
-does not delete `<username>.db` or the stored messages, and it does not
-log out the Proton session on Proton's side (revoke it in Proton's web
-settings, "Session management"). Neither does `peroxide auth` run again
-by itself; a `serve` running meanwhile logs the old session out when
-it ends it (above). Otherwise the old session stays valid at Proton
-until it expires: peroxide no longer holds its tokens.
+the `session.json` one. It does not delete `<username>.db` or the
+stored messages. Neither it nor a new `peroxide auth` logs the old
+session out at Proton by itself: a `serve` running meanwhile does when
+it ends it ([above](#when-the-stored-credentials-change)); otherwise it
+stays valid at Proton until it expires (revoke it in Proton's web
+settings, "Session management"), as peroxide no longer holds its tokens.
 
 ## What the stored credentials mean
 
@@ -297,30 +308,8 @@ peroxide can't answer a challenge when it refreshes a session in the
 background (no one to solve it): the login fails, and the log tells you
 to run `peroxide auth` again.
 
-## How proton-bridge does it
+<!-- nav -->
 
-- **Storage.** proton-bridge keeps one vault file (`vault.enc`,
-  internal/vault), sealed with AES-256-GCM under a key held in the
-  system keychain (Secret Service, pass, macOS Keychain, Windows
-  Credential Manager). Per account it stores the session UID and
-  refresh token, a *key passphrase* already derived from the mailbox
-  password (`KeyPass`), and the bridge password itself (16 random
-  bytes). **It does not store your login password.** If Proton revokes
-  the refresh token, proton-bridge signs the account out and asks you
-  to log in again.
-- **Bridge password.** Stored in the vault, so its GUI and CLI can show
-  it at any time. peroxide doesn't store it: shown once.
-- **Why peroxide differs.** No keychain dependency: peroxide runs the
-  same on a headless server, in a container, or on a system without a
-  Secret Service, with nothing but its config directory. The cost is
-  that the bridge password is the only secret, and that it unlocks the
-  stored login password. Storing a derived key passphrase instead of
-  the mailbox password, and dropping the stored login password, would
-  bring peroxide to proton-bridge's exposure; neither is done yet.
-- **Human verification.** The same flow: its CLI prints
-  `https://verify.proton.me/?methods=<every offered method>&token=...`
-  and waits for Enter (internal/frontend/cli, `promptHvURL`); its GUI
-  shows the link. It then replays the login with the original token,
-  with every offered method as the token type. peroxide offers only the
-  CAPTCHA, the one method whose proof the page sends to Proton by
-  itself.
+---
+
+[Previous: Commands and options](commands.md) | [Contents](README.md) | [Next: The IMAP server](imap/README.md)

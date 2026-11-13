@@ -49,16 +49,13 @@ and its own poll of Proton's events.
 - **Memory.** go-imap reads every literal whole into memory. The cap
   above is also the cap on that.
 - **Updates.** go-imap delivers unsolicited updates in no fixed order,
-  and at any time, also during a FETCH. `TODO.md` section 11, items 6
-  and 7.
+  and at any time, also during a FETCH.
 - **Debug traces.** go-imap reads the continuation lines of
   `AUTHENTICATE` and the `DONE` ending `IDLE` past its debug writer, so
   `-debug` logs never show them (see [../debug.md](../debug.md)).
 
-## How proton-bridge does it
+<!-- nav -->
 
-proton-bridge uses Gluon, Proton's own IMAP server library, which keeps
-a full local copy of every message in an encrypted store, assigns and
-persists UIDs, and supports UIDPLUS, MOVE, IDLE, UNSELECT, ID and more.
-peroxide's backend keeps the same kind of store and persistent UIDs,
-and is far smaller, at the cost of the gaps listed above.
+---
+
+[Previous: Accounts, credentials and keys](../accounts.md) | [Contents](../README.md) | [Next: Mailboxes, folders, labels and flags](mailboxes.md)

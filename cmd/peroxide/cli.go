@@ -59,8 +59,8 @@ Commands:
         -discard-local-copy      wipe the local copy and download it all
                                  again (clients refetch every mailbox)
 
-  status
-      List the accounts logged in, and serve's own certificate.
+  list
+      List the accounts with stored credentials, and serve's own certificate.
 
   help
       Print this page.
@@ -179,14 +179,14 @@ func commandFlags(command string, inv *invocation) (*flag.FlagSet, bool) {
 		fs.BoolVar(&s.plaintext, "plaintext", false, "")
 	case "download-mailbox":
 		fs.BoolVar(&inv.discard, "discard-local-copy", false, "")
-	case "status", "help":
+	case "list", "help":
 	default:
 		return nil, false
 	}
 	return fs, true
 }
 
-var commands = []string{"auth", "serve", "sendmail", "download-mailbox", "status", "help"}
+var commands = []string{"auth", "serve", "sendmail", "download-mailbox", "list", "help"}
 
 // undefinedFlag returns the option a flag set's error names as unknown,
 // without its leading dash.
@@ -258,7 +258,7 @@ func parseArgs(args []string) (*invocation, error) {
 	switch inv.command {
 	case "help":
 		return nil, errHelp
-	case "serve", "status":
+	case "serve", "list":
 		if len(inv.args) != 0 {
 			return nil, fmt.Errorf("peroxide %v takes no arguments, got %q (options go before them; see 'peroxide help')", inv.command, inv.args)
 		}

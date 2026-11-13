@@ -8,7 +8,8 @@ details are on the pages linked.
     you --password once--> peroxide auth --SRP--> Proton
     client --bridge password--> peroxide (loopback) --TLS--> Proton
 
-- **Proton's API** is reached over HTTPS only (`-api-endpoint`), with Go's
+- **Proton's API** is reached over HTTPS (`https://mail.proton.me/api`;
+  `-api-endpoint`, for testing, takes any URL as given), with Go's
   TLS and system roots. peroxide trusts Proton's answers: which keys a
   recipient has, what a message contains.
 - **Your password** is used only by `peroxide auth`. It never goes to
@@ -65,13 +66,10 @@ Consequences:
   ([accounts.md](accounts.md#files-on-disk)).
 - **A leaked bridge password is revoked without a restart**: run
   `peroxide auth` again, then log in once from your client with the new
-  password. A running `serve` then ends the session of the old
-  credentials, logs it out at Proton, disconnects its clients and
-  refuses the old password. Without that login it does so at the
-  account's next refresh, about a day later at most; until then
-  clients already connected still work. A login with the old password
-  ends the session too, and is refused
-  ([accounts.md](accounts.md#logging-in-from-a-client)).
+  password: a running `serve` ends the old session, logs it out at
+  Proton and refuses the old password; without that login, at the next
+  refresh, about a day later
+  ([accounts.md](accounts.md#when-the-stored-credentials-change)).
 - **The bridge password is checked with a fast one-way verifier, not a
   slow password hash**: it is 32 random bytes, which no guessing finds
   at any speed ([accounts.md](accounts.md#logging-in-from-a-client)).
@@ -94,8 +92,10 @@ look, not in a cache directory.
   and the message ID as additional data, so a file renamed to another
   message's name fails to open rather than serving the wrong mail. The
   record of each message (its BODYSTRUCTURE, envelope, size) is sealed
-  the same way in `<user>.db`. File names are the hex of Proton's
-  message IDs, which the metadata database holds in clear anyway.
+  the same way in `<user>.db`. A file is named by the hex of Proton's
+  message ID, which the metadata database holds in clear anyway, and a
+  random suffix, new for each stored version (the record names the
+  file).
 - **A new bridge password** (`peroxide auth` again) or a lost one makes
   the next login find a key that doesn't match (`<user>.db` keeps an
   HMAC check value of it, not the key): the database and the store are
@@ -141,19 +141,8 @@ and your addresses; never message content, passwords or tokens.
 With `-debug`, the log holds your mail in clear. Read
 [debug.md](debug.md) before turning it on.
 
-## How proton-bridge does it
+<!-- nav -->
 
-proton-bridge keeps its secrets in `vault.enc`, encrypted with
-AES-256-GCM under a key in the system keychain, and stores no login or
-mailbox password: a derived key passphrase and the refresh token. Its
-message store on disk (Gluon) is encrypted under a per-account random
-key kept in the vault (`GluonKey`), lz4-compressed. It encrypts to
-external PGP recipients as their contact settings ask. In exchange it
-needs a working keychain.
+---
 
-peroxide derives its store key from the bridge password instead, so it
-needs no keychain and keeps no key at rest. Its exposure is larger in
-two places, the stored passwords and the unencrypted metadata
-database. Both are fixable without a keychain (store the derived
-passphrase, drop the login password, seal the metadata under the store
-key); neither is done yet.
+[Previous: The `-debug` flag](debug.md) | [Contents](README.md)

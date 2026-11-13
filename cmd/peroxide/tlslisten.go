@@ -151,7 +151,7 @@ func (l *tlsListener) logFailure(from net.Addr, err error) {
 	default:
 		// A client refusing the certificate ends up here, as a remote
 		// "bad certificate" or "unknown certificate authority" alert.
-		l.log.Printf("%v TLS handshake with %v failed: %v (does the client trust peroxide's certificate? see 'peroxide status')",
+		l.log.Printf("%v TLS handshake with %v failed: %v (does the client trust peroxide's certificate? see 'peroxide list')",
 			l.proto, from, err)
 	}
 }

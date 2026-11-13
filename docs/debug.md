@@ -70,20 +70,22 @@ depth, named (case-insensitive) one of:
     AccessToken RefreshToken Token HumanVerificationToken
     ClientEphemeral ClientProof ServerEphemeral ServerProof
     Salt KeySalt PrivateKey Password LoginPassword MailboxPassword
-    TwoFactorCode Cookie RecoverySecret Key
+    TwoFactorCode Cookie RecoverySecret WebUrl Key
 
-has its value replaced by `<credentials removed>`. That covers
+has its value replaced by `<credentials removed>` (a `null` stays
+`null`). That covers
 the SRP exchange (proofs, ephemerals, salts), the session tokens, the
 TOTP code, the encrypted private keys and key salts (`/keys/salts`,
-`/users`, `/addresses`), the recovery secret, and the cleartext session
+`/users`, `/addresses`), the recovery secret, the verify page URL of a
+CAPTCHA (it holds the challenge token), and the cleartext session
 keys of messages sent to recipients without a key (`Key` in a send
 package). A body that isn't valid JSON is replaced entirely.
 
 **Headers** are never logged, so `Authorization: Bearer ...`,
 `x-pm-uid` and cookies don't appear.
 
-**IMAP logins.** `LOGIN` keeps only the command: `a1 LOGIN <API key
-removed for security>`, username included. When the credentials come
+**IMAP logins.** `LOGIN` keeps only the command: `a1 LOGIN
+<credentials removed>`, username included. When the credentials come
 as literals, every client line after it is hidden until the server
 answers that tag. `AUTHENTICATE` keeps the mechanism (`PLAIN`), hides
 the initial response, and hides every client line after it until the
@@ -117,8 +119,8 @@ Treat a `-debug` log as a copy of your mailbox.
 - **Query strings and request bodies.** Request lines include the
   query: the address of every public-key lookup (`/keys?Email=...`) and
   list filters. The download's requests (`POST /mail/v4/messages`) carry
-  message IDs in their JSON body. Message, label and address IDs are in
-  paths.
+  a message ID, the page's `EndID`, in their JSON body. Message, label
+  and address IDs are in paths.
 - **Your username and addresses**, in API responses and in the SMTP
   `MAIL FROM`/`RCPT TO` lines.
 - **Session identifiers that aren't credentials**: the session UID in
@@ -143,13 +145,8 @@ Treat a `-debug` log as a copy of your mailbox.
 - A log taken with an old peroxide may hide less: check
   `git log -- internal/protonmail/redact.go cmd/peroxide/debuglog.go`.
 
-## How proton-bridge does it
+<!-- nav -->
 
-proton-bridge has `--log-level debug`, which logs its own operations to
-size-capped, pruned log files in its data directory, and separate
-`--log-imap (client|server|all)` and `--log-smtp` flags for protocol
-traces, which its help describes as "may contain decrypted data!".
+---
 
-peroxide puts everything in one stream instead, because the useful
-question is usually about order: which client command led to which API
-call, and which event reached which client. One flag, one file.
+[Previous: Encryption and signatures](encrypt.md) | [Contents](README.md) | [Next: Security](security.md)

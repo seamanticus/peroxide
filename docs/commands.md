@@ -45,9 +45,11 @@ or stderr, so a redirected or `tee`'d `-debug` log never holds it.
 `auth` needs a terminal: it reads the passwords and the Enter key from
 it too.
 
-Sections are separated by blank lines. On a terminal the CAPTCHA
-heading is bold cyan and the two boxed values bold yellow, unless
-`NO_COLOR` is set or `TERM` is `dumb`; redirected output is plain text.
+Sections are separated by blank lines. The CAPTCHA heading is bold
+cyan and the CAPTCHA URL box bold yellow when that output is a
+terminal; the bridge password box, written to the terminal itself, is
+bold yellow too. Neither has colour if `NO_COLOR` is set or `TERM` is
+empty or `dumb`; redirected output is plain text.
 The CAPTCHA URL is also copied to the clipboard through the terminal
 (OSC 52), when the terminal supports it.
 
@@ -67,24 +69,22 @@ sessions. If either server stops with an error, the process exits. Use
 `-disable-smtp` or `-disable-imap` to run only one.
 
 `serve` is the only command that runs a server: run one per account set.
-Proton's refresh tokens are single use, so two peroxide processes
-holding sessions for the same account would each refresh it, and the
-slower one, its token spent, would have to fall back on the token the
-other saved in `session.json`, or log in with the stored password, which
-Proton may answer with a CAPTCHA
-([accounts.md](accounts.md#logging-in-from-a-client)). (Older peroxide
-had separate `imap` and `smtp` commands, which
-did exactly that when run side by side.) `serve` holds a lock,
+Proton's refresh tokens are single use, so two processes holding
+sessions for the same account would spend each other's
+([accounts.md](accounts.md#session-refresh)). `serve` holds a lock,
 `serve.lock` in the configuration directory, while it runs: a second
 `serve` stops with "peroxide serve is already running", `sendmail`
 sends through it, and `download-mailbox` refuses to run. Clients
 logging in to one account at once share one login, and requests that
 meet an expired session renew it once between them.
 
-### `status`
+### `list`
 
 Lists the usernames that have stored credentials. It reads only the
 names in `auth.json` (they are not encrypted) and makes no request.
+It then prints the path and SHA-256 fingerprint of peroxide's own TLS
+certificate, or that none is made yet
+([below](#peroxides-certificate)).
 
 ### `download-mailbox [-discard-local-copy] <username>`
 
@@ -163,7 +163,7 @@ in and unlocks your keys afresh, and the session ends with the command.
 | `-imap-host`, `-imap-port` | `serve` | `127.0.0.1`, `1143` | Where the IMAP server listens |
 | `-smtp-host`, `-smtp-port` | `serve`, `sendmail` | `127.0.0.1`, `1025` | Where the SMTP server listens; for `sendmail`, where `serve`'s is |
 | `-disable-imap`, `-disable-smtp` | `serve` | off | Don't start that server |
-| `-show-all-mail` | `serve` | on | `=false` leaves All Mail out of IMAP LIST, as proton-bridge's "Show All Mail" off; see [imap/mailboxes.md](imap/mailboxes.md) |
+| `-show-all-mail` | `serve` | on | `=false` leaves All Mail out of IMAP LIST and LSUB; see [imap/mailboxes.md](imap/mailboxes.md#what-peroxide-shows) |
 | `-tls-cert`, `-tls-key` | `serve` (`sendmail`: `-tls-cert`) | peroxide's own | Serve IMAP and SMTP with this certificate instead; `sendmail` trusts only that certificate |
 | `-tls-client-ca` | `serve` | none | Require a client certificate signed by this CA |
 | `-plaintext` | `serve`, `sendmail` | off | No TLS; refused unless every enabled server listens on a loopback IP, and with any `-tls-*` option |
@@ -220,7 +220,7 @@ certificate and logs
 
     Made peroxide's TLS certificate /home/you/.config/peroxide/tls/cert.pem, SHA-256 fingerprint 8A:57:...: have your clients trust it (docs/commands.md)
 
-(the path in full, under `$XDG_CONFIG_HOME` if set). `peroxide status`
+(the path in full, under `$XDG_CONFIG_HOME` if set). `peroxide list`
 prints the path and fingerprint again, as "peroxide's TLS certificate
 (serve's unless given -tls-cert)". It is:
 
@@ -239,7 +239,7 @@ the certificate has expired, `serve` stops and says so; remove
 `tls/cert.pem` and `tls-key.pem` to have a new pair made, then trust
 the new one in your clients.
 
-To check what a client is shown, compare the fingerprint `status`
+To check what a client is shown, compare the fingerprint `list`
 prints with
 
     openssl s_client -connect 127.0.0.1:1143 -alpn imap </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256
@@ -261,7 +261,7 @@ prints with
   instead: it replaces the bundle, and aerc's other accounts would
   fail.
 - **Thunderbird** shows the certificate on the first connection: check
-  the fingerprint against `peroxide status`, and confirm the security
+  the fingerprint against `peroxide list`, and confirm the security
   exception permanently.
 - **mbsync**, **msmtp** and other OpenSSL clients: point their CA file
   option (`CertificateFile`, `tls_trust_file`) at `tls/cert.pem`.
@@ -326,8 +326,7 @@ mail.
 
 Proton expects an application version header, and accepts `Other`
 today. If Proton ever starts refusing it (API code 5003, "app version
-bad"), every request fails: pass a version Proton accepts, such as one
-proton-bridge sends.
+bad"), every request fails: pass a version Proton accepts.
 
 ## Environment
 
@@ -338,25 +337,16 @@ proton-bridge sends.
   variable can be read by other processes of the same user
   (`/proc/<pid>/environ`): set it for the one command only, piped from
   a password manager, never exported in a long-lived shell.
-- `XDG_CONFIG_HOME`: where `peroxide/` is created (default
-  `~/.config`). See
-  [accounts.md](accounts.md#files-on-disk).
+- `XDG_CONFIG_HOME`: where `peroxide/` (credentials, locks, the TLS
+  certificate) is created (default `~/.config`).
+- `XDG_DATA_HOME`: where `peroxide/` (the sealed local copy of the
+  mail) is created, if set to an absolute path (default
+  `~/.local/share`).
 
-## How proton-bridge does it
+See [accounts.md](accounts.md#files-on-disk) for what each file holds.
 
-proton-bridge has a GUI and an interactive CLI (`--cli`) in which you
-log in, list accounts and read the bridge password at any time, because
-it keeps the bridge password in its vault. peroxide prints it once and
-forgets it. proton-bridge generates its own self-signed certificate
-(internal/certs/tls.go), but makes it a CA (`IsCA`, `KeyUsageCertSign`,
-RSA 2048, 20 years) and on macOS installs it in the system keychain:
-whoever holds its key can then make a certificate the system trusts
-for any site. peroxide's can sign nothing (above). proton-bridge
-defaults to STARTTLS (`IMAPSSL`, `SMTPSSL` false in its vault
-settings), which the NO STARTTLS study (USENIX Security 2021) found
-flawed in over 40 ways across clients and servers; peroxide speaks
-implicit TLS only, and plain text only when asked. A custom
-certificate proton-bridge can't load is silently replaced by its own;
-peroxide stops. proton-bridge takes the
-first free ports from 1143 (IMAP) and 1025 (SMTP); peroxide uses those
-numbers as fixed defaults and fails to start if they are taken.
+<!-- nav -->
+
+---
+
+[Previous: Overview](overview.md) | [Contents](README.md) | [Next: Accounts, credentials and keys](accounts.md)

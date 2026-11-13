@@ -13,7 +13,7 @@ Proton answers an action on several messages with one result per
 message. A message it reports as "does not exist" (code 2501) for an
 action is treated as already done (marking a read message read); any
 other per-message failure fails the command with NO naming the
-messages, and the others are applied.
+messages by their Proton IDs, and the others are applied.
 
 ## STORE
 
@@ -60,12 +60,12 @@ No `COPYUID` is returned (no UIDPLUS).
 RFC 6851 asks that each message end in the source or the destination,
 never in neither, and not in both, even if the command fails.
 
-A MOVE is two calls, as in proton-bridge: label with the destination,
+A MOVE is two calls: label with the destination,
 then unlabel from the source. Proton keeps a message in one folder, so
 labelling it into a folder already takes it out of the previous one,
 and the unlabel then answers "does not exist", which counts as done.
 
-**Labels**, as in proton-bridge (`shouldExpungeOldLocation`):
+**Labels**:
 
 - a MOVE **into** `Labels/<name>` from a folder or system mailbox only
   adds the label: one call, and the message stays where it was. aerc's
@@ -73,7 +73,7 @@ and the unlabel then answers "does not exist", which counts as done.
 - a MOVE **out of** a label, into a folder or another label, adds the
   destination and removes the label: two calls, as above. aerc's
   `:modify-labels -name` moves to INBOX, so it also files the message
-  in INBOX, as with bridge.
+  in INBOX.
 
 peroxide:
 
@@ -90,8 +90,7 @@ peroxide:
 **Refused**, before any call:
 
 - into or out of **All Mail** (every message is there; none leaves it
-  but by being deleted), and between INBOX and Sent, as proton-bridge
-  refuses them;
+  but by being deleted), and between INBOX and Sent;
 - into or out of **Starred**, which, like All Mail, shows messages that
   stay in their folders. A move into it would take the message out of
   its folder, a move out of it would file it elsewhere to unstar it.
@@ -107,7 +106,7 @@ mailboxes Proton's web client deletes for good from:
 
 | Expunged from | What happens |
 |---|---|
-| Trash, Spam, Drafts | deleted for good, unless another mailbox or label holds them (then only removed from here) |
+| Trash, Spam, Drafts | deleted for good, unless another mailbox or label holds them, or they are starred (then only removed from here) |
 | any other folder: INBOX, Sent, Archive, `Folders/...` | **moved to Trash**, answered `OK [ALERT] N messages moved to Trash: messages are deleted for good only from Trash, Spam or Drafts` |
 | a label (`Labels/...`) or Starred | the label is removed; the message stays in its folder |
 | All Mail | refused |
@@ -140,26 +139,26 @@ rely on EXAMINE to protect messages marked `\Deleted`.
 
 ## APPEND
 
-APPEND works into every mailbox but **All Mail** and **Starred**, as
-in proton-bridge. So a client can copy or move mail from another
+APPEND works into every mailbox but **All Mail** and **Starred**. So a
+client can copy or move mail from another
 account into Proton, and save its copy of what it sent.
 
 **Into `Drafts`** the message is imported like anywhere else, but
 neither received nor sent, which is what makes it a draft in Proton, and
 read. Its parts and header are kept, as other servers keep them. Its
 address is the From address (Sender's if there's no From) if it is one
-of yours that is enabled and can send, your primary address otherwise.
-proton-bridge makes a Proton draft instead (`createDraftWithParser`),
-which keeps one body (HTML if there is one) and none of the original
-header: a `multipart/alternative` message comes back HTML only, from
-you. peroxide did the same until it was seen to mangle messages copied
-from other accounts. Proton's web client lists and opens imported
+of yours (a `+alias` ignored) that is enabled and can send, your
+primary address otherwise.
+It is not made a Proton draft: a draft keeps one body (HTML if there is
+one) and none of the original header, so a `multipart/alternative`
+message copied from another account would come back HTML only, from
+you. Proton's web client lists and opens imported
 drafts; a draft aerc postpones is one of them, and recalling and
 postponing it again saves a new one (aerc gives it a new
 `Message-Id`) and deletes the old.
 
 **Anywhere else** it imports the message (`POST
-/mail/v4/messages/import`), with what bridge sends:
+/mail/v4/messages/import`), with:
 
 - **labels**: the mailbox, and Starred if the message has `\Flagged`;
 - **received or sent**: received into INBOX, sent into Sent; elsewhere
@@ -169,16 +168,16 @@ postponing it again saves a new one (aerc gives it a new
 - **address**: the From address (or Sender's, if there's no From) if it
   is one of yours, a `+alias` ignored, and can send; your primary
   address otherwise;
-- **encryption**: to the first unlocked active key of that address. As
-  go-proton-api does, each part is encrypted on its own, keeping the
+- **encryption**: to the first unlocked active key of that address.
+  Each part is encrypted on its own, keeping the
   MIME structure (text decoded to UTF-8), so that Proton can read the
   text and list the attachments. A message already signed or
   encrypted, or one with more than one text part, is encrypted whole as
   PGP/MIME instead. A message without a text part gets an empty one
-  first, as bridge adds it: Proton reads a message's text from it. A
+  first: Proton reads a message's text from it. A
   PGP/MIME message (`multipart/encrypted` or `multipart/signed`) is left
   as it is, so that clients still find it at the root and decrypt or
-  verify it; bridge would wrap it.
+  verify it.
 
 **A message already in your account isn't imported.** Proton keeps one
 copy of a message: importing one it has (by its `Message-Id`) makes no
@@ -188,8 +187,8 @@ out of the folder it was in. Moving one message from another account
 into Spam, then Archive, then Trash moved Proton's single copy from
 folder to folder, each APPEND answering OK, and the client deleted its
 source each time. So before importing, peroxide looks the message up by
-its `Message-Id` among the account's messages (one metadata request, as
-bridge looks a Message-Id up).
+its `Message-Id` among the account's messages (one metadata
+request).
 
 That finds a message sent through peroxide's SMTP too: SMTP gives Proton
 each message's `Message-Id`, and Proton finds it by it at once (tested
@@ -235,8 +234,8 @@ gives (`\Flagged`, `\Seen`) aren't applied to it.
 Thunderbird and Evolution show `ALERT` texts; aerc and KMail show
 neither OK nor `ALERT` texts, only NO's.
 
-**Size**: 70 MiB (73400320 bytes), the import API's limit as
-go-proton-api checks it, on the encrypted message: about 50 MB of
+**Size**: 70 MiB (73400320 bytes), the import API's limit, on the
+encrypted message: about 50 MB of
 attachments once base64-encoded, Proton's limit for received mail.
 Encrypted part by part, a message keeps about its size; encrypted
 whole it grows by a third, and over 70 MiB is refused with `NO
@@ -245,7 +244,7 @@ whole it grows by a third, and over 70 MiB is refused with `NO
 
 APPEND waits for the next events before it answers, so the new message
 is visible when it does. The date an APPEND gives (its INTERNALDATE) isn't
-kept, as in bridge: Proton dates an imported message by its `Date`
+kept: Proton dates an imported message by its `Date`
 field.
 
 ## CREATE, DELETE, RENAME
@@ -259,7 +258,8 @@ before any request: the system mailboxes, INBOX included, the
 (`Archive/2026`). A level written with U+2215 (as peroxide shows a `/`
 in a name) becomes `/` in Proton.
 
-Each is one request to Proton per folder, and peroxide changes the
+Each makes one request to Proton (plus one per missing parent folder
+CREATE or RENAME makes first), and peroxide changes the
 mailbox list at once from Proton's answer, so the client can open what
 it just created; the `Labels` event that follows changes nothing.
 
@@ -294,63 +294,8 @@ empty). `:move -p` and `:copy -p` create a missing destination. aerc
 has no command to rename, and shows the parents `:mkdir Folders/a/b`
 created, and drops what `:rmdir` deleted, only after it reconnects.
 
-## How proton-bridge does it
+<!-- nav -->
 
-- **STORE, COPY, MOVE** reach Proton through Gluon, Proton's IMAP
-  library, which keeps the mailbox state in its own store. Labels are
-  mailboxes there, so COPY to `Labels/x` adds a label and MOVE out of
-  one removes it. Its MOVE has two forms behind a feature flag
-  (connector.go, unleash `FolderUnlabelCallDisabled`, off unless
-  Proton's server turns it on): by default
-  `moveMessagesWithUnlabelCallOnFolders`, label then unlabel, which
-  peroxide follows; the other, `moveMessagesWithoutUnlabelCallOnFolders`,
-  skips the unlabel between folders. Bridge dropped the call in 3.24.0
-  (BRIDGE-451) and restored it under the flag in 3.24.1 (BRIDGE-522), as
-  its comment says "removing the unlabel call resulted in a lot of
-  client issues". Both forms refuse MOVE between INBOX and Sent and into
-  or out of All Mail and Scheduled. Bridge allows MOVE into and out of
-  Starred; peroxide refuses it (above). Labels follow bridge: a MOVE
-  into a label from a folder skips the unlabel, and every MOVE out of
-  one unlabels (bridge then also expunges the message from the source
-  mailbox in Gluon).
-- **EXPUNGE**: bridge unlabels first, then deletes for good, from Trash
-  and Drafts, what no other shown label holds; from any other folder it
-  only unlabels, leaving the message in All Mail alone; All Mail
-  refuses. peroxide deletes from Spam too, as the web client does,
-  moves to Trash from other folders, as the web client's Delete does,
-  and deletes before unlabelling, so that a failed delete leaves the
-  message where it was rather than only in All Mail, which bridge can
-  hide ("Show All Mail" off).
-- **APPEND** (`Connector.CreateMessage`) imports the message into any
-  mailbox but All Mail and Scheduled, through go-proton-api's
-  `ImportMessages`, with the labels, flags, address and encryption
-  above; Drafts makes a draft. peroxide decides the same, and also
-  refuses Starred, as it refuses moves into it: bridge imports there
-  with the Starred label alone, leaving the message in no folder.
-  peroxide shows no Scheduled mailbox. Into a label, bridge imports a
-  new message with that label alone, in no folder; peroxide refuses it
-  and labels only a message the account already has.
-- **A message already there**: bridge's `sendrecorder` remembers sends
-  for 30 minutes, by gluon's `GetMessageHash` and the recipients, and
-  APPEND waits up to 90 seconds for one under way; gluon then adds the
-  existing message to the mailbox, and answers OK. Any other message
-  bridge imports, and Proton's own deduplication files the message it
-  has in the mailbox, moving it from its folder, under a plain OK.
-  peroxide keeps no record of sends: it looks up the `Message-Id`,
-  which finds sent messages as well (above), and then imports nothing
-  and moves nothing: OK [ALERT] if the message is in the mailbox
-  already (or in INBOX for Sent, and back), NO [ALERT] otherwise.
-- **Size**: bridge checks only go-proton-api's 70 MiB on the encrypted
-  message, and announces no APPENDLIMIT. peroxide announces the same
-  70 MiB.
-- **CREATE, DELETE, RENAME** (`Connector.CreateMailbox`,
-  `UpdateMailboxName`, `DeleteMailbox`): the same names, refusals,
-  requests and `#f66`. gluon creates missing parents before bridge sees
-  the name, as peroxide does. Differences: bridge reads the label again
-  (`GetLabel`, the whole list) before a rename to keep its color,
-  peroxide uses the color it keeps; bridge picks the request by
-  the new name's prefix (`updateFolder` or `updateLabel`) whatever the
-  mailbox was, peroxide refuses a folder renamed into `Labels/` or a
-  label into `Folders/`. bridge can't move a subfolder to the top:
-  go-proton-api leaves an empty `ParentID` out of the request, so the
-  folder stays where it was.
+---
+
+[Previous: Messages: FETCH, decryption and what can't be decrypted](messages.md) | [Contents](../README.md) | [Next: Sending mail: the SMTP server and `peroxide sendmail`](../smtp.md)

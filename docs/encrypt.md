@@ -182,11 +182,8 @@ text.
   itself, and doesn't read Proton's contact settings (encrypt, sign,
   scheme). Your client's own encryption is passed on, as above.
 
-## How proton-bridge does it
+<!-- nav -->
 
-On sending, proton-bridge encrypts to outside recipients whose key is
-in your contacts, and has no case for a message the client signed or
-encrypted ([smtp.md](smtp.md#how-proton-bridge-does-it)). On receipt,
-it checks no signature inside an encrypted body, and passes mail it
-can't decrypt through as PGP/MIME when it has no attachments, as
-peroxide does ([imap/messages.md](imap/messages.md#how-proton-bridge-does-it)).
+---
+
+[Previous: Sending mail: the SMTP server and `peroxide sendmail`](smtp.md) | [Contents](README.md) | [Next: The `-debug` flag](debug.md)

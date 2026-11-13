@@ -36,7 +36,7 @@ const (
 )
 
 // CertPath returns the path of serve's own certificate, creating nothing:
-// `peroxide status` asks for it too.
+// `peroxide list` asks for it too.
 func CertPath() (string, error) {
 	configHome, err := os.UserConfigDir()
 	if err != nil {

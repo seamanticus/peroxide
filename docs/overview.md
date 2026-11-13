@@ -86,7 +86,8 @@ recipient's public key, and asks Proton to send. Proton files the sent
 copy in Sent. See [smtp.md](smtp.md).
 
 **The last IMAP client logs out.** Polling stops, the database closes.
-The keys stay unlocked in memory until the process exits.
+The keys stay unlocked in memory until the process exits, or until the
+session ends ([accounts.md](accounts.md#when-the-stored-credentials-change)).
 
 ## What peroxide keeps where
 
@@ -106,16 +107,8 @@ The keys stay unlocked in memory until the process exits.
   memory is reused ([security.md](security.md)).
 - Never on disk: the bridge password and the unlocked keys.
 
-## How proton-bridge does it
+<!-- nav -->
 
-proton-bridge is a desktop application with a GUI and a CLI. It keeps
-a full encrypted copy of your mailbox on disk (its Gluon store), syncs
-everything in the background after login, and keeps its credentials in
-an encrypted vault whose key is in your system keychain. It adds
-telemetry, crash reports, automatic updates and a GUI.
+---
 
-peroxide keeps the same kind of copy, downloaded the same way, but is
-one static binary with no keychain (the store key comes from the bridge
-password) and no GUI. It aims to stay small and simple to audit:
-`TODO.md` tracks where it still differs (section 8 for All Mail, 14 for
-gluon itself).
+[Previous: Contents](README.md) | [Next: Commands and options](commands.md)

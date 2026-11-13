@@ -24,7 +24,7 @@ Proton has.
 ## The download
 
 At login, peroxide **downloads every message of the account** in the
-background, as proton-bridge syncs: first the metadata, only once per
+background: first the metadata, only once per
 database (later logins rely on events), then the messages themselves.
 
 1. It lists the account **newest first**, 128 messages per request,
@@ -34,18 +34,18 @@ database (later logins rely on events), then the messages themselves.
    Proton lists again first, and peroxide skips).
 2. Each message is filed in the mailbox of each of its labels, with the
    next UID there. So **the newest message has UID 1**: UIDs of
-   downloaded mail run in reverse arrival order, as with proton-bridge.
+   downloaded mail run in reverse arrival order.
    Mail that arrives later counts up from there. Clients that sort by
    date themselves (Thunderbird, Evolution, KMail) show the mail in
    order. aerc sorts only on the server, with the SORT extension, which
-   peroxide (like proton-bridge) doesn't offer: aerc lists in UID order,
+   peroxide doesn't offer: aerc lists in UID order,
    so downloaded mail appears oldest at the top, newest at the bottom,
    above anything that arrived after it. aerc's `:sort` and `sort`
    option need SORT; a client-side sort is a change to make in aerc.
 3. Each page and the point reached are stored in one transaction, so a
    download stopped at any point (peroxide stopped, the last client
    logged out) resumes from there at the next login.
-4. A failed request is retried after 20 s, as proton-bridge does.
+4. A failed request is retried after 20 s.
 
 Clients can use their mailboxes while they fill: each page sends EXISTS
 to the clients that have a mailbox selected, and STATUS counts grow as
@@ -53,8 +53,8 @@ the download goes. An account of 20000 messages takes about 160
 requests; at the 0.4 s a request took from the developer's location,
 about a minute (an estimate, not measured).
 
-Events keep being applied meanwhile, as proton-bridge applies them
-during its sync. A page is requested holding no lock, so a slow or hung
+Events keep being applied meanwhile. A page is requested holding no
+lock, so a slow or hung
 request keeps nothing waiting, and stored under the account's lock
 (`user.syncSem`), which events and actions take too. A message that
 arrives during the download gets the next UID when its event is
@@ -62,11 +62,10 @@ applied, possibly below older ones listed later, and the page that lists
 it again leaves it alone: no UID is ever given twice.
 
 A page fetched before an event and stored after it can undo the event
-(bring back a deleted message, old flags). So, as proton-bridge does,
+(bring back a deleted message, old flags). So
 peroxide notes the last event applied when the download begins, and
 once every message is stored, applies the events after it again
-(rewinding the events, bridge's `RewindEventID`); applying an event
-twice changes nothing.
+(rewinding the events); applying an event twice changes nothing.
 
 Then **the messages themselves**: every message not stored yet, newest
 first, is downloaded (`GET /messages/<id>`, and each attachment), built
@@ -74,11 +73,12 @@ and stored, as a FETCH would. What is stored is the progress, so a
 stopped download resumes, and later logins download only what arrived
 since. The requests are paced as TCP paces its traffic (AIMD): 2 at
 once to start, one more per round that succeeds, up to 32 (what
-Proton's API team recommends to proton-bridge); a 429 or 5xx halves
-that and pauses every request for Proton's `Retry-After`, or for 1-2 s
-doubling up to a minute, with jitter. The pace is shared with FETCH,
+Proton's API team recommends); a 429 or 5xx halves
+that and pauses every request for Proton's `Retry-After`, or else for
+1-2 s, each next pause twice as long, up to 30-60 s (back to 1-2 s after
+a success). The pace is shared with FETCH,
 which builds the messages it finds unstored in parallel too. Messages
-being downloaded and built take at most 64 MB (by Proton's sizes) at
+being downloaded and built take at most 64 MiB (by Proton's sizes) at
 once, a FETCH's included: one alone always may. When a client selects
 a mailbox, its messages not stored yet go to the front of the queue.
 A message that fails for another reason goes in the failed set and
@@ -90,7 +90,7 @@ encrypted are built again ([messages.md](messages.md#messages-that-change)).
 
 For a large account, run the download before the first client connects
 (see
-[../commands.md](../commands.md#download-mailbox)):
+[../commands.md](../commands.md#download-mailbox--discard-local-copy-username)):
 
     peroxide download-mailbox <username>
 
@@ -128,8 +128,8 @@ peroxide (package `events`):
 
 - polls each logged-in account **every 20 s plus a random 0 to 20 s**
   (a fresh random wait each time, from a ChaCha8 source seeded by the
-  OS), as proton-bridge does, so that accounts and peroxide instances
-  don't poll Proton in step;
+  OS), so that accounts and peroxide instances don't poll Proton in
+  step;
 - follows `More` at once, without waiting;
 - polls at once when a command asks (NOOP with a mailbox selected, and
   APPEND, wait for the answer; STORE, COPY, MOVE and EXPUNGE don't, see
@@ -163,7 +163,7 @@ the next login, rather than lost.
 
 A page with a message event that fails on the network, a rate limit
 (429) or a server error (5xx) is not stored as applied: it is asked for
-again at the next poll, as proton-bridge retries such events. One that
+again at the next poll. One that
 fails otherwise (the database can't store it, Proton refuses the
 message) marks the database for a rebuild, so that it never silently
 differs from Proton.
@@ -176,7 +176,7 @@ event and rebuilds, as for a Refresh. Network errors, 401,
 On the very first login of an account (no ID stored), peroxide asks for
 the latest event ID **before** listing folders and starting the
 download, so a change made meanwhile comes as an event instead of being
-missed (proton-bridge's `StartSyncEventID`).
+missed.
 
 ### What this means in practice
 
@@ -199,7 +199,7 @@ and then UIDVALIDITY changes too, so clients that cache by UID
 (Thunderbird, mbsync, aerc's header cache) know to drop their cache.
 
 UIDVALIDITY is the time the mailbox was made, in seconds since
-2023-02-01, as gluon (proton-bridge's IMAP library) gives it, and always
+2023-02-01, and always
 above any given before by that database. If the system clock reads a
 date before 2023-02-01 (a dead CMOS battery resets it to the BIOS date),
 peroxide refuses to make a mailbox, saying so, rather than give a
@@ -218,23 +218,8 @@ did.
 `\Deleted` is kept in memory only (Proton has no such flag), per
 mailbox: it is lost when peroxide restarts, which RFC 3501 allows.
 
-## How proton-bridge does it
+<!-- nav -->
 
-proton-bridge syncs the whole account in the background after login,
-newest first (`GetMessageMetadataPage` with `Desc` and `EndID`, 128 per
-page): every message's metadata, then every body, into Gluon's
-encrypted store. Events received meanwhile are applied as they come,
-and replayed from `StartSyncEventID` once the sync ends. Its UIDs
-persist, and UIDVALIDITY comes from the same epoch. On a Refresh it
-deletes the account's data and syncs again; an event that fails on the
-network, a 429 or a 5xx is retried, and on one it can't apply otherwise
-it reports a "bad event" and offers a resync; its `repair` command does
-the same, and a resync asked for is remembered (`ShouldResync`) until
-the next login.
+---
 
-peroxide downloads the same metadata and bodies the same way. Its
-parallelism grows and shrinks with Proton's answers (AIMD) where
-bridge's starts at its maximum and halves on errors
-(`DefaultDownloadRateModifier`). An event it can't apply rebuilds at
-once rather than waiting for you to choose, as there is no window to
-ask in.
+[Previous: Mailboxes, folders, labels and flags](mailboxes.md) | [Contents](../README.md) | [Next: Messages: FETCH, decryption and what can't be decrypted](messages.md)

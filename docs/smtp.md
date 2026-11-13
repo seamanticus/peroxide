@@ -20,18 +20,20 @@ Proton's limits apply when it uploads.
 `smtp.SendMail`, step by step:
 
 1. **Parse the header.** Exactly one `From:` address, and at least one
-   recipient in `To`, `Cc` or `Bcc`, or the message is refused.
-   Recipients given by RCPT TO (or on the `sendmail` command line) that
-   are in neither To nor Cc become Bcc, unless the message has a `Bcc:`
-   header, which then wins.
+   recipient in `To`, `Cc` or `Bcc` (RCPT TO counted, below), or the
+   message is refused. Recipients given by RCPT TO (or on the `sendmail` command line) that
+   are in neither To nor Cc (compared as written, case included) become
+   Bcc, unless the message has a `Bcc:` header, which then wins.
 2. **Choose the sender.** The From address must be one of your Proton
    addresses (compared without case), with a key peroxide has unlocked;
-   otherwise "unknown sender address" or "sender address key hasn't been
+   otherwise "unknown sender address", "sender address has no private
+   key" or "sender address key hasn't been
    decrypted". The address list is the one read when the SMTP client
    logged in.
-3. **Find the parent.** If `In-Reply-To` names a message in Proton (by
-   its Message-Id), the draft is created as a reply to it, so Proton
-   marks the parent replied and threads the conversation.
+3. **Find the parent.** If `In-Reply-To` holds one Message-Id and
+   exactly one message of the sending address has it, the draft is
+   created as a reply to it, so Proton marks the parent replied and
+   threads the conversation.
 4. **Create a draft** in Proton (`POST /messages`) with the subject,
    recipients, your From name, the original header and the Message-Id,
    and an empty body encrypted to your own key.
@@ -41,9 +43,9 @@ Proton's limits apply when it uploads.
    the file, uploaded beside it, as Proton's own clients do, so a
    Proton recipient can check it), uploaded to `/attachments`, its key
    kept for the send. A part's `Content-Id` is kept.
-6. **Store the body.** The first inline part becomes the body, and a
-   later `text/html` one replaces it (so HTML wins over its text/plain
-   alternative); other inline parts are dropped. It is encrypted to,
+6. **Store the body.** The first inline part, of any type, becomes the
+   body, and a later `text/html` one replaces it (so HTML wins over its
+   text/plain alternative); other later inline parts are dropped. It is encrypted to,
    and signed with, your key and saved in the draft. A message with no
    inline part is refused ("message doesn't contain a body part").
 7. **Look up every recipient's key** (`GET /keys?Email=...`). Proton
@@ -51,7 +53,7 @@ Proton's limits apply when it uploads.
    and possibly others it has. peroxide uses the first key Proton marks
    active (not obsolete). A recipient whose keys are all obsolete makes
    the send fail, naming them, rather than getting in clear what they
-   expect encrypted (as proton-bridge refuses too).
+   expect encrypted.
 8. **Send** (`POST /messages/<id>`), with up to two packages:
    - recipients with a key: the body's session key encrypted to each
      recipient's key (Proton's "internal" scheme), signed;
@@ -99,6 +101,8 @@ in [encrypt.md](encrypt.md#a-message-your-client-secured-is-handled-apart).
   sends twice.
 - Inline parts other than the body (an inline image without an
   attachment disposition, a text/plain alternative) are dropped.
+- An attachment part whose `Content-Type` or file name can't be parsed
+  is dropped too, without an error.
 
 ## `peroxide sendmail`
 
@@ -108,22 +112,8 @@ taking the place of RCPT TO. Its options, how it hands the message to a
 running `serve`, and `git send-email` set-up are in
 [commands.md](commands.md#sendmail-username----recipients).
 
-## How proton-bridge does it
+<!-- nav -->
 
-proton-bridge (internal/services/smtp) builds **send preferences** per
-recipient from the key lookup and your contact settings: Proton
-recipients get the internal scheme; external recipients with a key get
-PGP/MIME or inline PGP as the contact says; others get clear or
-clear-signed MIME. It keeps the message's MIME structure and all its
-parts. Its send path has no case for a message the client signed or
-encrypted: it parses it into a body and attachments like any other
-(its parser names unnamed parts `attachment.bin`), so the client's
-signature or ciphertext doesn't survive either (read from the code,
-not tried). It keeps a hash of each message sent in the last 90
-seconds and skips a duplicate send. It adds `AUTH LOGIN` beside
-go-smtp's `AUTH PLAIN` (internal/services/imapsmtpserver/smtp.go).
+---
 
-peroxide's send path is hydroxide's, nearly unchanged; it covers mail
-between Proton users and plain mail to others. It keeps no record of
-sends: APPEND finds a saved copy by its `Message-Id` instead
-([imap/changes.md](imap/changes.md#append)).
+[Previous: Changing mail: STORE, COPY, MOVE, EXPUNGE, APPEND](imap/changes.md) | [Contents](README.md) | [Next: Encryption and signatures](encrypt.md)

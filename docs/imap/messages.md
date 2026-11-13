@@ -34,9 +34,10 @@ After login, once the message list is downloaded
 ([sync.md](sync.md)), peroxide downloads every message in the
 background, newest first, so most FETCHes find it stored; the mailbox a
 client last selected goes first. A FETCH of messages not stored yet
-builds and stores them first, up to 64 at a time in parallel, paced
-with the background download (Proton asking either to slow down slows
-both); the response starts once the first 64 are ready. A FETCH of a
+builds and stores them first, in chunks of 64, with at most 32 requests
+at once, paced with the background download
+([sync.md](sync.md#the-download): Proton asking either to slow down
+slows both); the response starts once the first chunk is ready. A FETCH of a
 message being downloaded waits for that download rather than making a
 second. Each such message still costs one request (and one per
 attachment): Proton has no way to ask for several full messages at
@@ -45,7 +46,7 @@ once.
 `FETCH ALL`, `FAST` and `FULL` are expanded as RFC 3501 defines. An
 item peroxide doesn't know fails the whole FETCH (it isn't dropped
 silently). A body part the message doesn't have (`BODY[7]` of a message
-with two) is an empty string, as Dovecot and gluon answer.
+with two) is an empty string, as Dovecot answers.
 
 A message Proton deleted after it was listed, and before its delete
 event arrived, is skipped: the FETCH answers for the others, and the
@@ -68,8 +69,7 @@ messages), the message stays unread, and the failure is logged.
 
 In package `internal/msgbuild` (`Builder.Build`), which the IMAP server
 calls; the server then derives BODYSTRUCTURE and ENVELOPE from the bytes
-(`internal/imap/structure.go`). As proton-bridge builds it
-(pkg/message/build.go, `BuildRFC822Into`):
+(`internal/imap/structure.go`):
 
 - **With attachments**:
 
@@ -213,10 +213,12 @@ can change what peroxide would build:
   just its flags or labels): if it is stored, peroxide builds it again
   and compares the bytes. The same: nothing happens. Different: the
   message gets a new UID in every mailbox it is in, and clients are
-  told `EXPUNGE` of the old one and `EXISTS` of the new, as gluon does.
+  told `EXPUNGE` of the old one and `EXISTS` of the new.
   A message not stored yet is simply built as Proton has it at its
   next FETCH. Several updates of one draft in an events page (the web
-  client autosaving) build it once, after the page is applied; the
+  client autosaving) build it once, after the page is applied (not if
+  the page failed: the draft's next update or the next login tries
+  again); the
   download of the draft holds no lock, so other events, STOREs and the
   background download don't wait for it. If Proton can't be reached,
   the stored version stays until the draft's next update.
@@ -322,7 +324,7 @@ no `attachments=`.
 Each message is stored as served, sealed with AES-256-GCM, one file per
 message under `$XDG_DATA_HOME/peroxide/<user>/` (or
 `~/.local/share/peroxide/<user>/`), named by the hex of Proton's message
-ID; its BODYSTRUCTURE, envelope and size are kept, sealed with the same
+ID and a random suffix per version; its BODYSTRUCTURE, envelope and size are kept, sealed with the same
 key, in the account's database. The key is derived from your bridge
 password and never written: [../security.md](../security.md#the-message-store).
 A message deleted in Proton is removed from the store with it.
@@ -331,36 +333,13 @@ A message deleted in Proton is removed from the store with it.
 
 A message whose download or build fails for a reason that retrying soon
 won't change (Proton refusing it, say) is kept in a set of failed
-messages, as proton-bridge does. The background download skips it;
+messages. The background download skips it;
 any FETCH of it, any event about it, and `peroxide download-mailbox`
 try again, and success takes it out. It stays listed, with its flags,
 meanwhile.
 
-## How proton-bridge does it
+<!-- nav -->
 
-proton-bridge builds the message the same way from the same pieces
-(pkg/message/build.go), downloads every message at login (its sync's
-download and build stages) and keeps the result in gluon's store, so a
-message is downloaded and decrypted once, ever. It adds `X-Pm-*`
-headers (`X-Pm-Internal-Id`, `X-Pm-External-Id`, `X-Pm-Date`), which
-peroxide doesn't. Its multipart/signed rewrites the signed part's
-header, and names the hash `SHA-256` in `micalg`; peroxide keeps the
-signed part byte for byte and writes `pgp-sha256` (RFC 3156), so the
-signature verifies. bridge checks no signature inside an encrypted
-body, so its clients see none; peroxide writes `X-Peroxide-Signature`.
-An edited draft is built again and replaces the
-stored one under a new UID only if the bytes differ
-(`applyMessageUpdated`); peroxide does the same. Messages that fail
-are kept in its sync status (`FailedMessages`) and not retried by the
-sync; peroxide also retries them on FETCH, events and
-`download-mailbox`.
+---
 
-For a body it can't decrypt, proton-bridge serves the PGP/MIME
-pass-through only for messages without attachments
-(`buildPGPMIMEFallbackRFC822`), and otherwise armored text and
-`.pgp` attachments with a comment (`writeCustomTextPart`,
-`writeCustomAttachmentPart`). peroxide follows that, and in addition
-passes through only mail encrypted to a key you don't hold in Proton:
-mail encrypted to a Proton key peroxide hasn't unlocked yet is shown
-armored, as your own client couldn't open it either, and is built
-again once that key is unlocked.
+[Previous: The local database, events and UIDs](sync.md) | [Contents](../README.md) | [Next: Changing mail: STORE, COPY, MOVE, EXPUNGE, APPEND](changes.md)

@@ -247,7 +247,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-	case "status":
+	case "list":
 		usernames, err := auth.ListUsernames()
 		if err != nil {
 			log.Fatal(err)
